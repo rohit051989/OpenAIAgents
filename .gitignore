@@ -78,5 +78,4 @@ Thumbs.db
 # Project-specific
 basic/__pycache__/
 docs.txt
-OpenAI_Agents_Intro_v1.pptx
-OpenAI_Agents.pptx
+*.pptx
