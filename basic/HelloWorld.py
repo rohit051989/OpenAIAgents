@@ -1,3 +1,14 @@
+"""
+This script demonstrates a basic OpenAI Agent that acts as a Hindi language assistant.
+The agent greets the user and translates the user's message into Hindi (written in English script).
+
+Usage:
+    python HelloWorld.py
+
+Example:
+    User: How is your mood today.
+    Output: Namaste, Apka aaj ka mood kaisa hai?
+"""
 import asyncio
 
 from agents import Agent, Runner

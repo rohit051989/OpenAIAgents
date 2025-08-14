@@ -1,3 +1,15 @@
+"""
+This script demonstrates streaming responses from an OpenAI Agent acting as a Hindi language assistant.
+The agent greets the user and translates the user's message into Hindi (written in English script),
+and streams the response as it is generated.
+
+Usage:
+    python HelloWorldStreamed.py
+
+Example:
+    User: I am learning OpenAI Agents today. Its fun to learn and try streaming mode.
+    Output: Namaste, Main aaj OpenAI Agents seekh raha hoon. Seekhne aur streaming mode try karne mein maza aa raha hai.
+"""
 import asyncio
 
 from openai.types.responses import ResponseTextDeltaEvent
