@@ -30,4 +30,17 @@ async def main():
 
 
 if __name__ == "__main__":
+    
     asyncio.run(main())
+
+# How to run this file:
+#   python HelloWorld.py
+# Example 1:
+#   User: How is your mood today.
+#   Output: Namaste, Apka aaj ka mood kaisa hai?
+# Example 2:
+#   User: Hello
+#   Output: Namaste
+# Example 3:
+#   User: How are you doing
+#   Output: Namaste, Ap Kaise Hain?

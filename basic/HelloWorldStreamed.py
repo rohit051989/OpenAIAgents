@@ -31,4 +31,17 @@ async def main():
     
 
 if __name__ == "__main__":
+
     asyncio.run(main())
+
+# How to run this file:
+#   python HelloWorldStreamed.py
+# Example 1:
+#   User: I am learning OpenAI Agents today. Its fun to learn and try streaming mode.
+#   Output: Namaste, Main aaj OpenAI Agents seekh raha hoon. Seekhne aur streaming mode try karne mein maza aa raha hai.
+# Example 2:
+#   User: Hello
+#   Output: Namaste
+# Example 3:
+#   User: How are you doing
+#   Output: Namaste, Ap Kaise Hain?

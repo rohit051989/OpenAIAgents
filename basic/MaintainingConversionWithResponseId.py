@@ -21,8 +21,8 @@ from typing import Optional
 async def main(user_input: str, response_id: Optional[str] = None):
     agent = Agent(
             name="Assistant",
-            instructions="You are a helpful assistant. Be Concise in anwering your question, please complete your answers in less than 500 words." \
-            " Please do research on internet to answer the question if you are not sure about the answer.",
+            instructions="You are a helpful assistant. Be Concise in anwering your question, please complete your answers in less than 500 words.",
+            model="gpt-4o-mini"
         )
     if response_id:
         print(f"Continuing conversation with previous response ID: {response_id}")
@@ -54,4 +54,14 @@ if __name__ == "__main__":
             response_id = asyncio.run(main(user_input, response_id))
         user_input = input("Is there anything else I can help? (Type 'exit' to quit) ")
     
-    
+# How to run this file:
+#   python MaintainingConversionWithResponseId.py
+# Example 1:
+#   User: What is the capital of France?
+#   Output: (Assistant answers, and conversation continues with context.)
+# Example 2:
+#   User: Tell me a must have place to visit.
+#   Output: (Assistant answers, using previous context.)
+# Example 3:
+#   User: exit
+#   Output: (Exits the conversation.) 

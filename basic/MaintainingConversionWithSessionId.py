@@ -28,21 +28,17 @@ from uuid import uuid4
 async def main(user_input: str, session: SQLiteSession):
     agent = Agent(
             name="Assistant",
-            instructions="You are a helpful assistant. Be Concise in anwering your question, please complete your answers in less than 500 words." \
-            " Please do research on internet to answer the question if you are not sure about the answer.",
+            instructions="You are a helpful assistant. Be Concise in anwering your question, please complete your answers in less than 500 words.",
+            model="gpt-4o-mini"
         )
-    if session:
-        print(f"Continuing conversation with previous session ID: {session.session_id}")
-        result = Runner.run_streamed(
-                agent, 
-                user_input,
-                session=session
-            )
-    else:
-        print(f"Starting a new conversation for session ID: {session.session_id}")
-        result = Runner.run_streamed(agent, user_input)
+    
+    print(f"Continuing conversation with session ID: {session.session_id}")
+    result = Runner.run_streamed(
+            agent, 
+            user_input,
+            session=session
+        )
         
-
     async for event in result.stream_events():
         if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
             print(event.data.delta, end="", flush=True)
@@ -61,4 +57,15 @@ if __name__ == "__main__":
             asyncio.run(main(user_input, session))
         user_input = input("Is there anything else I can help? (Type 'exit' to quit) ")
     
-    
+
+# How to run this file:
+#   python MaintainingConversionWithSessionId.py
+# Example 1:
+#   User: What is the capital of France?
+#   Output: (Assistant answers, and conversation continues with context.)
+# Example 2:
+#   User: Tell me a must have place to visit.
+#   Output: (Assistant answers, using previous context.)
+# Example 3:
+#   User: exit
+#   Output: (Exits the conversation.)   
