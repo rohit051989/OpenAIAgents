@@ -79,3 +79,6 @@ Thumbs.db
 basic/__pycache__/
 docs.txt
 *.pptx
+
+#Local Environment Configuration
+.env
