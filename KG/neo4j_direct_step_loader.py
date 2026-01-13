@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Literal
 import xml.etree.ElementTree as ET
 from neo4j import GraphDatabase
+import os
+from pathlib import Path
 
 # ---------- Model types ----------
 
@@ -39,6 +41,7 @@ class BlockDef:
 class DecisionDef:
     name: str
     decider_bean: str
+    class_name: str = ""  # Class name for the decider bean (if available)
 
 
 @dataclass
@@ -78,29 +81,38 @@ N_BATCH = f"{{{BATCH_NS}}}"
 N_BEANS = f"{{{BEANS_NS}}}"
 
 
-def parse_spring_batch_xml(xml_path: str) -> List[JobDef]:
+def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None) -> List[JobDef]:
+    """
+    Parse Spring Batch XML file and extract job definitions.
     
+    Args:
+        xml_path: Path to the XML file
+        bean_class_map: Optional global bean map. If not provided, will only use beans from this file.
+    """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     job_defs: List[JobDef] = []
 
-    # 1) Map bean id -> class, mainly to enrich listeners (optional)
-    bean_class_map: Dict[str, str] = {}
-    for bean_el in root.findall(f"./{N_BEANS}bean"):
-        bid = bean_el.get("id")
-        bclass = bean_el.get("class", "")
-        if bid:
-            bean_class_map[bid] = bclass
+    # If no global bean map provided, create a local one (for backward compatibility)
+    if bean_class_map is None:
+        bean_class_map = {}
+        for bean_el in root.findall(f"./{N_BEANS}bean"):
+            bid = bean_el.get("id")
+            bclass = bean_el.get("class", "")
+            if bid:
+                bean_class_map[bid] = bclass
 
-    # 2) Find the job (assume single job for now)
+    # Find the job
     job_els = root.findall(f".//{N_BATCH}job")
     if not job_els:
-        raise ValueError("No <batch:job> found in XML")
+        print(f"No <batch:job> found in XML: {xml_path}")
+        return job_defs
+    else:
+        print(f"Found {len(job_els)} <batch:job>(s) in XML: {xml_path}")
+        for job_el in job_els:
+            job_defs.append(parse_job_defination(job_el, root, bean_class_map))        
 
-    for job_el in job_els:
-        job_defs.append(parse_job_defination(job_el, root, bean_class_map))        
-
-    return job_defs
+        return job_defs
 
 def parse_job_defination(job_el, root, bean_class_map) -> JobDef:
     # For now, just pick the first job
@@ -146,7 +158,7 @@ def parse_global_flows(root: ET.Element, job: JobDef, bean_class_map: Dict[str, 
                 did = child.get("id")
                 if not did:
                     continue
-                parse_decision_element(child, job)
+                parse_decision_element(child, job, bean_class_map)
                 if first_node_id is None:
                     first_node_id = did
                     first_node_kind = "decision"
@@ -231,7 +243,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             did = child.get("id")
             if not did:
                 continue
-            parse_decision_element(child, job)
+            parse_decision_element(child, job, bean_class_map)
             # We do NOT add decision to CONTAINS; it's only in PRECEDES graph.
 
 
@@ -280,14 +292,17 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
             )
 
 
-def parse_decision_element(dec_el: ET.Element, job: JobDef) -> None:
+def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
     did = dec_el.get("id")
     decider = dec_el.get("decider") or ""
     if not did:
         return
 
+    # Resolve decider class name from bean map
+    class_name = bean_class_map.get(decider, "") if decider else ""
+
     if did not in job.decisions:
-        job.decisions[did] = DecisionDef(name=did, decider_bean=decider)
+        job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name)
 
     # Nested <next on="..." to="...">
     for next_el in dec_el.findall(f"{N_BATCH}next"):
@@ -357,7 +372,7 @@ def parse_split_element(split_el: ET.Element, job: JobDef, bean_class_map: Dict[
                 did = child.get("id")
                 if not did:
                     continue
-                parse_decision_element(child, job)
+                parse_decision_element(child, job, bean_class_map)
                 if first_node_id is None:
                     first_node_id = did
                     first_node_kind = "decision"
@@ -406,8 +421,8 @@ def generate_cypher(job: JobDef) -> str:
     # Decisions
     for dec in job.decisions.values():
         lines.append(
-            "MERGE (:Decision {name: '%s', deciderBean: '%s'});" %
-            (dec.name, dec.decider_bean)
+            "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s'});" %
+            (dec.name, dec.decider_bean, dec.class_name)
         )
 
     # Listeners
@@ -523,19 +538,156 @@ def execute_cypher_statements(uri: str, user: str, password: str, cypher: str) -
             session.run(stmt)
     driver.close()
 
+
+def find_xml_files(directory: str) -> List[str]:
+    """Recursively find all XML files in directory and subdirectories, excluding pom.xml"""
+    xml_files = []
+    directory_path = Path(directory)
+    
+    if not directory_path.exists():
+        raise ValueError(f"Directory does not exist: {directory}")
+    
+    if not directory_path.is_dir():
+        raise ValueError(f"Path is not a directory: {directory}")
+    
+    # Recursively find all XML files
+    for xml_file in directory_path.rglob("*.xml"):
+        # Exclude pom.xml files
+        if xml_file.name.lower() != "pom.xml":
+            xml_files.append(str(xml_file))
+    
+    return xml_files
+
+
+def extract_bean_definitions(xml_path: str) -> Dict[str, str]:
+    """
+    Extract bean definitions from an XML file.
+    
+    Args:
+        xml_path: Path to the XML file
+        
+    Returns:
+        Dictionary mapping bean ID to class name
+    """
+    bean_map: Dict[str, str] = {}
+    
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        
+        # Extract all bean definitions
+        for bean_el in root.findall(f".//{N_BEANS}bean"):
+            bean_id = bean_el.get("id")
+            bean_class = bean_el.get("class", "")
+            if bean_id and bean_class:
+                bean_map[bean_id] = bean_class
+        
+        return bean_map
+    except Exception as e:
+        print(f"  Warning: Failed to extract beans from {xml_path}: {e}")
+        return bean_map
+
+
+def build_global_bean_map(xml_files: List[str]) -> Dict[str, str]:
+    """
+    Build a global bean map from all XML files (first pass).
+    
+    Args:
+        xml_files: List of XML file paths
+        
+    Returns:
+        Dictionary mapping bean ID to class name across all files
+    """
+    global_bean_map: Dict[str, str] = {}
+    
+    print("\n=== First Pass: Building Global Bean Map ===")
+    for xml_file in xml_files:
+        bean_map = extract_bean_definitions(xml_file)
+        if bean_map:
+            print(f"  {os.path.basename(xml_file)}: Found {len(bean_map)} bean(s)")
+            # Merge into global map, with warning on duplicates
+            for bean_id, bean_class in bean_map.items():
+                if bean_id in global_bean_map and global_bean_map[bean_id] != bean_class:
+                    print(f"    Warning: Bean ID '{bean_id}' redefined. "
+                          f"Previous: {global_bean_map[bean_id]}, New: {bean_class}")
+                global_bean_map[bean_id] = bean_class
+    
+    print(f"\nGlobal bean map built: {len(global_bean_map)} unique bean(s)")
+    return global_bean_map
+
+
+def parse_directory(directory: str) -> List[JobDef]:
+    """
+    Parse all XML files in directory and subdirectories, returning a single merged JobDef.
+    Uses a two-pass approach:
+    1. First pass: Build global bean map from all XML files
+    2. Second pass: Parse batch jobs using the global bean map
+    
+    This ensures bean references across different XML files are resolved correctly.
+    """
+    xml_files = find_xml_files(directory)
+    
+    if not xml_files:
+        raise ValueError(f"No XML files found in directory: {directory}")
+    
+    print(f"Found {len(xml_files)} XML file(s) to parse:")
+    for xml_file in xml_files:
+        print(f"  - {xml_file}")
+    
+    # FIRST PASS: Build global bean map from all XML files
+    global_bean_map = build_global_bean_map(xml_files)
+    
+    # SECOND PASS: Parse batch jobs using the global bean map
+    print("\n=== Second Pass: Parsing Batch Jobs ===")
+    all_job_defs = []
+    
+    for xml_file in xml_files:
+        try:
+            print(f"\nParsing: {os.path.basename(xml_file)}")
+            job_defs = parse_spring_batch_xml(xml_file, global_bean_map)
+            all_job_defs.extend(job_defs)
+            print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
+            
+            # Show which beans were resolved for steps and decisions in this file
+            #for job in job_defs:
+            #    resolved_steps = sum(1 for step in job.steps.values() if step.class_name)
+            #    resolved_decisions = sum(1 for dec in job.decisions.values() if dec.class_name)
+            #    if resolved_steps > 0 or resolved_decisions > 0:
+            #        print(f"    Job '{job.name}': Resolved {resolved_steps}/{len(job.steps)} step bean(s), "
+            #              f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
+        except Exception as e:
+            print(f"  Warning: Failed to parse {xml_file}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    if not all_job_defs:
+        raise ValueError(f"No valid job definitions found in directory: {directory}")
+    
+    
+    print(f"Total jobs found: {len(all_job_defs)}")
+    print(f"Job names: {[j.name for j in all_job_defs]}") 
+     
+    return all_job_defs
+
+
 # ---------- Example entry point ----------
 
 if __name__ == "__main__":
-    # Point this to your Spring Batch XML file (the toy XML or a real one)
-    xml_file = "sample_data/spring-batch-sample.xml"
+    # Point this to your directory containing Spring Batch XML files
+    # Can use single file or directory
+    xml_directory = "sample_data"  # Change this to your directory path
     uri = "bolt://localhost:7687"
     user = "neo4j"
     password = "Welcome@321"
 
-    job_def = parse_spring_batch_xml(xml_file)
-    cypher = generate_cypher(job_def[0])
-    print(cypher)
-    execute_cypher_statements(uri, user, password, cypher)
+    # Parse all XML files in directory and merge into single JobDef
+    job_defs = parse_directory(xml_directory)
+    print(f"\nParsed and merged job definitions: {job_defs}")
+    # Generate and optionally execute Cypher statements
+    # cypher = generate_cypher(job_def)
+    # print(cypher)
+    # execute_cypher_statements(uri, user, password, cypher)
     
     # For now just print; you can paste into Neo4j Browser,
     # or execute via neo4j Python driver.
