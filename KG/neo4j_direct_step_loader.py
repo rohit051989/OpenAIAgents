@@ -180,6 +180,11 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             if not ref:
                 continue
             impl_class = bean_class_map.get(ref, "")
+            
+            # Flag if bean reference exists but class not found
+            if ref and not impl_class:
+                print(f"    ⚠️  Warning: Listener references bean '{ref}' but class not found in bean definitions")
+            
             job.listeners[ref] = ListenerDef(
                 name=ref,
                 scope="JOB",
@@ -257,6 +262,11 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
     tasklet_el = step_el.find(f"{N_BATCH}tasklet")
     impl_ref = tasklet_el.get("ref") if tasklet_el is not None else ""
     class_name = bean_class_map.get(impl_ref, "") if impl_ref else ""
+    
+    # Flag if bean reference exists but class not found
+    if impl_ref and not class_name:
+        print(f"    ⚠️  Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
+    
     if sid not in job.steps:
         job.steps[sid] = StepDef(
             name=sid,
@@ -300,6 +310,10 @@ def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict
 
     # Resolve decider class name from bean map
     class_name = bean_class_map.get(decider, "") if decider else ""
+    
+    # Flag if bean reference exists but class not found
+    if decider and not class_name:
+        print(f"    ⚠️  Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
 
     if did not in job.decisions:
         job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name)
@@ -637,6 +651,7 @@ def parse_directory(directory: str) -> List[JobDef]:
     # FIRST PASS: Build global bean map from all XML files
     global_bean_map = build_global_bean_map(xml_files)
     
+    print(f"\nTotal beans in global map: {len(global_bean_map)}")
     # SECOND PASS: Parse batch jobs using the global bean map
     print("\n=== Second Pass: Parsing Batch Jobs ===")
     all_job_defs = []
@@ -649,12 +664,18 @@ def parse_directory(directory: str) -> List[JobDef]:
             print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
             
             # Show which beans were resolved for steps and decisions in this file
-            #for job in job_defs:
-            #    resolved_steps = sum(1 for step in job.steps.values() if step.class_name)
-            #    resolved_decisions = sum(1 for dec in job.decisions.values() if dec.class_name)
-            #    if resolved_steps > 0 or resolved_decisions > 0:
-            #        print(f"    Job '{job.name}': Resolved {resolved_steps}/{len(job.steps)} step bean(s), "
-            #              f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
+            for job in job_defs:
+                resolved_steps = sum(1 for step in job.steps.values() if step.class_name)
+                resolved_decisions = sum(1 for dec in job.decisions.values() if dec.class_name)
+                unresolved_steps = sum(1 for step in job.steps.values() if step.impl_bean and not step.class_name)
+                unresolved_decisions = sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name)
+                if resolved_steps > 0 or resolved_decisions > 0 or unresolved_steps > 0 or unresolved_decisions > 0:
+                    print(f"    Job '{job.name}': Resolved {resolved_steps}/{len(job.steps)} step bean(s), "
+                          f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
+                    if unresolved_steps > 0:
+                        print(f"      ⚠️  {unresolved_steps} unresolved step bean(s)")
+                    if unresolved_decisions > 0:
+                        print(f"      ⚠️  {unresolved_decisions} unresolved decision bean(s)")
         except Exception as e:
             print(f"  Warning: Failed to parse {xml_file}: {e}")
             import traceback
@@ -664,9 +685,47 @@ def parse_directory(directory: str) -> List[JobDef]:
     if not all_job_defs:
         raise ValueError(f"No valid job definitions found in directory: {directory}")
     
-    
+    print(f"\n=== Summary ===")
     print(f"Total jobs found: {len(all_job_defs)}")
-    print(f"Job names: {[j.name for j in all_job_defs]}") 
+    print(f"Job names: {[j.name for j in all_job_defs]}")
+    
+    # Calculate overall statistics
+    total_steps = sum(len(job.steps) for job in all_job_defs)
+    total_decisions = sum(len(job.decisions) for job in all_job_defs)
+    total_listeners = sum(len(job.listeners) for job in all_job_defs)
+    resolved_steps = sum(sum(1 for step in job.steps.values() if step.class_name) for job in all_job_defs)
+    resolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.class_name) for job in all_job_defs)
+    unresolved_steps = sum(sum(1 for step in job.steps.values() if step.impl_bean and not step.class_name) for job in all_job_defs)
+    unresolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name) for job in all_job_defs)
+    
+    print(f"\nTotal Steps: {total_steps} (Resolved: {resolved_steps}, Unresolved: {unresolved_steps})")
+    print(f"Total Decisions: {total_decisions} (Resolved: {resolved_decisions}, Unresolved: {unresolved_decisions})")
+    print(f"Total Listeners: {total_listeners}")
+    
+    if unresolved_steps > 0 or unresolved_decisions > 0:
+        print(f"\n⚠️  There are unresolved bean references. Check the warnings above for details.")
+        
+        # Print list of steps with unresolved beans
+        if unresolved_steps > 0:
+            print(f"\n⚠️  Steps with unresolved bean references:")
+            for job in all_job_defs:
+                unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values() 
+                                       if step.impl_bean and not step.class_name]
+                if unresolved_step_list:
+                    print(f"  Job '{job.name}':")
+                    for step_name, bean_ref in unresolved_step_list:
+                        print(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
+        
+        # Print list of decisions with unresolved beans
+        if unresolved_decisions > 0:
+            print(f"\n⚠️  Decisions with unresolved bean references:")
+            for job in all_job_defs:
+                unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values() 
+                                           if dec.decider_bean and not dec.class_name]
+                if unresolved_decision_list:
+                    print(f"  Job '{job.name}':")
+                    for dec_name, bean_ref in unresolved_decision_list:
+                        print(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
      
     return all_job_defs
 
