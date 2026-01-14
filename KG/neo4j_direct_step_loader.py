@@ -55,6 +55,7 @@ class PrecedesEdge:
 @dataclass
 class JobDef:
     name: str
+    source_file: str = ""  # Path to the XML file this job was parsed from
 
     steps: Dict[str, StepDef] = field(default_factory=dict)
     blocks: Dict[str, BlockDef] = field(default_factory=dict)
@@ -110,14 +111,14 @@ def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None)
     else:
         print(f"Found {len(job_els)} <batch:job>(s) in XML: {xml_path}")
         for job_el in job_els:
-            job_defs.append(parse_job_defination(job_el, root, bean_class_map))        
+            job_defs.append(parse_job_defination(job_el, root, bean_class_map, xml_path))        
 
         return job_defs
 
-def parse_job_defination(job_el, root, bean_class_map) -> JobDef:
+def parse_job_defination(job_el, root, bean_class_map, xml_path: str = "") -> JobDef:
     # For now, just pick the first job
     job_id = job_el.get("id", "UNKNOWN_JOB")
-    job = JobDef(name=job_id)
+    job = JobDef(name=job_id, source_file=xml_path)
 
     # 3) Parse global flows (top-level <batch:flow> directly under <beans>)
     parse_global_flows(root, job, bean_class_map)
@@ -415,8 +416,9 @@ def normalize_flow_aliases(job: JobDef) -> None:
 def generate_cypher(job: JobDef) -> str:
     lines: List[str] = []
 
-    # Job
-    #lines.append(f"MERGE (:Job {{name: '{job.name}'}});")
+    # Job - Create Job node with source file path
+    source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher
+    lines.append(f"MERGE (:Job {{name: '{job.name}', sourceFile: '{source_file}'}});")
 
     # Steps
     for step in job.steps.values():
@@ -661,7 +663,10 @@ def parse_directory(directory: str) -> List[JobDef]:
             print(f"\nParsing: {os.path.basename(xml_file)}")
             job_defs = parse_spring_batch_xml(xml_file, global_bean_map)
             all_job_defs.extend(job_defs)
-            print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
+            if job_defs:
+                print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
+            else:
+                print(f"  No batch jobs found")
             
             # Show which beans were resolved for steps and decisions in this file
             for job in job_defs:
@@ -687,7 +692,9 @@ def parse_directory(directory: str) -> List[JobDef]:
     
     print(f"\n=== Summary ===")
     print(f"Total jobs found: {len(all_job_defs)}")
-    print(f"Job names: {[j.name for j in all_job_defs]}")
+    print(f"Job details:")
+    for job in all_job_defs:
+        print(f"  - '{job.name}' from {os.path.basename(job.source_file)}")
     
     # Calculate overall statistics
     total_steps = sum(len(job.steps) for job in all_job_defs)
@@ -712,7 +719,7 @@ def parse_directory(directory: str) -> List[JobDef]:
                 unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values() 
                                        if step.impl_bean and not step.class_name]
                 if unresolved_step_list:
-                    print(f"  Job '{job.name}':")
+                    print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, bean_ref in unresolved_step_list:
                         print(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
         
@@ -723,7 +730,7 @@ def parse_directory(directory: str) -> List[JobDef]:
                 unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values() 
                                            if dec.decider_bean and not dec.class_name]
                 if unresolved_decision_list:
-                    print(f"  Job '{job.name}':")
+                    print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for dec_name, bean_ref in unresolved_decision_list:
                         print(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
      
@@ -744,7 +751,7 @@ if __name__ == "__main__":
     job_defs = parse_directory(xml_directory)
     print(f"\nParsed and merged job definitions: {job_defs}")
     # Generate and optionally execute Cypher statements
-    # cypher = generate_cypher(job_def)
+    cypher = generate_cypher(job_defs[0])
     # print(cypher)
     # execute_cypher_statements(uri, user, password, cypher)
     
