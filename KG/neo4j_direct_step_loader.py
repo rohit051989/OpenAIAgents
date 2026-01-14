@@ -21,9 +21,18 @@ class ListenerDef:
 @dataclass
 class StepDef:
     name: str
-    step_kind: str      # "TASKLET", "CHUNK", etc. (we default to TASKLET for now)
-    impl_bean: str      # tasklet ref bean name
-    class_name: str     # Class  name for the ref bean (if available)
+    step_kind: str      # "TASKLET", "CHUNK", etc.
+    impl_bean: str      # tasklet ref bean name (for TASKLET steps)
+    class_name: str     # Class name for the ref bean (if available)
+    
+    # For CHUNK steps
+    reader_bean: str = ""     # Reader bean reference
+    reader_class: str = ""    # Reader bean class name
+    processor_bean: str = "" # Processor bean reference
+    processor_class: str = "" # Processor bean class name
+    writer_bean: str = ""     # Writer bean reference
+    writer_class: str = ""    # Writer bean class name
+    
     listener_names: List[str] = field(default_factory=list)
 
 
@@ -258,23 +267,66 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
     if not sid:
         return
 
-    # StepKind: for now treat everything as TASKLET unless we detect <chunk>
-    step_kind = "TASKLET"
+    # Find tasklet element
     tasklet_el = step_el.find(f"{N_BATCH}tasklet")
-    impl_ref = tasklet_el.get("ref") if tasklet_el is not None else ""
-    class_name = bean_class_map.get(impl_ref, "") if impl_ref else ""
+    if tasklet_el is None:
+        return
     
-    # Flag if bean reference exists but class not found
-    if impl_ref and not class_name:
-        print(f"    ⚠️  Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
+    # Check if it's a chunk-based step or tasklet-based step
+    chunk_el = tasklet_el.find(f"{N_BATCH}chunk")
     
-    if sid not in job.steps:
-        job.steps[sid] = StepDef(
-            name=sid,
-            step_kind=step_kind,
-            impl_bean=impl_ref or sid,
-            class_name=class_name,
-        )
+    if chunk_el is not None:
+        # CHUNK-based step
+        step_kind = "CHUNK"
+        
+        # Extract reader, processor, writer references
+        reader_bean = chunk_el.get("reader", "")
+        processor_bean = chunk_el.get("processor", "")
+        writer_bean = chunk_el.get("writer", "")
+        
+        # Resolve class names from bean map
+        reader_class = bean_class_map.get(reader_bean, "") if reader_bean else ""
+        processor_class = bean_class_map.get(processor_bean, "") if processor_bean else ""
+        writer_class = bean_class_map.get(writer_bean, "") if writer_bean else ""
+        
+        # Flag unresolved bean references
+        if reader_bean and not reader_class:
+            print(f"    ⚠️  Warning: Step '{sid}' reader references bean '{reader_bean}' but class not found")
+        if processor_bean and not processor_class:
+            print(f"    ⚠️  Warning: Step '{sid}' processor references bean '{processor_bean}' but class not found")
+        if writer_bean and not writer_class:
+            print(f"    ⚠️  Warning: Step '{sid}' writer references bean '{writer_bean}' but class not found")
+        
+        if sid not in job.steps:
+            job.steps[sid] = StepDef(
+                name=sid,
+                step_kind=step_kind,
+                impl_bean="",  # Not used for chunk steps
+                class_name="",  # Not used for chunk steps
+                reader_bean=reader_bean,
+                reader_class=reader_class,
+                processor_bean=processor_bean,
+                processor_class=processor_class,
+                writer_bean=writer_bean,
+                writer_class=writer_class,
+            )
+    else:
+        # TASKLET-based step
+        step_kind = "TASKLET"
+        impl_ref = tasklet_el.get("ref", "")
+        class_name = bean_class_map.get(impl_ref, "") if impl_ref else ""
+        
+        # Flag if bean reference exists but class not found
+        if impl_ref and not class_name:
+            print(f"    ⚠️  Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
+        
+        if sid not in job.steps:
+            job.steps[sid] = StepDef(
+                name=sid,
+                step_kind=step_kind,
+                impl_bean=impl_ref or sid,
+                class_name=class_name,
+            )
 
     # next="..." attribute
     next_attr = step_el.get("next")
@@ -422,10 +474,24 @@ def generate_cypher(job: JobDef) -> str:
 
     # Steps
     for step in job.steps.values():
-        lines.append(
-            "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s'});" %
-            (step.name, step.step_kind, step.impl_bean, step.class_name)
-        )
+        if step.step_kind == "CHUNK":
+            # For chunk-based steps, create step with reader, processor, writer info
+            lines.append(
+                "MERGE (:Step {name: '%s', stepKind: '%s', "
+                "readerBean: '%s', readerClass: '%s', "
+                "processorBean: '%s', processorClass: '%s', "
+                "writerBean: '%s', writerClass: '%s'});" %
+                (step.name, step.step_kind,
+                 step.reader_bean, step.reader_class,
+                 step.processor_bean, step.processor_class,
+                 step.writer_bean, step.writer_class)
+            )
+        else:
+            # For tasklet-based steps
+            lines.append(
+                "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s'});" %
+                (step.name, step.step_kind, step.impl_bean, step.class_name)
+            )
 
     # Blocks
     for block in job.blocks.values():
@@ -670,15 +736,45 @@ def parse_directory(directory: str) -> List[JobDef]:
             
             # Show which beans were resolved for steps and decisions in this file
             for job in job_defs:
-                resolved_steps = sum(1 for step in job.steps.values() if step.class_name)
+                # Count resolved beans for tasklet steps
+                tasklet_steps = [s for s in job.steps.values() if s.step_kind == "TASKLET"]
+                chunk_steps = [s for s in job.steps.values() if s.step_kind == "CHUNK"]
+                
+                resolved_tasklet_steps = sum(1 for step in tasklet_steps if step.class_name)
+                unresolved_tasklet_steps = sum(1 for step in tasklet_steps if step.impl_bean and not step.class_name)
+                
+                # For chunk steps, count if all three beans are resolved
+                resolved_chunk_steps = sum(1 for step in chunk_steps 
+                                          if (not step.reader_bean or step.reader_class) and
+                                             (not step.processor_bean or step.processor_class) and
+                                             (not step.writer_bean or step.writer_class))
+                unresolved_chunk_beans = sum(
+                    (1 if step.reader_bean and not step.reader_class else 0) +
+                    (1 if step.processor_bean and not step.processor_class else 0) +
+                    (1 if step.writer_bean and not step.writer_class else 0)
+                    for step in chunk_steps
+                )
+                
                 resolved_decisions = sum(1 for dec in job.decisions.values() if dec.class_name)
-                unresolved_steps = sum(1 for step in job.steps.values() if step.impl_bean and not step.class_name)
                 unresolved_decisions = sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name)
-                if resolved_steps > 0 or resolved_decisions > 0 or unresolved_steps > 0 or unresolved_decisions > 0:
-                    print(f"    Job '{job.name}': Resolved {resolved_steps}/{len(job.steps)} step bean(s), "
+                
+                total_steps = len(job.steps)
+                if total_steps > 0 or resolved_decisions > 0 or unresolved_decisions > 0:
+                    msg_parts = []
+                    if tasklet_steps:
+                        msg_parts.append(f"{resolved_tasklet_steps}/{len(tasklet_steps)} tasklet step bean(s)")
+                    if chunk_steps:
+                        msg_parts.append(f"{resolved_chunk_steps}/{len(chunk_steps)} chunk step(s)")
+                    if unresolved_chunk_beans > 0:
+                        msg_parts.append(f"{unresolved_chunk_beans} unresolved chunk bean(s)")
+                    
+                    print(f"    Job '{job.name}': Resolved {', '.join(msg_parts)}, "
                           f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
-                    if unresolved_steps > 0:
-                        print(f"      ⚠️  {unresolved_steps} unresolved step bean(s)")
+                    
+                    if unresolved_tasklet_steps > 0:
+                        print(f"      ⚠️  {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
+                    if unresolved_chunk_beans > 0:
+                        print(f"      ⚠️  {unresolved_chunk_beans} unresolved chunk bean reference(s)")
                     if unresolved_decisions > 0:
                         print(f"      ⚠️  {unresolved_decisions} unresolved decision bean(s)")
         except Exception as e:
@@ -698,30 +794,76 @@ def parse_directory(directory: str) -> List[JobDef]:
     
     # Calculate overall statistics
     total_steps = sum(len(job.steps) for job in all_job_defs)
+    total_tasklet_steps = sum(sum(1 for s in job.steps.values() if s.step_kind == "TASKLET") for job in all_job_defs)
+    total_chunk_steps = sum(sum(1 for s in job.steps.values() if s.step_kind == "CHUNK") for job in all_job_defs)
     total_decisions = sum(len(job.decisions) for job in all_job_defs)
     total_listeners = sum(len(job.listeners) for job in all_job_defs)
-    resolved_steps = sum(sum(1 for step in job.steps.values() if step.class_name) for job in all_job_defs)
+    
+    resolved_tasklet_steps = sum(
+        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.class_name) 
+        for job in all_job_defs
+    )
+    unresolved_tasklet_steps = sum(
+        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name) 
+        for job in all_job_defs
+    )
+    
+    # For chunk steps, count unresolved beans
+    unresolved_chunk_beans = sum(
+        sum(
+            (1 if step.reader_bean and not step.reader_class else 0) +
+            (1 if step.processor_bean and not step.processor_class else 0) +
+            (1 if step.writer_bean and not step.writer_class else 0)
+            for step in job.steps.values() if step.step_kind == "CHUNK"
+        )
+        for job in all_job_defs
+    )
+    
     resolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.class_name) for job in all_job_defs)
-    unresolved_steps = sum(sum(1 for step in job.steps.values() if step.impl_bean and not step.class_name) for job in all_job_defs)
     unresolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name) for job in all_job_defs)
     
-    print(f"\nTotal Steps: {total_steps} (Resolved: {resolved_steps}, Unresolved: {unresolved_steps})")
+    print(f"\nTotal Steps: {total_steps} (Tasklet: {total_tasklet_steps}, Chunk: {total_chunk_steps})")
+    print(f"  Tasklet Steps - Resolved: {resolved_tasklet_steps}, Unresolved: {unresolved_tasklet_steps}")
+    if total_chunk_steps > 0:
+        print(f"  Chunk Steps: {total_chunk_steps} (Unresolved beans: {unresolved_chunk_beans})")
     print(f"Total Decisions: {total_decisions} (Resolved: {resolved_decisions}, Unresolved: {unresolved_decisions})")
     print(f"Total Listeners: {total_listeners}")
     
-    if unresolved_steps > 0 or unresolved_decisions > 0:
+    if unresolved_tasklet_steps > 0 or unresolved_chunk_beans > 0 or unresolved_decisions > 0:
         print(f"\n⚠️  There are unresolved bean references. Check the warnings above for details.")
         
-        # Print list of steps with unresolved beans
-        if unresolved_steps > 0:
-            print(f"\n⚠️  Steps with unresolved bean references:")
+        # Print list of tasklet steps with unresolved beans
+        if unresolved_tasklet_steps > 0:
+            print(f"\n⚠️  Tasklet Steps with unresolved bean references:")
             for job in all_job_defs:
                 unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values() 
-                                       if step.impl_bean and not step.class_name]
+                                       if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name]
                 if unresolved_step_list:
                     print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, bean_ref in unresolved_step_list:
                         print(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
+        
+        # Print list of chunk steps with unresolved beans
+        if unresolved_chunk_beans > 0:
+            print(f"\n⚠️  Chunk Steps with unresolved bean references:")
+            for job in all_job_defs:
+                chunk_steps_with_issues = []
+                for step in job.steps.values():
+                    if step.step_kind == "CHUNK":
+                        unresolved = []
+                        if step.reader_bean and not step.reader_class:
+                            unresolved.append(f"reader='{step.reader_bean}'")
+                        if step.processor_bean and not step.processor_class:
+                            unresolved.append(f"processor='{step.processor_bean}'")
+                        if step.writer_bean and not step.writer_class:
+                            unresolved.append(f"writer='{step.writer_bean}'")
+                        if unresolved:
+                            chunk_steps_with_issues.append((step.name, unresolved))
+                
+                if chunk_steps_with_issues:
+                    print(f"  Job '{job.name}' (from: {job.source_file}):")
+                    for step_name, unresolved_list in chunk_steps_with_issues:
+                        print(f"    - Step '{step_name}' -> {', '.join(unresolved_list)}")
         
         # Print list of decisions with unresolved beans
         if unresolved_decisions > 0:
