@@ -712,7 +712,8 @@ def find_project_root(xml_path: str) -> str:
     return ""
 
 
-def find_java_source_file(class_name: str, project_root: str, root_scan_directory: str = "") -> str:
+def find_java_source_file(class_name: str, project_root: str, root_scan_directory: str = "", 
+                          root_search_cache: Dict[str, str] = None) -> str:
     """
     Find the Java source file for a given class name in the project.
     
@@ -720,11 +721,17 @@ def find_java_source_file(class_name: str, project_root: str, root_scan_director
         class_name: Fully qualified class name (e.g., "com.example.MyClass")
         project_root: Path to the project root directory
         root_scan_directory: Optional root directory containing multiple projects for fallback search
+        root_search_cache: Optional cache dict to store root directory search results (class_name -> source_path)
         
     Returns:
         Path to the Java source file, or empty string if not found
     """
     if not class_name or not project_root:
+        return ""
+    
+    # Skip searching for external library classes (Spring, Java standard library, etc.)
+    # Only search for classes in 'com.*' package (typical business code)
+    if not class_name.startswith("com."):
         return ""
     
     # Convert class name to file path
@@ -759,6 +766,15 @@ def find_java_source_file(class_name: str, project_root: str, root_scan_director
     # Last resort: search in root_scan_directory if provided
     # (for multi-repo scenarios where bean class may be in different application)
     if root_scan_directory and root_scan_directory != project_root:
+        # Check cache first to avoid redundant root directory searches
+        if root_search_cache is not None and class_name in root_search_cache:
+            cached_path = root_search_cache[class_name]
+            if cached_path:  # Non-empty means found in previous search
+                print(f"      Using cached path for {class_name}: {cached_path}")
+                return cached_path
+            else:  # Empty string means we already searched and didn't find it
+                return ""
+        
         try:
             root_path = Path(root_scan_directory)
             if root_path.exists() and root_path.is_dir():
@@ -766,21 +782,31 @@ def find_java_source_file(class_name: str, project_root: str, root_scan_director
                 for java_file in root_path.rglob(class_path):
                     # Exclude common build/target directories and test directories
                     if not any(part in java_file.parts for part in ['target', 'build', '.git', '.mvn', 'test']):
-                        print(f"      Found in different project: {java_file}")
-                        return str(java_file)
+                        found_path = str(java_file)
+                        print(f"      Found in different project: {found_path}")
+                        # Cache the successful find
+                        if root_search_cache is not None:
+                            root_search_cache[class_name] = found_path
+                        return found_path
+                
+                # Not found - cache the negative result to avoid re-searching
+                if root_search_cache is not None:
+                    root_search_cache[class_name] = ""
         except Exception as e:
             print(f"      Warning: Error during root directory search: {e}")
     
     return ""
 
 
-def extract_bean_definitions(xml_path: str, root_scan_directory: str = "") -> Dict[str, tuple[str, str]]:
+def extract_bean_definitions(xml_path: str, root_scan_directory: str = "", 
+                            root_search_cache: Dict[str, str] = None) -> Dict[str, tuple[str, str]]:
     """
     Extract bean definitions from an XML file.
     
     Args:
         xml_path: Path to the XML file
         root_scan_directory: Optional root directory containing multiple projects for fallback search
+        root_search_cache: Optional cache dict to store root directory search results
         
     Returns:
         Dictionary mapping bean ID to tuple of (class_name, source_path)
@@ -805,7 +831,7 @@ def extract_bean_definitions(xml_path: str, root_scan_directory: str = "") -> Di
                 # Try to find the Java source file
                 source_path = ""
                 if project_root:
-                    source_path = find_java_source_file(bean_class, project_root, root_scan_directory)
+                    source_path = find_java_source_file(bean_class, project_root, root_scan_directory, root_search_cache)
                 
                 if not source_path:
                     beans_without_source.append((bean_id, bean_class))
@@ -837,9 +863,13 @@ def build_global_bean_map(xml_files: List[str], root_scan_directory: str = "") -
     """
     global_bean_map: Dict[str, tuple[str, str]] = {}
     
+    # Create cache for root directory search results to avoid redundant searches
+    # Maps class_name -> source_path (empty string means searched but not found)
+    root_search_cache: Dict[str, str] = {}
+    
     print("\n=== First Pass: Building Global Bean Map ===")
     for xml_file in xml_files:
-        bean_map = extract_bean_definitions(xml_file, root_scan_directory)
+        bean_map = extract_bean_definitions(xml_file, root_scan_directory, root_search_cache)
         if bean_map:
             # Count how many have source paths
             with_source = sum(1 for _, source_path in bean_map.values() if source_path)
@@ -854,6 +884,13 @@ def build_global_bean_map(xml_files: List[str], root_scan_directory: str = "") -
     
     total_with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
     print(f"\nGlobal bean map built: {len(global_bean_map)} unique bean(s), {total_with_source} with source paths")
+    
+    # Report cache statistics
+    cache_hits = sum(1 for path in root_search_cache.values() if path)
+    cache_misses = sum(1 for path in root_search_cache.values() if not path)
+    if root_search_cache:
+        print(f"Root directory search cache: {cache_hits} found, {cache_misses} not found (total cached lookups: {len(root_search_cache)})")
+    
     return global_bean_map
 
 
