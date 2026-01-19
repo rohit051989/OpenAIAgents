@@ -769,6 +769,9 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
         # Find project root for this XML file
         project_root = find_project_root(xml_path)
         
+        # Track beans without source paths
+        beans_without_source: List[tuple[str, str]] = []
+        
         # Extract all bean definitions
         for bean_el in root.findall(f".//{N_BEANS}bean"):
             bean_id = bean_el.get("id")
@@ -779,7 +782,16 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
                 if project_root:
                     source_path = find_java_source_file(bean_class, project_root)
                 
+                if not source_path:
+                    beans_without_source.append((bean_id, bean_class))
+                
                 bean_map[bean_id] = (bean_class, source_path)
+        
+        # Report beans without source paths
+        if beans_without_source:
+            print(f"    ⚠️  {len(beans_without_source)} bean(s) without source path:")
+            for bean_id, bean_class in beans_without_source:
+                print(f"       - Bean '{bean_id}' -> Class '{bean_class}'")
         
         return bean_map
     except Exception as e:
