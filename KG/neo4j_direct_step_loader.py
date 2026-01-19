@@ -202,7 +202,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             
             # Flag if bean reference exists but class not found
             if ref and not impl_class:
-                print(f"    ⚠️  Warning: Listener references bean '{ref}' but class not found in bean definitions")
+                print(f"Warning: Listener references bean '{ref}' but class not found in bean definitions")
             
             job.listeners[ref] = ListenerDef(
                 name=ref,
@@ -308,11 +308,11 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         
         # Flag unresolved bean references
         if reader_bean and not reader_class:
-            print(f"    ⚠️  Warning: Step '{sid}' reader references bean '{reader_bean}' but class not found")
+            print(f"Warning: Step '{sid}' reader references bean '{reader_bean}' but class not found")
         if processor_bean and not processor_class:
-            print(f"    ⚠️  Warning: Step '{sid}' processor references bean '{processor_bean}' but class not found")
+            print(f"Warning: Step '{sid}' processor references bean '{processor_bean}' but class not found")
         if writer_bean and not writer_class:
-            print(f"    ⚠️  Warning: Step '{sid}' writer references bean '{writer_bean}' but class not found")
+            print(f"Warning: Step '{sid}' writer references bean '{writer_bean}' but class not found")
         
         if sid not in job.steps:
             job.steps[sid] = StepDef(
@@ -342,7 +342,7 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         
         # Flag if bean reference exists but class not found
         if impl_ref and not class_name:
-            print(f"    ⚠️  Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
+            print(f"Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
         
         if sid not in job.steps:
             job.steps[sid] = StepDef(
@@ -393,7 +393,7 @@ def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict
     
     # Flag if bean reference exists but class not found
     if decider and not class_name:
-        print(f"    ⚠️  Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
+        print(f"Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
 
     if did not in job.decisions:
         job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name, class_source_path=source_path)
@@ -660,7 +660,7 @@ def execute_cypher_statements(uri: str, user: str, password: str, cypher: str) -
 
 
 def find_xml_files(directory: str) -> List[str]:
-    """Recursively find all XML files in directory and subdirectories, excluding pom.xml"""
+    """Recursively find all XML files in directory and subdirectories, excluding pom.xml and test files"""
     xml_files = []
     directory_path = Path(directory)
     
@@ -673,8 +673,16 @@ def find_xml_files(directory: str) -> List[str]:
     # Recursively find all XML files
     for xml_file in directory_path.rglob("*.xml"):
         # Exclude pom.xml files
-        if xml_file.name.lower() != "pom.xml":
-            xml_files.append(str(xml_file))
+        if xml_file.name.lower() == "pom.xml":
+            continue
+        
+        # Exclude XML files in src/main/test or src\main\test directories
+        # Normalize path to use forward slashes for comparison
+        normalized_path = str(xml_file).replace('\\', '/')
+        if '/src/main/test/' in normalized_path or normalized_path.endswith('/src/main/test'):
+            continue
+        
+        xml_files.append(str(xml_file))
     
     return xml_files
 
@@ -704,13 +712,14 @@ def find_project_root(xml_path: str) -> str:
     return ""
 
 
-def find_java_source_file(class_name: str, project_root: str) -> str:
+def find_java_source_file(class_name: str, project_root: str, root_scan_directory: str = "") -> str:
     """
     Find the Java source file for a given class name in the project.
     
     Args:
         class_name: Fully qualified class name (e.g., "com.example.MyClass")
         project_root: Path to the project root directory
+        root_scan_directory: Optional root directory containing multiple projects for fallback search
         
     Returns:
         Path to the Java source file, or empty string if not found
@@ -737,7 +746,7 @@ def find_java_source_file(class_name: str, project_root: str) -> str:
         if java_file.exists():
             return str(java_file)
     
-    # If not found in standard locations, do a recursive search
+    # If not found in standard locations, do a recursive search within project
     # (slower but more thorough)
     try:
         for java_file in project_path.rglob(class_path):
@@ -747,15 +756,31 @@ def find_java_source_file(class_name: str, project_root: str) -> str:
     except Exception:
         pass
     
+    # Last resort: search in root_scan_directory if provided
+    # (for multi-repo scenarios where bean class may be in different application)
+    if root_scan_directory and root_scan_directory != project_root:
+        try:
+            root_path = Path(root_scan_directory)
+            if root_path.exists() and root_path.is_dir():
+                print(f"      Searching in root directory for {class_name}...")
+                for java_file in root_path.rglob(class_path):
+                    # Exclude common build/target directories and test directories
+                    if not any(part in java_file.parts for part in ['target', 'build', '.git', '.mvn', 'test']):
+                        print(f"      Found in different project: {java_file}")
+                        return str(java_file)
+        except Exception as e:
+            print(f"      Warning: Error during root directory search: {e}")
+    
     return ""
 
 
-def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
+def extract_bean_definitions(xml_path: str, root_scan_directory: str = "") -> Dict[str, tuple[str, str]]:
     """
     Extract bean definitions from an XML file.
     
     Args:
         xml_path: Path to the XML file
+        root_scan_directory: Optional root directory containing multiple projects for fallback search
         
     Returns:
         Dictionary mapping bean ID to tuple of (class_name, source_path)
@@ -780,7 +805,7 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
                 # Try to find the Java source file
                 source_path = ""
                 if project_root:
-                    source_path = find_java_source_file(bean_class, project_root)
+                    source_path = find_java_source_file(bean_class, project_root, root_scan_directory)
                 
                 if not source_path:
                     beans_without_source.append((bean_id, bean_class))
@@ -789,22 +814,23 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
         
         # Report beans without source paths
         if beans_without_source:
-            print(f"    ⚠️  {len(beans_without_source)} bean(s) without source path:")
+            print(f"      {len(beans_without_source)} bean(s) without source path:")
             for bean_id, bean_class in beans_without_source:
                 print(f"       - Bean '{bean_id}' -> Class '{bean_class}'")
         
         return bean_map
     except Exception as e:
-        print(f"  Warning: Failed to extract beans from {xml_path}: {e}")
+        print(f"Warning: Failed to extract beans from {xml_path}: {e}")
         return bean_map
 
 
-def build_global_bean_map(xml_files: List[str]) -> Dict[str, tuple[str, str]]:
+def build_global_bean_map(xml_files: List[str], root_scan_directory: str = "") -> Dict[str, tuple[str, str]]:
     """
     Build a global bean map from all XML files (first pass).
     
     Args:
         xml_files: List of XML file paths
+        root_scan_directory: Optional root directory containing multiple projects for fallback search
         
     Returns:
         Dictionary mapping bean ID to tuple of (class_name, source_path) across all files
@@ -813,7 +839,7 @@ def build_global_bean_map(xml_files: List[str]) -> Dict[str, tuple[str, str]]:
     
     print("\n=== First Pass: Building Global Bean Map ===")
     for xml_file in xml_files:
-        bean_map = extract_bean_definitions(xml_file)
+        bean_map = extract_bean_definitions(xml_file, root_scan_directory)
         if bean_map:
             # Count how many have source paths
             with_source = sum(1 for _, source_path in bean_map.values() if source_path)
@@ -822,7 +848,7 @@ def build_global_bean_map(xml_files: List[str]) -> Dict[str, tuple[str, str]]:
             # Merge into global map, with warning on duplicates
             for bean_id, (bean_class, source_path) in bean_map.items():
                 if bean_id in global_bean_map and global_bean_map[bean_id][0] != bean_class:
-                    print(f"    Warning: Bean ID '{bean_id}' redefined. "
+                    print(f"Warning: Bean ID '{bean_id}' redefined. "
                           f"Previous: {global_bean_map[bean_id][0]}, New: {bean_class}")
                 global_bean_map[bean_id] = (bean_class, source_path)
     
@@ -850,7 +876,8 @@ def parse_directory(directory: str) -> List[JobDef]:
         print(f"  - {xml_file}")
     
     # FIRST PASS: Build global bean map from all XML files
-    global_bean_map = build_global_bean_map(xml_files)
+    # Pass directory as root_scan_directory for multi-repo fallback search
+    global_bean_map = build_global_bean_map(xml_files, directory)
     
     print(f"\nTotal beans in global map: {len(global_bean_map)}")
     # SECOND PASS: Parse batch jobs using the global bean map
@@ -905,13 +932,13 @@ def parse_directory(directory: str) -> List[JobDef]:
                           f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
                     
                     if unresolved_tasklet_steps > 0:
-                        print(f"      ⚠️  {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
+                        print(f"        {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
                     if unresolved_chunk_beans > 0:
-                        print(f"      ⚠️  {unresolved_chunk_beans} unresolved chunk bean reference(s)")
+                        print(f"        {unresolved_chunk_beans} unresolved chunk bean reference(s)")
                     if unresolved_decisions > 0:
-                        print(f"      ⚠️  {unresolved_decisions} unresolved decision bean(s)")
+                        print(f"        {unresolved_decisions} unresolved decision bean(s)")
         except Exception as e:
-            print(f"  Warning: Failed to parse {xml_file}: {e}")
+            print(f"Warning: Failed to parse {xml_file}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -963,11 +990,11 @@ def parse_directory(directory: str) -> List[JobDef]:
     print(f"Total Listeners: {total_listeners}")
     
     if unresolved_tasklet_steps > 0 or unresolved_chunk_beans > 0 or unresolved_decisions > 0:
-        print(f"\n⚠️  There are unresolved bean references. Check the warnings above for details.")
+        print(f"\n  There are unresolved bean references. Check the warnings above for details.")
         
         # Print list of tasklet steps with unresolved beans
         if unresolved_tasklet_steps > 0:
-            print(f"\n⚠️  Tasklet Steps with unresolved bean references:")
+            print(f"\n  Tasklet Steps with unresolved bean references:")
             for job in all_job_defs:
                 unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values() 
                                        if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name]
@@ -978,7 +1005,7 @@ def parse_directory(directory: str) -> List[JobDef]:
         
         # Print list of chunk steps with unresolved beans
         if unresolved_chunk_beans > 0:
-            print(f"\n⚠️  Chunk Steps with unresolved bean references:")
+            print(f"\n  Chunk Steps with unresolved bean references:")
             for job in all_job_defs:
                 chunk_steps_with_issues = []
                 for step in job.steps.values():
@@ -1000,7 +1027,7 @@ def parse_directory(directory: str) -> List[JobDef]:
         
         # Print list of decisions with unresolved beans
         if unresolved_decisions > 0:
-            print(f"\n⚠️  Decisions with unresolved bean references:")
+            print(f"\n  Decisions with unresolved bean references:")
             for job in all_job_defs:
                 unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values() 
                                            if dec.decider_bean and not dec.class_name]
