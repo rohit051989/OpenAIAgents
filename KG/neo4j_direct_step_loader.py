@@ -16,6 +16,7 @@ class ListenerDef:
     name: str
     scope: str          # "JOB", "STEP", "CHUNK", ...
     impl_bean: str      # class name (if available)
+    source_path: str = ""  # Source file path for the class (if found)
 
 
 @dataclass
@@ -24,14 +25,18 @@ class StepDef:
     step_kind: str      # "TASKLET", "CHUNK", etc.
     impl_bean: str      # tasklet ref bean name (for TASKLET steps)
     class_name: str     # Class name for the ref bean (if available)
+    class_source_path: str = ""  # Source file path for the class (if found)
     
     # For CHUNK steps
     reader_bean: str = ""     # Reader bean reference
     reader_class: str = ""    # Reader bean class name
+    reader_source_path: str = ""  # Source file path for reader class
     processor_bean: str = "" # Processor bean reference
     processor_class: str = "" # Processor bean class name
+    processor_source_path: str = ""  # Source file path for processor class
     writer_bean: str = ""     # Writer bean reference
     writer_class: str = ""    # Writer bean class name
+    writer_source_path: str = ""  # Source file path for writer class
     
     listener_names: List[str] = field(default_factory=list)
 
@@ -51,6 +56,7 @@ class DecisionDef:
     name: str
     decider_bean: str
     class_name: str = ""  # Class name for the decider bean (if available)
+    class_source_path: str = ""  # Source file path for the class (if found)
 
 
 @dataclass
@@ -189,7 +195,10 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             ref = l_el.get("ref")
             if not ref:
                 continue
-            impl_class = bean_class_map.get(ref, "")
+            # Extract class name and source path from tuple if bean_class_map contains tuples
+            bean_info = bean_class_map.get(ref, ("", ""))
+            impl_class = bean_info[0] if isinstance(bean_info, tuple) else bean_info
+            source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
             
             # Flag if bean reference exists but class not found
             if ref and not impl_class:
@@ -199,6 +208,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
                 name=ref,
                 scope="JOB",
                 impl_bean=impl_class or ref,
+                source_path=source_path,
             )
 
     # Job children in order
@@ -284,10 +294,17 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         processor_bean = chunk_el.get("processor", "")
         writer_bean = chunk_el.get("writer", "")
         
-        # Resolve class names from bean map
-        reader_class = bean_class_map.get(reader_bean, "") if reader_bean else ""
-        processor_class = bean_class_map.get(processor_bean, "") if processor_bean else ""
-        writer_class = bean_class_map.get(writer_bean, "") if writer_bean else ""
+        # Resolve class names and source paths from bean map
+        reader_info = bean_class_map.get(reader_bean, ("", "")) if reader_bean else ("", "")
+        processor_info = bean_class_map.get(processor_bean, ("", "")) if processor_bean else ("", "")
+        writer_info = bean_class_map.get(writer_bean, ("", "")) if writer_bean else ("", "")
+        
+        reader_class = reader_info[0] if isinstance(reader_info, tuple) else (reader_info if reader_info else "")
+        reader_source = reader_info[1] if isinstance(reader_info, tuple) else ""
+        processor_class = processor_info[0] if isinstance(processor_info, tuple) else (processor_info if processor_info else "")
+        processor_source = processor_info[1] if isinstance(processor_info, tuple) else ""
+        writer_class = writer_info[0] if isinstance(writer_info, tuple) else (writer_info if writer_info else "")
+        writer_source = writer_info[1] if isinstance(writer_info, tuple) else ""
         
         # Flag unresolved bean references
         if reader_bean and not reader_class:
@@ -305,16 +322,23 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
                 class_name="",  # Not used for chunk steps
                 reader_bean=reader_bean,
                 reader_class=reader_class,
+                reader_source_path=reader_source,
                 processor_bean=processor_bean,
                 processor_class=processor_class,
+                processor_source_path=processor_source,
                 writer_bean=writer_bean,
                 writer_class=writer_class,
+                writer_source_path=writer_source,
             )
     else:
         # TASKLET-based step
         step_kind = "TASKLET"
         impl_ref = tasklet_el.get("ref", "")
-        class_name = bean_class_map.get(impl_ref, "") if impl_ref else ""
+        
+        # Resolve class name and source path from bean map
+        bean_info = bean_class_map.get(impl_ref, ("", "")) if impl_ref else ("", "")
+        class_name = bean_info[0] if isinstance(bean_info, tuple) else (bean_info if bean_info else "")
+        source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
         
         # Flag if bean reference exists but class not found
         if impl_ref and not class_name:
@@ -326,6 +350,7 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
                 step_kind=step_kind,
                 impl_bean=impl_ref or sid,
                 class_name=class_name,
+                class_source_path=source_path,
             )
 
     # next="..." attribute
@@ -361,15 +386,17 @@ def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict
     if not did:
         return
 
-    # Resolve decider class name from bean map
-    class_name = bean_class_map.get(decider, "") if decider else ""
+    # Resolve decider class name and source path from bean map
+    bean_info = bean_class_map.get(decider, ("", "")) if decider else ("", "")
+    class_name = bean_info[0] if isinstance(bean_info, tuple) else (bean_info if bean_info else "")
+    source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
     
     # Flag if bean reference exists but class not found
     if decider and not class_name:
         print(f"    ⚠️  Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
 
     if did not in job.decisions:
-        job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name)
+        job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name, class_source_path=source_path)
 
     # Nested <next on="..." to="...">
     for next_el in dec_el.findall(f"{N_BATCH}next"):
@@ -476,21 +503,28 @@ def generate_cypher(job: JobDef) -> str:
     for step in job.steps.values():
         if step.step_kind == "CHUNK":
             # For chunk-based steps, create step with reader, processor, writer info
+            # Escape paths for Cypher
+            reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.reader_source_path else ""
+            processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.processor_source_path else ""
+            writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.writer_source_path else ""
+            
             lines.append(
                 "MERGE (:Step {name: '%s', stepKind: '%s', "
-                "readerBean: '%s', readerClass: '%s', "
-                "processorBean: '%s', processorClass: '%s', "
-                "writerBean: '%s', writerClass: '%s'});" %
+                "readerBean: '%s', readerClass: '%s', readerSourcePath: '%s', "
+                "processorBean: '%s', processorClass: '%s', processorSourcePath: '%s', "
+                "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'});" %
                 (step.name, step.step_kind,
-                 step.reader_bean, step.reader_class,
-                 step.processor_bean, step.processor_class,
-                 step.writer_bean, step.writer_class)
+                 step.reader_bean, step.reader_class, reader_src,
+                 step.processor_bean, step.processor_class, processor_src,
+                 step.writer_bean, step.writer_class, writer_src)
             )
         else:
             # For tasklet-based steps
+            # Escape path for Cypher
+            class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.class_source_path else ""
             lines.append(
-                "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s'});" %
-                (step.name, step.step_kind, step.impl_bean, step.class_name)
+                "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', classSourcePath: '%s'});" %
+                (step.name, step.step_kind, step.impl_bean, step.class_name, class_src)
             )
 
     # Blocks
@@ -502,16 +536,20 @@ def generate_cypher(job: JobDef) -> str:
 
     # Decisions
     for dec in job.decisions.values():
+        # Escape path for Cypher
+        dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if dec.class_source_path else ""
         lines.append(
-            "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s'});" %
-            (dec.name, dec.decider_bean, dec.class_name)
+            "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s', classSourcePath: '%s'});" %
+            (dec.name, dec.decider_bean, dec.class_name, dec_src)
         )
 
     # Listeners
     for listener in job.listeners.values():
+        # Escape path for Cypher
+        listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'") if listener.source_path else ""
         lines.append(
-            "MERGE (:Listener {name: '%s', scope: '%s', implBean: '%s'});" %
-            (listener.name, listener.scope, listener.impl_bean)
+            "MERGE (:Listener {name: '%s', scope: '%s', implBean: '%s', sourcePath: '%s'});" %
+            (listener.name, listener.scope, listener.impl_bean, listener_src)
         )
 
     # Job CONTAINS
@@ -641,7 +679,78 @@ def find_xml_files(directory: str) -> List[str]:
     return xml_files
 
 
-def extract_bean_definitions(xml_path: str) -> Dict[str, str]:
+def find_project_root(xml_path: str) -> str:
+    """
+    Find the project root by walking up directories to find pom.xml.
+    
+    Args:
+        xml_path: Path to an XML file in the project
+        
+    Returns:
+        Path to the project root directory, or empty string if not found
+    """
+    current_dir = Path(xml_path).parent.absolute()
+    
+    # Walk up the directory tree looking for pom.xml
+    for parent in [current_dir] + list(current_dir.parents):
+        pom_file = parent / "pom.xml"
+        if pom_file.exists():
+            return str(parent)
+        
+        # Stop at filesystem root or after checking 10 levels up
+        if len(current_dir.parents) - len(parent.parents) > 10:
+            break
+    
+    return ""
+
+
+def find_java_source_file(class_name: str, project_root: str) -> str:
+    """
+    Find the Java source file for a given class name in the project.
+    
+    Args:
+        class_name: Fully qualified class name (e.g., "com.example.MyClass")
+        project_root: Path to the project root directory
+        
+    Returns:
+        Path to the Java source file, or empty string if not found
+    """
+    if not class_name or not project_root:
+        return ""
+    
+    # Convert class name to file path
+    # e.g., "com.example.MyClass" -> "com/example/MyClass.java"
+    class_path = class_name.replace('.', os.sep) + '.java'
+    
+    # Common source directories in Maven/Gradle projects
+    src_dirs = [
+        'src/main/java',
+        'src/java',
+        'src',
+    ]
+    
+    project_path = Path(project_root)
+    
+    # Try each source directory
+    for src_dir in src_dirs:
+        java_file = project_path / src_dir / class_path
+        if java_file.exists():
+            return str(java_file)
+    
+    # If not found in standard locations, do a recursive search
+    # (slower but more thorough)
+    try:
+        for java_file in project_path.rglob(class_path):
+            # Exclude common build/target directories
+            if not any(part in java_file.parts for part in ['target', 'build', '.git', '.mvn']):
+                return str(java_file)
+    except Exception:
+        pass
+    
+    return ""
+
+
+def extract_bean_definitions(xml_path: str) -> Dict[str, tuple[str, str]]:
     """
     Extract bean definitions from an XML file.
     
@@ -649,20 +758,28 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, str]:
         xml_path: Path to the XML file
         
     Returns:
-        Dictionary mapping bean ID to class name
+        Dictionary mapping bean ID to tuple of (class_name, source_path)
     """
-    bean_map: Dict[str, str] = {}
+    bean_map: Dict[str, tuple[str, str]] = {}
     
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
+        
+        # Find project root for this XML file
+        project_root = find_project_root(xml_path)
         
         # Extract all bean definitions
         for bean_el in root.findall(f".//{N_BEANS}bean"):
             bean_id = bean_el.get("id")
             bean_class = bean_el.get("class", "")
             if bean_id and bean_class:
-                bean_map[bean_id] = bean_class
+                # Try to find the Java source file
+                source_path = ""
+                if project_root:
+                    source_path = find_java_source_file(bean_class, project_root)
+                
+                bean_map[bean_id] = (bean_class, source_path)
         
         return bean_map
     except Exception as e:
@@ -670,7 +787,7 @@ def extract_bean_definitions(xml_path: str) -> Dict[str, str]:
         return bean_map
 
 
-def build_global_bean_map(xml_files: List[str]) -> Dict[str, str]:
+def build_global_bean_map(xml_files: List[str]) -> Dict[str, tuple[str, str]]:
     """
     Build a global bean map from all XML files (first pass).
     
@@ -678,23 +795,27 @@ def build_global_bean_map(xml_files: List[str]) -> Dict[str, str]:
         xml_files: List of XML file paths
         
     Returns:
-        Dictionary mapping bean ID to class name across all files
+        Dictionary mapping bean ID to tuple of (class_name, source_path) across all files
     """
-    global_bean_map: Dict[str, str] = {}
+    global_bean_map: Dict[str, tuple[str, str]] = {}
     
     print("\n=== First Pass: Building Global Bean Map ===")
     for xml_file in xml_files:
         bean_map = extract_bean_definitions(xml_file)
         if bean_map:
-            print(f"  {os.path.basename(xml_file)}: Found {len(bean_map)} bean(s)")
+            # Count how many have source paths
+            with_source = sum(1 for _, source_path in bean_map.values() if source_path)
+            print(f"  {os.path.basename(xml_file)}: Found {len(bean_map)} bean(s), {with_source} with source paths")
+            
             # Merge into global map, with warning on duplicates
-            for bean_id, bean_class in bean_map.items():
-                if bean_id in global_bean_map and global_bean_map[bean_id] != bean_class:
+            for bean_id, (bean_class, source_path) in bean_map.items():
+                if bean_id in global_bean_map and global_bean_map[bean_id][0] != bean_class:
                     print(f"    Warning: Bean ID '{bean_id}' redefined. "
-                          f"Previous: {global_bean_map[bean_id]}, New: {bean_class}")
-                global_bean_map[bean_id] = bean_class
+                          f"Previous: {global_bean_map[bean_id][0]}, New: {bean_class}")
+                global_bean_map[bean_id] = (bean_class, source_path)
     
-    print(f"\nGlobal bean map built: {len(global_bean_map)} unique bean(s)")
+    total_with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
+    print(f"\nGlobal bean map built: {len(global_bean_map)} unique bean(s), {total_with_source} with source paths")
     return global_bean_map
 
 
@@ -887,15 +1008,15 @@ if __name__ == "__main__":
     xml_directory = "sample_data"  # Change this to your directory path
     uri = "bolt://localhost:7687"
     user = "neo4j"
-    password = "Welcome@321"
+    password = "Rohit@123"  # Change this to your Neo4j password
 
     # Parse all XML files in directory and merge into single JobDef
     job_defs = parse_directory(xml_directory)
-    print(f"\nParsed and merged job definitions: {job_defs}")
+    #print(f"\nParsed and merged job definitions: {job_defs}")
     # Generate and optionally execute Cypher statements
     cypher = generate_cypher(job_defs[0])
     # print(cypher)
-    # execute_cypher_statements(uri, user, password, cypher)
+    execute_cypher_statements(uri, user, password, cypher)
     
     # For now just print; you can paste into Neo4j Browser,
     # or execute via neo4j Python driver.
