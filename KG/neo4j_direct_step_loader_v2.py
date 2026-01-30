@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Tuple
 import xml.etree.ElementTree as ET
 from neo4j import GraphDatabase
 import os
@@ -103,20 +103,11 @@ def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None)
     
     Args:
         xml_path: Path to the XML file
-        bean_class_map: Optional global bean map. If not provided, will only use beans from this file.
+        bean_class_map: global bean map. If not provided, will only use beans from this file.
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     job_defs: List[JobDef] = []
-
-    # If no global bean map provided, create a local one (for backward compatibility)
-    if bean_class_map is None:
-        bean_class_map = {}
-        for bean_el in root.findall(f"./{N_BEANS}bean"):
-            bid = bean_el.get("id")
-            bclass = bean_el.get("class", "")
-            if bid:
-                bean_class_map[bid] = bclass
 
     # Find the job
     job_els = root.findall(f".//{N_BATCH}job")
@@ -490,184 +481,20 @@ def normalize_flow_aliases(job: JobDef) -> None:
             edge.dst_id = alias_map[edge.dst_id]
 
 
-# ---------- Cypher generation ----------
-
-def generate_cypher(job: JobDef) -> str:
-    lines: List[str] = []
-
-    # Job - Create Job node with source file path
-    source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher
-    #lines.append(f"MERGE (j:Job {{name: '{job.name}'}}) SET j.sourceFile = '{source_file}';")
-    lines.append(f"""MERGE (j:Job {{id: '{job.name}', 
-                 name: '{job.name}', 
-                 sourceFile: '{source_file}'}}) 
-                 ON CREATE SET j.createdAt = datetime(), j.enabled = true 
-                 ON MATCH SET j.lastSeenAt = datetime();""")
-
-    # Steps
-    for step in job.steps.values():
-        if step.step_kind == "CHUNK":
-            # For chunk-based steps, create step with reader, processor, writer info
-            # Escape paths for Cypher
-            reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.reader_source_path else ""
-            processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.processor_source_path else ""
-            writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.writer_source_path else ""
-            
-            lines.append(
-                "MERGE (:Step {name: '%s', stepKind: '%s', "
-                "readerBean: '%s', readerClass: '%s', readerSourcePath: '%s', "
-                "processorBean: '%s', processorClass: '%s', processorSourcePath: '%s', "
-                "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'});" %
-                (step.name, step.step_kind,
-                 step.reader_bean, step.reader_class, reader_src,
-                 step.processor_bean, step.processor_class, processor_src,
-                 step.writer_bean, step.writer_class, writer_src)
-            )
-        else:
-            # For tasklet-based steps
-            # Escape path for Cypher
-            class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.class_source_path else ""
-            lines.append(
-                "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'});" %
-                (step.name, step.step_kind, step.impl_bean, step.class_name, class_src)
-            )
-
-    # Blocks
-    for block in job.blocks.values():
-        lines.append(
-            "MERGE (:Block {id: '%s', blockType: '%s'});" %
-            (block.id, block.block_type)
-        )
-
-    # Decisions
-    for dec in job.decisions.values():
-        # Escape path for Cypher
-        dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if dec.class_source_path else ""
-        lines.append(
-            "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s', path: '%s'});" %
-            (dec.name, dec.decider_bean, dec.class_name, dec_src)
-        )
-
-    # Listeners
-    for listener in job.listeners.values():
-        # Escape path for Cypher
-        listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'") if listener.source_path else ""
-        lines.append(
-            "MERGE (:Listener {name: '%s', scope: '%s', implBean: '%s', path: '%s'});" %
-            (listener.name, listener.scope, listener.impl_bean, listener_src)
-        )
-
-    # Job CONTAINS
-    for sid in job.job_contains_steps:
-        lines.append(
-            "MATCH (j:Job {name:'%s'}) "
-            "MATCH (s:Step {name:'%s'}) "
-            "MERGE (j)-[:CONTAINS]->(s);" % (job.name, sid)
-        )
-
-    for bid in job.job_contains_blocks:
-        lines.append(
-            "MATCH (j:Job {name:'%s'}) "
-            "MATCH (b:Block {id:'%s'}) "
-            "MERGE (j)-[:CONTAINS]->(b);" % (job.name, bid)
-        )
-
-    # Block CONTAINS
-    for block in job.blocks.values():
-        for sid in block.contains_steps:
-            lines.append(
-                "MATCH (b:Block {id:'%s'}) "
-                "MATCH (s:Step {name:'%s'}) "
-                "MERGE (b)-[:CONTAINS]->(s);" % (block.id, sid)
-            )
-        for child_bid in block.contains_blocks:
-            lines.append(
-                "MATCH (b1:Block {id:'%s'}) "
-                "MATCH (b2:Block {id:'%s'}) "
-                "MERGE (b1)-[:CONTAINS]->(b2);" % (block.id, child_bid)
-            )
-
-    # ENTRY
-    if job.job_entry_id and job.job_entry_kind:
-        if job.job_entry_kind == "step":
-            lines.append(
-                "MATCH (j:Job {name:'%s'})"
-                " MATCH (n:Step {name:'%s'}) "
-                "MERGE (j)-[:ENTRY]->(n);" % (job.name, job.job_entry_id)
-            )
-        elif job.job_entry_kind == "block":
-            lines.append(
-                "MATCH (j:Job {name:'%s'})"
-                " MATCH (n:Block {id:'%s'}) "
-                "MERGE (j)-[:ENTRY]->(n);" % (job.name, job.job_entry_id)
-            )
-
-    for block in job.blocks.values():
-        if block.entry_node and block.entry_kind:
-            if block.entry_kind == "step":
-                lines.append(
-                    "MATCH (b:Block {id:'%s'}) MATCH (n:Step {name:'%s'}) "
-                    "MERGE (b)-[:ENTRY]->(n);" % (block.id, block.entry_node)
-                )
-            elif block.entry_kind == "decision":
-                lines.append(
-                    "MATCH (b:Block {id:'%s'}) MATCH (n:Decision {name:'%s'}) "
-                    "MERGE (b)-[:ENTRY]->(n);" % (block.id, block.entry_node)
-                )
-
-    # PRECEDES edges
-    def dst_pattern(dst_id: str) -> str:
-        if dst_id in job.blocks:
-            return "(dst:Block {id:'%s'})" % dst_id
-        if dst_id in job.steps:
-            return "(dst:Step {name:'%s'})" % dst_id
-        if dst_id in job.decisions:
-            return "(dst:Decision {name:'%s'})" % dst_id
-        # fallback: assume step
-        return "(dst:Step {name:'%s'})" % dst_id
-
-    for edge in job.precedes:
-        if edge.src_kind == "step":
-            src_pat = "(src:Step {name:'%s'})" % edge.src_id
-        elif edge.src_kind == "block":
-            src_pat = "(src:Block {id:'%s'})" % edge.src_id
-        else:  # decision
-            src_pat = "(src:Decision {name:'%s'})" % edge.src_id
-
-        dst_pat = dst_pattern(edge.dst_id)
-        lines.append(
-            "MATCH %s MATCH %s "
-            "MERGE (src)-[:PRECEDES {on:'%s'}]->(dst);" %
-            (src_pat, dst_pat, edge.on)
-        )
-
-    # HAS_LISTENER edges
-    for listener_name, listener in job.listeners.items():
-        if listener.scope == "JOB":
-            lines.append(
-                "MATCH (j:Job {name:'%s'}) MATCH (l:Listener {name:'%s'}) "
-                "MERGE (j)-[:HAS_LISTENER]->(l);" %
-                (job.name, listener_name)
-            )
-
-    # (Step-level / chunk-level listeners can be added similarly if present in XML)
-
-    return "\n".join(lines)
-
-def execute_cypher_statements(uri: str, user: str, password: str, cypher: str) -> None:
-    
-    statements = [s.strip() for s in cypher.split(";") if s.strip()]
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    with driver.session() as session:
-        for stmt in statements:
-            session.run(stmt)
-    driver.close()
-
 
 def find_xml_files(directory: str) -> List[str]:
     """Recursively find all XML files in directory and subdirectories, excluding pom.xml and test files"""
     xml_files = []
     directory_path = Path(directory)
+    # Filter for Spring XMLs
+    spring_namespaces = [
+        'http://www.springframework.org/schema/beans',
+        'http://www.springframework.org/schema/batch',
+        'http://www.springframework.org/schema/context',
+        'http://www.springframework.org/schema/tx',
+        'http://www.springframework.org/schema/jdbc',
+        'http://www.springframework.org/schema/aop'
+    ]
     
     if not directory_path.exists():
         raise ValueError(f"Directory does not exist: {directory}")
@@ -686,8 +513,26 @@ def find_xml_files(directory: str) -> List[str]:
         normalized_path = str(xml_file).replace('\\', '/')
         if '/src/main/test/' in normalized_path or normalized_path.endswith('/src/main/test'):
             continue
-        
-        xml_files.append(str(xml_file))
+
+        # Check if XML file contains Spring namespaces
+        try:
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+            
+            # Check if any Spring namespace is present
+            root_ns = root.tag
+            if any(ns in root_ns for ns in spring_namespaces):
+                xml_files.append(str(xml_file))
+                continue
+            
+            # Also check in attributes
+            for attr_name, attr_value in root.attrib.items():
+                if any(ns in attr_value for ns in spring_namespaces):
+                    xml_files.append(str(xml_file))
+                    break
+                    
+        except Exception as e:
+            print(f"  Warning: Failed to parse {xml_file}: {e}")   
     
     return xml_files
 
@@ -899,7 +744,7 @@ def build_global_bean_map(xml_files: List[str], root_scan_directory: str = "") -
     return global_bean_map
 
 
-def parse_directory(directory: str) -> List[JobDef]:
+def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List[str]) -> List[JobDef]:
     """
     Parse all XML files in directory and subdirectories, returning a single merged JobDef.
     Uses a two-pass approach:
@@ -907,21 +752,8 @@ def parse_directory(directory: str) -> List[JobDef]:
     2. Second pass: Parse batch jobs using the global bean map
     
     This ensures bean references across different XML files are resolved correctly.
-    """
-    xml_files = find_xml_files(directory)
-    
-    if not xml_files:
-        raise ValueError(f"No XML files found in directory: {directory}")
-    
-    print(f"Found {len(xml_files)} XML file(s) to parse:")
-    for xml_file in xml_files:
-        print(f"  - {xml_file}")
-    
-    # FIRST PASS: Build global bean map from all XML files
-    # Pass directory as root_scan_directory for multi-repo fallback search
-    global_bean_map = build_global_bean_map(xml_files, directory)
-    
-    print(f"\nTotal beans in global map: {len(global_bean_map)}")
+    """   
+
     # SECOND PASS: Parse batch jobs using the global bean map
     print("\n=== Second Pass: Parsing Batch Jobs ===")
     all_job_defs = []
@@ -986,7 +818,7 @@ def parse_directory(directory: str) -> List[JobDef]:
             continue
     
     if not all_job_defs:
-        raise ValueError(f"No valid job definitions found in directory: {directory}")
+        raise ValueError(f"No valid job definitions found in the provided XML files.")
     
     print(f"\n=== Summary ===")
     print(f"Total jobs found: {len(all_job_defs)}")
@@ -1078,7 +910,7 @@ def parse_directory(directory: str) -> List[JobDef]:
                     for dec_name, bean_ref in unresolved_decision_list:
                         print(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
      
-    return all_job_defs, global_bean_map
+    return all_job_defs
 
 
 # ---------- Example entry point ----------
@@ -1092,8 +924,11 @@ if __name__ == "__main__":
     user = "neo4j"
     password = "Rohit@123"  # Change this to your Neo4j password
 
+    xml_files = find_xml_files(xml_directory)
+    # First pass: Build global bean map
+    global_bean_map = build_global_bean_map(xml_files)
     # Parse all XML files in directory and merge into single JobDef
-    job_defs, global_bean_map = parse_directory(xml_directory)
+    job_defs = parse_directory(global_bean_map, xml_files)
     print(f"\nParsed and merged job definitions: {job_defs}")
     # Generate and optionally execute Cypher statements
     #cypher = generate_cypher(job_defs[0])

@@ -1,0 +1,90 @@
+# Information Graph Configuration
+# This file helps identify the hierarchy of code structure
+
+# Root directory to scan
+root_directory: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code"
+
+# Define repositories - each repo should have a unique identifier
+repositories:
+  - name: "repo1"
+    path: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code\\repo1"
+    type: "repository"
+    
+  - name: "repo2"
+    path: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code\\repo2"
+    type: "repository"
+
+# Projects, Folders, and Packages are AUTO-DETECTED:
+# - Project: Any directory containing pom.xml or build.gradle
+# - Folder: Any directory that's not a project or package
+# - Package: Directories in src/main/java or src/test/java until .java files
+    
+
+# File type identification rules
+file_type_rules:
+  java_class:
+    extensions: [".java"]
+    exclude_patterns: ["Test\\.java$", "IT\\.java$", "TestCase\\.java$"]
+    locations: ["src/main/java", "src/java", "src"]
+    
+  java_test_class:
+    extensions: [".java"]
+    include_patterns: ["Test\\.java$", "IT\\.java$", "TestCase\\.java$"]
+    locations: ["src/test/java", "test", "src/test"]
+    
+  pom_file:
+    exact_names: ["pom.xml"]
+    
+  spring_config:
+    # Spring XML files are identified by checking for Spring namespaces in XML content
+    # Non-XML Spring configs like application.properties are identified by name patterns
+    extensions: [".yml", ".yaml", ".properties"]
+    include_patterns: ["application.*"]
+    locations: ["src/main/resources", "resources"]
+    
+  property_file:
+    extensions: [".properties", ".env"]
+    
+  xml_config:
+    # Generic XML config files (Spring XMLs are auto-detected by namespace)
+    extensions: [".xml"]
+    exclude_patterns: ["pom\\.xml$"]
+    
+  docker_file:
+    exact_names: ["Dockerfile", "docker-compose.yml", ".dockerignore"]
+    
+  ci_cd_file:
+    exact_names: ["azure-pipelines.yml", "azure-pipelines-artifactory-onprem.yml", "Jenkinsfile", ".gitlab-ci.yml"]
+    include_patterns: [".github/workflows/.*\\.yml$"]
+
+# Directories to skip during scanning
+skip_directories:
+  - ".git"
+  - "__pycache__"
+  - "node_modules"
+  - ".venv"
+  - "venv"
+  - "target"
+  - "build"
+  - ".idea"
+  - ".vscode"
+  - "bin"
+  - "obj"
+  - ".gradle"
+  - "out"
+
+# Neo4j connection settings
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password: "Rohit@123"
+  database_ig: "informationgraph"
+  database_kg: "knowledgegraph"
+
+# Scanning options
+scan_options:
+  max_depth: 20
+  follow_symlinks: false
+  parse_java_classes: true  # Parse Java files to extract ClassInfo
+  extract_imports: true
+  extract_methods: true
