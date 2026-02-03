@@ -24,6 +24,7 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import argparse
+import yaml
 from execution_cpm_analyzer_v3 import ExecutionCPMAnalyzer
 
 # Configure logging
@@ -37,12 +38,44 @@ logger = logging.getLogger(__name__)
 class Neo4jInstanceLoaderV2:
     """Load Spring Batch instance data into Neo4j with JobContext support"""
     
-    def __init__(self, uri: str = "bolt://localhost:7687", 
-                 user: str = "neo4j", 
-                 password: str = "password"):
-        """Initialize Neo4j connection"""
+    def __init__(self, config_path: str = None,
+                 uri: str = None, 
+                 user: str = None, 
+                 password: str = None,
+                 database: str = None):
+        """
+        Initialize Neo4j connection
+        
+        Args:
+            config_path: Path to YAML config file (preferred method)
+            uri: Neo4j connection URI (fallback if config_path not provided)
+            user: Username (fallback)
+            password: Password (fallback)
+            database: Target database for knowledge graph (fallback)
+        """
+        # Load from config file if provided
+        if config_path:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            
+            neo4j_config = config['neo4j']
+            uri = neo4j_config['uri']
+            user = neo4j_config['user']
+            password = neo4j_config['password']
+            database = neo4j_config['database_kg']
+            self.instance_excel_path = config.get('instance_data', {}).get('excel_file', 'sample_data/instance_level_data.xlsx')
+            logger.info(f"Loaded configuration from {config_path}")
+        else:
+            # Use provided parameters or defaults
+            uri = uri or "bolt://localhost:7687"
+            user = user or "neo4j"
+            password = password or "password"
+            database = database or "knowledgegraph"
+            self.instance_excel_path = "sample_data/instance_level_data.xlsx"
+        
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        logger.info(f"Connected to Neo4j at {uri}")
+        self.database = database
+        logger.info(f"Connected to Neo4j at {uri} (Database: {database})")
         
     def close(self):
         """Close Neo4j connection"""
@@ -80,7 +113,7 @@ class Neo4jInstanceLoaderV2:
             "CREATE INDEX jctx_exec_time_idx IF NOT EXISTS FOR (n:JobContextExecution) ON (n.startTime)",
         ]
         
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             for constraint in constraints:
                 try:
                     session.run(constraint)
@@ -125,7 +158,7 @@ class Neo4jInstanceLoaderV2:
         df = pd.read_excel(excel_file, 'JobGroupExecutions')
         logger.info(f"Loading {len(df)} JobGroupExecutions...")
         
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
                 data = row.to_dict()
                 data = {k: v for k, v in data.items() if pd.notna(v)}
@@ -164,7 +197,7 @@ class Neo4jInstanceLoaderV2:
         df = pd.read_excel(excel_file, 'JobContextExecutions')
         logger.info(f"Loading {len(df)} JobContextExecutions...")
         
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
                 data = row.to_dict()
                 data = {k: v for k, v in data.items() if pd.notna(v)}
@@ -206,7 +239,7 @@ class Neo4jInstanceLoaderV2:
         df = pd.read_excel(excel_file, 'ResourceAvailabilityEvents')
         logger.info(f"Loading {len(df)} ResourceAvailabilityEvents...")
         
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
                 data = row.to_dict()
                 data = {k: v for k, v in data.items() if pd.notna(v)}
@@ -283,7 +316,7 @@ class Neo4jInstanceLoaderV2:
     def clear_instance_data(self):
         """Clear only instance layer nodes (keep class layer)"""
         logger.warning("Clearing instance layer data...")
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             session.run("""
                 MATCH (n)
                 WHERE n:JobGroupExecution OR 
@@ -317,29 +350,15 @@ def main():
         description='Load Spring Batch instance data into Neo4j (V2 with JobContext)'
     )
     parser.add_argument(
-        '--uri',
+        '--config',
         type=str,
-        default='bolt://localhost:7687',
-        help='Neo4j connection URI'
-    )
-    parser.add_argument(
-        '--user',
-        type=str,
-        default='neo4j',
-        help='Neo4j username'
-    )
-    parser.add_argument(
-        '--password',
-        type=str,
-        #default='Welcome@321',
-        default='Rohit@123',
-        help='Neo4j password'
+        default='information_graph_config.yaml',
+        help='Path to YAML configuration file'
     )
     parser.add_argument(
         '--file',
         type=str,
-        default='sample_data/instance_level_data_v3.xlsx',
-        help='Instance data Excel file'
+        help='Instance data Excel file (overrides config file)'
     )
     parser.add_argument(
         '--clear',
@@ -355,7 +374,11 @@ def main():
     print()
     
     try:
-        with Neo4jInstanceLoaderV2(args.uri, args.user, args.password) as loader:
+        # Create loader using config file
+        with Neo4jInstanceLoaderV2(config_path=args.config) as loader:
+            
+            # Determine Excel file path (command line arg overrides config)
+            excel_file = args.file if args.file else loader.instance_excel_path
             
             # Clear if requested
             if args.clear:
@@ -369,11 +392,11 @@ def main():
             #print()
             
             # Load instance data
-            print("📦 Loading instance data...")
-            loader.load_instance_data(args.file)
+            print(f"📦 Loading instance data from {excel_file}...")
+            loader.load_instance_data(excel_file)
             print()
-            analyzer = ExecutionCPMAnalyzer(loader.driver)
-            loader.compute_cpm_for_jobgroup_execution(args.file, analyzer)
+            analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)
+            loader.compute_cpm_for_jobgroup_execution(excel_file, analyzer)
             print("=" * 80)
             print("✅ LOADING COMPLETE!")
             print("=" * 80)

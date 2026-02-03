@@ -88,3 +88,7 @@ scan_options:
   parse_java_classes: true  # Parse Java files to extract ClassInfo
   extract_imports: true
   extract_methods: true
+
+# Instance data configuration
+instance_data:
+  excel_file: "sample_data/instance_level_data_v3.xlsx"

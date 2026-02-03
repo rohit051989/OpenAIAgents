@@ -110,15 +110,9 @@ class Neo4jLoader:
             "CREATE CONSTRAINT listener_id IF NOT EXISTS FOR (n:Listener) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT holiday_id IF NOT EXISTS FOR (n:Holiday) REQUIRE n.id IS UNIQUE",
             
-            # Java hierarchy layer
-            "CREATE CONSTRAINT javaclass_fqn IF NOT EXISTS FOR (n:JavaClass) REQUIRE n.fqn IS UNIQUE",
-            "CREATE CONSTRAINT javamethod_fqn IF NOT EXISTS FOR (n:JavaMethod) REQUIRE n.fqn IS UNIQUE",
-            
             # Instance layer
             "CREATE CONSTRAINT jobgroup_exec_id IF NOT EXISTS FOR (n:JobGroupExecution) REQUIRE n.execId IS UNIQUE",
-            "CREATE CONSTRAINT job_exec_id IF NOT EXISTS FOR (n:JobExecution) REQUIRE n.execId IS UNIQUE",
-            "CREATE CONSTRAINT step_exec_id IF NOT EXISTS FOR (n:StepExecution) REQUIRE n.execId IS UNIQUE",
-        
+            "CREATE CONSTRAINT jobcontext_exec_id IF NOT EXISTS FOR (n:JobContextExecution) REQUIRE n.execId IS UNIQUE",
         ]
         
         indexes = [
@@ -128,20 +122,7 @@ class Neo4jLoader:
             "CREATE INDEX resource_type_idx IF NOT EXISTS FOR (n:Resource) ON (n.type)",
             "CREATE INDEX sla_scope_idx IF NOT EXISTS FOR (n:SLA) ON (n.scope)",
             
-            # Java hierarchy layer
-            "CREATE INDEX javaclass_name_idx IF NOT EXISTS FOR (n:JavaClass) ON (n.className)",
-            "CREATE INDEX javaclass_package_idx IF NOT EXISTS FOR (n:JavaClass) ON (n.package)",
-            "CREATE INDEX javamethod_name_idx IF NOT EXISTS FOR (n:JavaMethod) ON (n.methodName)",
-            "CREATE INDEX javamethod_class_idx IF NOT EXISTS FOR (n:JavaMethod) ON (n.classFqn)",
             
-            # Instance layer
-            "CREATE INDEX job_exec_status_idx IF NOT EXISTS FOR (n:JobExecution) ON (n.status)",
-            "CREATE INDEX job_exec_start_idx IF NOT EXISTS FOR (n:JobExecution) ON (n.startTime)",
-            "CREATE INDEX job_exec_end_idx IF NOT EXISTS FOR (n:JobExecution) ON (n.endTime)",
-            "CREATE INDEX step_exec_status_idx IF NOT EXISTS FOR (n:StepExecution) ON (n.status)",
-            "CREATE INDEX step_exec_start_idx IF NOT EXISTS FOR (n:StepExecution) ON (n.startTime)",
-            "CREATE INDEX job_exec_job_status_idx IF NOT EXISTS FOR (n:JobExecution) ON (n.jobId, n.status)",
-            "CREATE INDEX job_exec_date_status_idx IF NOT EXISTS FOR (n:JobExecution) ON (n.businessDate, n.status)",
         ]
         
         with self.driver.session(database=self.database) as session:

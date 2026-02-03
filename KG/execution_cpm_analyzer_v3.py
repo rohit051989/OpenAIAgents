@@ -53,8 +53,9 @@ class ExecutionCPMAnalyzer:
       - compute_for_jobgroup_execution(job_group_execution_id, persist=True)
     """
 
-    def __init__(self, driver):
+    def __init__(self, driver, database: str = "knowledgegraph"):
         self.driver = driver
+        self.database = database
 
     def compute_for_jobgroup_execution(self, job_group_execution_id: str, persist: bool = True) -> ExecCPMResult:
         graph = self._fetch_run_graph(job_group_execution_id)
@@ -227,7 +228,7 @@ class ExecutionCPMAnalyzer:
           perCtx AS perCtx
         """
 
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             rec = session.run(query, jgeId=job_group_execution_id).single()
             if rec is None:
                 raise ValueError(f"JobGroupExecution not found: {job_group_execution_id}")
@@ -398,7 +399,7 @@ class ExecutionCPMAnalyzer:
         MERGE (cpc)-[:HAS_CRITICAL_PATH_SIGNATURE]->(cps)
         """
 
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             if cpi_rows:
                 session.execute_write(lambda tx: tx.run(q_cpi, rows=cpi_rows))
 
