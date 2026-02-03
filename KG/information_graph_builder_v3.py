@@ -406,6 +406,7 @@ class InformationGraphBuilder:
         self.repos_map = {r['path']: r for r in self.config.get('repositories', [])}
         self.file_type_rules = self.config.get('file_type_rules', {})
         self.skip_dirs = set(self.config.get('skip_directories', []))
+        self.skip_files = self.config.get('skip_files', [])
         
         # Track created nodes
         self.created_nodes = set()
@@ -486,6 +487,24 @@ class InformationGraphBuilder:
                     
         except Exception:
             pass
+        
+        return False
+    
+    def _should_skip_file(self, file_path: Path) -> bool:
+        """Check if file should be skipped based on skip_files configuration."""
+        file_name = file_path.name
+        
+        for skip_pattern in self.skip_files:
+            # Exact name match
+            if skip_pattern == file_name:
+                return True
+            
+            # Wildcard pattern match (simple glob-style)
+            if '*' in skip_pattern:
+                # Convert simple glob pattern to regex
+                import fnmatch
+                if fnmatch.fnmatch(file_name, skip_pattern):
+                    return True
         
         return False
     
@@ -619,6 +638,10 @@ class InformationGraphBuilder:
         for item in items:
             # Skip ignored directories
             if item.is_dir() and item.name in self.skip_dirs:
+                continue
+            
+            # Skip ignored files
+            if item.is_file() and self._should_skip_file(item):
                 continue
             
             # Use absolute path for tracking
@@ -1354,7 +1377,7 @@ class InformationGraphBuilder:
 
 def main():
     """Main execution function."""
-    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
+    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config111.yaml"
 
     load_dotenv()
     config_file = os.getenv("KG_CONFIG_FILE") or DEFAULT_CONFIG_FILE

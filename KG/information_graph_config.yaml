@@ -73,6 +73,30 @@ skip_directories:
   - ".gradle"
   - "out"
 
+# Files to skip during scanning (exact names or patterns)
+skip_files:
+  - ".gitignore"
+  - ".gitattributes"
+  - ".editorconfig"
+  - ".DS_Store"
+  - "Thumbs.db"
+  - ".env"
+  - ".env.local"
+  - ".env.development"
+  - ".env.test"
+  - ".env.production"
+  - "*.log"
+  - "*.tmp"
+  - "*.bak"
+  - "*.swp"
+  - "*~"
+  - ".npmrc"
+  - ".yarnrc"
+  - "package-lock.json"
+  - "yarn.lock"
+  - ".classpath"
+  - ".project"
+
 # Neo4j connection settings
 neo4j:
   uri: "bolt://localhost:7687"
