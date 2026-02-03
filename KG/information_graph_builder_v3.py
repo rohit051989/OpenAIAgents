@@ -8,6 +8,8 @@ Shot 2: Mark package folders based on actual Java files
 import os
 import re
 import yaml
+import os
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 from dataclasses import dataclass, field
@@ -1352,14 +1354,17 @@ class InformationGraphBuilder:
 
 def main():
     """Main execution function."""
-    CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
+    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
+
+    load_dotenv()
+    config_file = os.getenv("KG_CONFIG_FILE") or DEFAULT_CONFIG_FILE
     
     print("=" * 60)
     print("Information Graph Builder V3 (Two-Shot Approach)")
     print("=" * 60)
-    print(f"Config: {CONFIG_FILE}")
+    print(f"Config: {config_file}")
     
-    builder = InformationGraphBuilder(config_path=CONFIG_FILE)
+    builder = InformationGraphBuilder(config_path=config_file)
     
     try:
         # Clear existing data

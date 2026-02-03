@@ -25,6 +25,8 @@ import logging
 from pathlib import Path
 import argparse
 import yaml
+import os
+from dotenv import load_dotenv
 from execution_cpm_analyzer_v3 import ExecutionCPMAnalyzer
 
 # Configure logging
@@ -367,7 +369,12 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    load_dotenv()
+    env_config = os.getenv("KG_CONFIG_FILE")
+    if env_config:
+        args.config = env_config
+
     print("=" * 80)
     print("Spring Batch Instance Data - Neo4j Direct Loader V2")
     print("=" * 80)

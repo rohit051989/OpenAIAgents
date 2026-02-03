@@ -1,0 +1,10 @@
+pandas
+openpyxl
+neo4j
+javalang
+pyyaml
+
+# Optional: For LLM-enhanced DAO analysis
+boto3
+openai
+python-dotenv

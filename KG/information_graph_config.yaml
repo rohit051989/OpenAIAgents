@@ -89,6 +89,10 @@ scan_options:
   extract_imports: true
   extract_methods: true
 
+# Class data configuration
+class_data:
+  excel_file: "sample_data/class_level_data_1.xlsx"
+
 # Instance data configuration
 instance_data:
   excel_file: "sample_data/instance_level_data_v3.xlsx"

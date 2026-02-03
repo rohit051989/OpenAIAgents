@@ -21,6 +21,8 @@ from neo4j import GraphDatabase
 from typing import Dict, List
 import logging
 import yaml
+import os
+from dotenv import load_dotenv
 from neo4j_direct_step_loader import generate_cypher
 from cpm_analyzer_v1 import CPMAnalyzer
 
@@ -1075,12 +1077,24 @@ def main():
     print()
     
     # Configuration
-    CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
-    CLASS_EXCEL = "sample_data/class_level_data_1.xlsx"
+    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
+    DEFAULT_CLASS_EXCEL = "sample_data/class_level_data_1.xlsx"
+
+    load_dotenv()
+    config_file = os.getenv("KG_CONFIG_FILE") or DEFAULT_CONFIG_FILE
+
+    # Read class Excel path from config (fallback to default)
+    class_excel = DEFAULT_CLASS_EXCEL
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+        class_excel = cfg.get('class_data', {}).get('excel_file', DEFAULT_CLASS_EXCEL)
+    except FileNotFoundError:
+        logger.warning(f"Config file not found at {config_file}; using default class Excel path")
     
     try:
         # Create loader and connect to Neo4j using config file
-        with Neo4jLoader(config_path=CONFIG_FILE) as loader:
+        with Neo4jLoader(config_path=config_file) as loader:
 
             # Step 0: Clean the database state
             print("\n🧹 Step 0: Cleaning database state...")
@@ -1093,7 +1107,7 @@ def main():
             
             # Step 2: Load class-level data
             print("\n📦 Step 2: Loading class-level data...")
-            loader.load_class_level_data(CLASS_EXCEL)
+            loader.load_class_level_data(class_excel)
 
             # Step 3: Compute CPM for Job Groups
             #print("\n🕒 Step 3: Computing CPM for Job Groups...")
