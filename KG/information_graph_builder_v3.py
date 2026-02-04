@@ -1157,6 +1157,117 @@ class InformationGraphBuilder:
         
         return ""
     
+    def _store_bean_map_in_graph(self, bean_map: Dict[str, Tuple[str, str]], spring_xml_files: List[str]):
+        """
+        Store the global bean map in the information graph as Bean nodes.
+        
+        Creates:
+        - Bean nodes with properties: beanId, beanClass, sourcePath, hasSource
+        - DEFINED_IN relationship to SpringConfig files
+        - IMPLEMENTS relationship to JavaClass nodes (if source path exists)
+        
+        Args:
+            bean_map: Dictionary mapping bean ID to tuple of (class_name, source_path)
+            spring_xml_files: List of Spring XML files where beans are defined
+        """
+        print(f"\n🔗 Storing Bean Map in Information Graph")
+        print("=" * 60)
+        
+        # Build reverse map: xml_file -> list of bean_ids
+        xml_to_beans: Dict[str, List[str]] = {}
+        for xml_file in spring_xml_files:
+            try:
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+                ns = {'beans': 'http://www.springframework.org/schema/beans'}
+                
+                beans_in_file = []
+                for bean_el in root.findall('.//beans:bean', ns):
+                    bean_id = bean_el.get("id")
+                    if bean_id:
+                        beans_in_file.append(bean_id)
+                
+                xml_to_beans[xml_file] = beans_in_file
+            except Exception as e:
+                logger.warning(f"Failed to parse {Path(xml_file).name}: {e}")
+        
+        beans_created = 0
+        beans_with_source = 0
+        beans_without_source = 0
+        
+        with self.driver.session(database=self.database) as session:
+            for bean_id, (bean_class, source_path) in bean_map.items():
+                has_source = bool(source_path)
+                
+                # Extract simple class name for easier querying
+                simple_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
+                
+                # Create Bean node
+                query_create_bean = """
+                MERGE (b:Bean {beanId: $beanId})
+                ON CREATE SET 
+                    b.beanClass = $beanClass,
+                    b.simpleClassName = $simpleClassName,
+                    b.sourcePath = $sourcePath,
+                    b.hasSource = $hasSource,
+                    b.created_at = datetime()
+                ON MATCH SET
+                    b.beanClass = $beanClass,
+                    b.simpleClassName = $simpleClassName,
+                    b.sourcePath = $sourcePath,
+                    b.hasSource = $hasSource
+                RETURN b
+                """
+                
+                session.run(query_create_bean,
+                    beanId=bean_id,
+                    beanClass=bean_class,
+                    simpleClassName=simple_class_name,
+                    sourcePath=source_path or "",
+                    hasSource=has_source
+                )
+                
+                beans_created += 1
+                if has_source:
+                    beans_with_source += 1
+                else:
+                    beans_without_source += 1
+                
+                # Create relationship to SpringConfig file where bean is defined
+                for xml_file, beans_in_file in xml_to_beans.items():
+                    if bean_id in beans_in_file:
+                        query_link_xml = """
+                        MATCH (b:Bean {beanId: $beanId})
+                        MATCH (f:SpringConfig {path: $xmlPath})
+                        MERGE (b)-[:DEFINED_IN]->(f)
+                        """
+                        session.run(query_link_xml,
+                            beanId=bean_id,
+                            xmlPath=xml_file
+                        )
+                        break
+                
+                # Create relationship to JavaClass if source path exists
+                if has_source:
+                    query_link_class = """
+                    MATCH (b:Bean {beanId: $beanId})
+                    MATCH (j:JavaClass {path: $sourcePath})
+                    MERGE (b)-[:IMPLEMENTS]->(j)
+                    """
+                    try:
+                        session.run(query_link_class,
+                            beanId=bean_id,
+                            sourcePath=source_path
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not link bean '{bean_id}' to JavaClass: {e}")
+        
+        print(f"\n  Bean Node Statistics:")
+        print(f"    Total Beans Created: {beans_created}")
+        print(f"    With Source Path: {beans_with_source}")
+        print(f"    Without Source Path: {beans_without_source}")
+        print("=" * 60)
+    
     def _load_classes(self):
 
         # Step 1: Scan all Spring XML files
@@ -1164,6 +1275,9 @@ class InformationGraphBuilder:
 
         # Step 2: Build original bean map for source paths
         original_bean_map = self._build_global_bean_map_from_graph(spring_xml_files)
+        
+        # Step 2.5: Store bean map in information graph
+        self._store_bean_map_in_graph(original_bean_map, spring_xml_files)
         
         # Step 3: Build comprehensive bean registry
         registry = self.build_global_bean_registry(spring_xml_files, original_bean_map)
