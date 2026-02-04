@@ -508,6 +508,22 @@ class InformationGraphBuilder:
         
         return False
     
+    def _is_test_path(self, file_path: Path) -> bool:
+        """Check if file path is in test directories."""
+        path_str = str(file_path).replace('\\', '/')
+        
+        # Common test directory patterns
+        test_patterns = [
+            '/src/test/',
+            '/test/',
+            '/src/main/test/',
+            '\\src\\test\\',
+            '\\test\\',
+            '\\src\\main\\test\\'
+        ]
+        
+        return any(pattern in path_str for pattern in test_patterns)
+    
     def identify_file_type(self, file_path: Path) -> List[str]:
         """Identify file type based on config rules."""
         file_str = str(file_path).replace('\\', '/')
@@ -516,7 +532,7 @@ class InformationGraphBuilder:
         file_types = []
         
         # Special handling for XML files - check for Spring namespaces
-        if file_ext == '.xml' and file_name.lower() != 'pom.xml':
+        if file_ext == '.xml' and file_name.lower() != 'pom.xml' and file_name.lower() != 'web.xml':
             if self._is_spring_xml(file_path):
                 file_types.append('SpringConfig')
             # Always add XmlConfig for non-pom XML files
@@ -740,30 +756,63 @@ class InformationGraphBuilder:
         except:
             file_size = 0
         
-        query = f"""
-        MERGE (n:{labels} {{path: $path}})
-        ON CREATE SET 
-            n.name = $name,
-            n.node_type = 'File',
-            n.extension = $extension,
-            n.size = $size,
-            n.file_types = $file_types,
-            n.created_at = datetime()
-        WITH n
-        MATCH (parent:Node {{path: $parent_path}})
-        MERGE (parent)-[:CONTAINS]->(n)
-        RETURN n
-        """
+        # Check if SpringConfig is in test or main directory
+        is_spring_config = 'SpringConfig' in file_types
+        is_main_config = not self._is_test_path(file_path) if is_spring_config else None
         
-        with self.driver.session(database=self.database) as session:
-            session.run(query,
-                path=path_str,
-                name=file_path.name,
-                extension=file_path.suffix,
-                size=file_size,
-                file_types=','.join(file_types),
-                parent_path=parent_path
-            )
+        # Build the query with conditional properties
+        if is_spring_config:
+            query = f"""
+            MERGE (n:{labels} {{path: $path}})
+            ON CREATE SET 
+                n.name = $name,
+                n.node_type = 'File',
+                n.extension = $extension,
+                n.size = $size,
+                n.file_types = $file_types,
+                n.isMainConfig = $isMainConfig,
+                n.created_at = datetime()
+            WITH n
+            MATCH (parent:Node {{path: $parent_path}})
+            MERGE (parent)-[:CONTAINS]->(n)
+            RETURN n
+            """
+            
+            with self.driver.session(database=self.database) as session:
+                session.run(query,
+                    path=path_str,
+                    name=file_path.name,
+                    extension=file_path.suffix,
+                    size=file_size,
+                    file_types=','.join(file_types),
+                    isMainConfig=is_main_config,
+                    parent_path=parent_path
+                )
+        else:
+            query = f"""
+            MERGE (n:{labels} {{path: $path}})
+            ON CREATE SET 
+                n.name = $name,
+                n.node_type = 'File',
+                n.extension = $extension,
+                n.size = $size,
+                n.file_types = $file_types,
+                n.created_at = datetime()
+            WITH n
+            MATCH (parent:Node {{path: $parent_path}})
+            MERGE (parent)-[:CONTAINS]->(n)
+            RETURN n
+            """
+            
+            with self.driver.session(database=self.database) as session:
+                session.run(query,
+                    path=path_str,
+                    name=file_path.name,
+                    extension=file_path.suffix,
+                    size=file_size,
+                    file_types=','.join(file_types),
+                    parent_path=parent_path
+                )
         
         stats['files'] += 1
         
@@ -915,7 +964,7 @@ class InformationGraphBuilder:
         
         query = """
         MATCH (f:SpringConfig)
-        WHERE f.path IS NOT NULL
+        WHERE f.path IS NOT NULL AND f.isMainConfig = true
         RETURN f.path as path, f.name as name
         ORDER BY f.path
         """

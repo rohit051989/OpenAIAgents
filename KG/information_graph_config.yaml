@@ -34,12 +34,15 @@ file_type_rules:
     
   pom_file:
     exact_names: ["pom.xml"]
+  
+  web_xml_file:
+    exact_names: ["web.xml"]
     
   spring_config:
     # Spring XML files are identified by checking for Spring namespaces in XML content
     # Only XML files can be Spring bean configuration files
     extensions: [".xml"]
-    exclude_patterns: ["pom\\.xml$"]
+    exclude_patterns: ["pom\\.xml$", "web\\.xml$"]
     # Will be validated by _is_spring_xml() method during file type identification
     
   property_file:
@@ -49,7 +52,7 @@ file_type_rules:
   xml_config:
     # Generic XML config files (Spring XMLs are auto-detected by namespace)
     extensions: [".xml"]
-    exclude_patterns: ["pom\\.xml$"]
+    exclude_patterns: ["pom\\.xml$", "web\\.xml$"]
     
   docker_file:
     exact_names: ["Dockerfile", "docker-compose.yml", ".dockerignore"]
