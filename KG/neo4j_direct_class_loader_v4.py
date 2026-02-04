@@ -1077,11 +1077,11 @@ def main():
     print()
     
     # Configuration
-    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
+    #DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
     DEFAULT_CLASS_EXCEL = "sample_data/class_level_data_1.xlsx"
 
     load_dotenv()
-    config_file = os.getenv("KG_CONFIG_FILE") or DEFAULT_CONFIG_FILE
+    config_file = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
 
     # Read class Excel path from config (fallback to default)
     class_excel = DEFAULT_CLASS_EXCEL

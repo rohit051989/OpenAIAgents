@@ -37,13 +37,14 @@ file_type_rules:
     
   spring_config:
     # Spring XML files are identified by checking for Spring namespaces in XML content
-    # Non-XML Spring configs like application.properties are identified by name patterns
-    extensions: [".yml", ".yaml", ".properties"]
-    include_patterns: ["application.*"]
-    locations: ["src/main/resources", "resources"]
+    # Only XML files can be Spring bean configuration files
+    extensions: [".xml"]
+    exclude_patterns: ["pom\\.xml$"]
+    # Will be validated by _is_spring_xml() method during file type identification
     
   property_file:
     extensions: [".properties", ".env"]
+    locations: ["src/main/resources", "resources", "config"]
     
   xml_config:
     # Generic XML config files (Spring XMLs are auto-detected by namespace)

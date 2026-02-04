@@ -519,6 +519,7 @@ class InformationGraphBuilder:
         if file_ext == '.xml' and file_name.lower() != 'pom.xml':
             if self._is_spring_xml(file_path):
                 file_types.append('SpringConfig')
+            # Always add XmlConfig for non-pom XML files
             file_types.append('XmlConfig')
             return file_types
         
@@ -1377,10 +1378,10 @@ class InformationGraphBuilder:
 
 def main():
     """Main execution function."""
-    DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config111.yaml"
+    #DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config111.yaml"
 
     load_dotenv()
-    config_file = os.getenv("KG_CONFIG_FILE") or DEFAULT_CONFIG_FILE
+    config_file = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
     
     print("=" * 60)
     print("Information Graph Builder V3 (Two-Shot Approach)")
