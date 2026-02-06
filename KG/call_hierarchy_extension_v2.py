@@ -27,7 +27,7 @@ import xml.etree.ElementTree as ET
 from classes.DataClasses import BeanDef
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
-from neo4j_direct_step_loader_v2 import (
+from classes.DataClasses import (
     JobDef
 )
 from classes.DataClasses import (

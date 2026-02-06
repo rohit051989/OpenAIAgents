@@ -22,9 +22,9 @@ import logging
 # Import ClassInfo from call_hierarchy_extension
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
-from classes.DataClasses import BeanDef, ClassInfo
+from classes.DataClasses import BeanDef, ClassInfo, JobDef
 from classes.DAOAnalyzer import DAOAnalyzer
-from neo4j_direct_step_loader_v2 import JobDef, parse_directory
+from neo4j_direct_step_loader import parse_directory
 from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
 

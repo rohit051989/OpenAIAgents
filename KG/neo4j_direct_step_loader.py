@@ -1,92 +1,15 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Dict, List, Literal
-import xml.etree.ElementTree as ET
-from neo4j import GraphDatabase
 import os
-from pathlib import Path
+from typing import Dict, List, Literal, Tuple
+import xml.etree.ElementTree as ET
+
+from classes.DataClasses import (
+    ListenerDef, StepDef, BlockDef, DecisionDef, PrecedesEdge, JobDef
+)
 
 # ---------- Model types ----------
 
 ExecNodeKind = Literal["step", "block", "decision"]
-
-
-@dataclass
-class ListenerDef:
-    name: str
-    scope: str          # "JOB", "STEP", "CHUNK", ...
-    impl_bean: str      # class name (if available)
-    source_path: str = ""  # Source file path for the class (if found)
-
-
-@dataclass
-class StepDef:
-    name: str
-    step_kind: str      # "TASKLET", "CHUNK", etc.
-    impl_bean: str      # tasklet ref bean name (for TASKLET steps)
-    class_name: str     # Class name for the ref bean (if available)
-    class_source_path: str = ""  # Source file path for the class (if found)
-    
-    # For CHUNK steps
-    reader_bean: str = ""     # Reader bean reference
-    reader_class: str = ""    # Reader bean class name
-    reader_source_path: str = ""  # Source file path for reader class
-    processor_bean: str = "" # Processor bean reference
-    processor_class: str = "" # Processor bean class name
-    processor_source_path: str = ""  # Source file path for processor class
-    writer_bean: str = ""     # Writer bean reference
-    writer_class: str = ""    # Writer bean class name
-    writer_source_path: str = ""  # Source file path for writer class
-    
-    listener_names: List[str] = field(default_factory=list)
-
-
-@dataclass
-class BlockDef:
-    id: str
-    block_type: str                 # "FLOW" or "PARALLEL"
-    contains_steps: List[str] = field(default_factory=list)
-    contains_blocks: List[str] = field(default_factory=list)
-    entry_node: str | None = None   # id of first node inside block
-    entry_kind: ExecNodeKind | None = None
-
-
-@dataclass
-class DecisionDef:
-    name: str
-    decider_bean: str
-    class_name: str = ""  # Class name for the decider bean (if available)
-    class_source_path: str = ""  # Source file path for the class (if found)
-
-
-@dataclass
-class PrecedesEdge:
-    src_kind: ExecNodeKind
-    src_id: str
-    dst_id: str          # we'll resolve kind later based on id presence
-    on: str
-
-
-@dataclass
-class JobDef:
-    name: str
-    source_file: str = ""  # Path to the XML file this job was parsed from
-
-    steps: Dict[str, StepDef] = field(default_factory=dict)
-    blocks: Dict[str, BlockDef] = field(default_factory=dict)
-    decisions: Dict[str, DecisionDef] = field(default_factory=dict)
-    listeners: Dict[str, ListenerDef] = field(default_factory=dict)
-
-    job_contains_steps: List[str] = field(default_factory=list)
-    job_contains_blocks: List[str] = field(default_factory=list)
-
-    job_entry_id: str | None = None
-    job_entry_kind: ExecNodeKind | None = None
-
-    precedes: List[PrecedesEdge] = field(default_factory=list)
-
-    # alias flow id -> parent flow block id (e.g. "J1.f1" -> "f1")
-    flow_alias_to_parent: Dict[str, str] = field(default_factory=dict)
 
 
 # ---------- XML parsing ----------
@@ -103,20 +26,11 @@ def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None)
     
     Args:
         xml_path: Path to the XML file
-        bean_class_map: Optional global bean map. If not provided, will only use beans from this file.
+        bean_class_map: global bean map.
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     job_defs: List[JobDef] = []
-
-    # If no global bean map provided, create a local one (for backward compatibility)
-    if bean_class_map is None:
-        bean_class_map = {}
-        for bean_el in root.findall(f"./{N_BEANS}bean"):
-            bid = bean_el.get("id")
-            bclass = bean_el.get("class", "")
-            if bid:
-                bean_class_map[bid] = bclass
 
     # Find the job
     job_els = root.findall(f".//{N_BATCH}job")
@@ -654,278 +568,31 @@ def generate_cypher(job: JobDef) -> str:
 
     return "\n".join(lines)
 
-def execute_cypher_statements(uri: str, user: str, password: str, cypher: str) -> None:
-    
-    statements = [s.strip() for s in cypher.split(";") if s.strip()]
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    with driver.session() as session:
-        for stmt in statements:
-            session.run(stmt)
-    driver.close()
+
+if __name__ == "__main__":
+    # Point this to your directory containing Spring Batch XML files
+    # Can use single file or directory
+    #xml_directory = "sample_data"  # Change this to your directory path
+    xml_directory = "SpringProjects"  # Change this to your directory path
+    uri = "bolt://localhost:7687"
+    user = "neo4j"
+    password = "Rohit@123"  # Change this to your Neo4j password
 
 
-def find_xml_files(directory: str) -> List[str]:
-    """Recursively find all XML files in directory and subdirectories, excluding pom.xml and test files"""
-    xml_files = []
-    directory_path = Path(directory)
-    
-    if not directory_path.exists():
-        raise ValueError(f"Directory does not exist: {directory}")
-    
-    if not directory_path.is_dir():
-        raise ValueError(f"Path is not a directory: {directory}")
-    
-    # Recursively find all XML files
-    for xml_file in directory_path.rglob("*.xml"):
-        # Exclude pom.xml files
-        if xml_file.name.lower() == "pom.xml":
-            continue
-        
-        # Exclude XML files in src/main/test or src\main\test directories
-        # Normalize path to use forward slashes for comparison
-        normalized_path = str(xml_file).replace('\\', '/')
-        if '/src/main/test/' in normalized_path or normalized_path.endswith('/src/main/test'):
-            continue
-        
-        xml_files.append(str(xml_file))
-    
-    return xml_files
-
-
-def find_project_root(xml_path: str) -> str:
-    """
-    Find the project root by walking up directories to find pom.xml.
-    
-    Args:
-        xml_path: Path to an XML file in the project
-        
-    Returns:
-        Path to the project root directory, or empty string if not found
-    """
-    current_dir = Path(xml_path).parent.absolute()
-    
-    # Walk up the directory tree looking for pom.xml
-    for parent in [current_dir] + list(current_dir.parents):
-        pom_file = parent / "pom.xml"
-        if pom_file.exists():
-            return str(parent)
-        
-        # Stop at filesystem root or after checking 10 levels up
-        if len(current_dir.parents) - len(parent.parents) > 10:
-            break
-    
-    return ""
-
-
-def find_java_source_file(class_name: str, project_root: str, root_scan_directory: str = "", 
-                          root_search_cache: Dict[str, str] = None) -> str:
-    """
-    Find the Java source file for a given class name in the project.
-    
-    Args:
-        class_name: Fully qualified class name (e.g., "com.example.MyClass")
-        project_root: Path to the project root directory
-        root_scan_directory: Optional root directory containing multiple projects for fallback search
-        root_search_cache: Optional cache dict to store root directory search results (class_name -> source_path)
-        
-    Returns:
-        Path to the Java source file, or empty string if not found
-    """
-    if not class_name or not project_root:
-        return ""
-    
-    # Skip searching for external library classes (Spring, Java standard library, etc.)
-    # Only search for classes in 'com.*' package (typical business code)
-    if not class_name.startswith("com."):
-        return ""
-    
-    # Convert class name to file path
-    # e.g., "com.example.MyClass" -> "com/example/MyClass.java"
-    class_path = class_name.replace('.', os.sep) + '.java'
-    
-    # Common source directories in Maven/Gradle projects
-    src_dirs = [
-        'src/main/java',
-        'src/java',
-        'src',
-    ]
-    
-    project_path = Path(project_root)
-    
-    # Try each source directory
-    for src_dir in src_dirs:
-        java_file = project_path / src_dir / class_path
-        if java_file.exists():
-            return str(java_file)
-    
-    # If not found in standard locations, do a recursive search within project
-    # (slower but more thorough)
-    try:
-        for java_file in project_path.rglob(class_path):
-            # Exclude common build/target directories
-            if not any(part in java_file.parts for part in ['target', 'build', '.git', '.mvn']):
-                return str(java_file)
-    except Exception:
-        pass
-    
-    # Last resort: search in root_scan_directory if provided
-    # (for multi-repo scenarios where bean class may be in different application)
-    if root_scan_directory and root_scan_directory != project_root:
-        # Check cache first to avoid redundant root directory searches
-        if root_search_cache is not None and class_name in root_search_cache:
-            cached_path = root_search_cache[class_name]
-            if cached_path:  # Non-empty means found in previous search
-                print(f"      Using cached path for {class_name}: {cached_path}")
-                return cached_path
-            else:  # Empty string means we already searched and didn't find it
-                return ""
-        
-        try:
-            root_path = Path(root_scan_directory)
-            if root_path.exists() and root_path.is_dir():
-                print(f"      Searching in root directory for {class_name}...")
-                for java_file in root_path.rglob(class_path):
-                    # Exclude common build/target directories and test directories
-                    if not any(part in java_file.parts for part in ['target', 'build', '.git', '.mvn', 'test']):
-                        found_path = str(java_file)
-                        print(f"      Found in different project: {found_path}")
-                        # Cache the successful find
-                        if root_search_cache is not None:
-                            root_search_cache[class_name] = found_path
-                        return found_path
-                
-                # Not found - cache the negative result to avoid re-searching
-                if root_search_cache is not None:
-                    root_search_cache[class_name] = ""
-        except Exception as e:
-            print(f"      Warning: Error during root directory search: {e}")
-    
-    return ""
-
-
-def extract_bean_definitions(xml_path: str, root_scan_directory: str = "", 
-                            root_search_cache: Dict[str, str] = None) -> Dict[str, tuple[str, str]]:
-    """
-    Extract bean definitions from an XML file.
-    
-    Args:
-        xml_path: Path to the XML file
-        root_scan_directory: Optional root directory containing multiple projects for fallback search
-        root_search_cache: Optional cache dict to store root directory search results
-        
-    Returns:
-        Dictionary mapping bean ID to tuple of (class_name, source_path)
-    """
-    bean_map: Dict[str, tuple[str, str]] = {}
-    
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        
-        # Find project root for this XML file
-        project_root = find_project_root(xml_path)
-        
-        # Track beans without source paths
-        beans_without_source: List[tuple[str, str]] = []
-        
-        # Extract all bean definitions
-        for bean_el in root.findall(f".//{N_BEANS}bean"):
-            bean_id = bean_el.get("id")
-            bean_class = bean_el.get("class", "")
-            if bean_id and bean_class:
-                # Try to find the Java source file
-                source_path = ""
-                if project_root:
-                    source_path = find_java_source_file(bean_class, project_root, root_scan_directory, root_search_cache)
-                
-                if not source_path:
-                    beans_without_source.append((bean_id, bean_class))
-                
-                bean_map[bean_id] = (bean_class, source_path)
-        
-        # Report beans without source paths
-        if beans_without_source:
-            print(f"      {len(beans_without_source)} bean(s) without source path:")
-            for bean_id, bean_class in beans_without_source:
-                print(f"       - Bean '{bean_id}' -> Class '{bean_class}'")
-        
-        return bean_map
-    except Exception as e:
-        print(f"Warning: Failed to extract beans from {xml_path}: {e}")
-        return bean_map
-
-
-def build_global_bean_map(xml_files: List[str], root_scan_directory: str = "") -> Dict[str, tuple[str, str]]:
-    """
-    Build a global bean map from all XML files (first pass).
-    
-    Args:
-        xml_files: List of XML file paths
-        root_scan_directory: Optional root directory containing multiple projects for fallback search
-        
-    Returns:
-        Dictionary mapping bean ID to tuple of (class_name, source_path) across all files
-    """
-    global_bean_map: Dict[str, tuple[str, str]] = {}
-    
-    # Create cache for root directory search results to avoid redundant searches
-    # Maps class_name -> source_path (empty string means searched but not found)
-    root_search_cache: Dict[str, str] = {}
-    
-    print("\n=== First Pass: Building Global Bean Map ===")
-    for xml_file in xml_files:
-        bean_map = extract_bean_definitions(xml_file, root_scan_directory, root_search_cache)
-        if bean_map:
-            # Count how many have source paths
-            with_source = sum(1 for _, source_path in bean_map.values() if source_path)
-            print(f"  {os.path.basename(xml_file)}: Found {len(bean_map)} bean(s), {with_source} with source paths")
-            
-            # Merge into global map, with warning on duplicates
-            for bean_id, (bean_class, source_path) in bean_map.items():
-                if bean_id in global_bean_map and global_bean_map[bean_id][0] != bean_class:
-                    print(f"Warning: Bean ID '{bean_id}' redefined. "
-                          f"Previous: {global_bean_map[bean_id][0]}, New: {bean_class}")
-                global_bean_map[bean_id] = (bean_class, source_path)
-    
-    total_with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
-    print(f"\nGlobal bean map built: {len(global_bean_map)} unique bean(s), {total_with_source} with source paths")
-    
-    # Report cache statistics
-    cache_hits = sum(1 for path in root_search_cache.values() if path)
-    cache_misses = sum(1 for path in root_search_cache.values() if not path)
-    if root_search_cache:
-        print(f"Root directory search cache: {cache_hits} found, {cache_misses} not found (total cached lookups: {len(root_search_cache)})")
-    
-    return global_bean_map
-
-
-def parse_directory(directory: str) -> List[JobDef]:
+def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List[str]) -> List[JobDef]:
     """
     Parse all XML files in directory and subdirectories, returning a single merged JobDef.
     Uses a two-pass approach:
     1. First pass: Build global bean map from all XML files
     2. Second pass: Parse batch jobs using the global bean map
-    
+
     This ensures bean references across different XML files are resolved correctly.
     """
-    xml_files = find_xml_files(directory)
-    
-    if not xml_files:
-        raise ValueError(f"No XML files found in directory: {directory}")
-    
-    print(f"Found {len(xml_files)} XML file(s) to parse:")
-    for xml_file in xml_files:
-        print(f"  - {xml_file}")
-    
-    # FIRST PASS: Build global bean map from all XML files
-    # Pass directory as root_scan_directory for multi-repo fallback search
-    global_bean_map = build_global_bean_map(xml_files, directory)
-    
-    print(f"\nTotal beans in global map: {len(global_bean_map)}")
+
     # SECOND PASS: Parse batch jobs using the global bean map
     print("\n=== Second Pass: Parsing Batch Jobs ===")
     all_job_defs = []
-    
+
     for xml_file in xml_files:
         try:
             print(f"\nParsing: {os.path.basename(xml_file)}")
@@ -935,18 +602,18 @@ def parse_directory(directory: str) -> List[JobDef]:
                 print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
             else:
                 print(f"  No batch jobs found")
-            
+
             # Show which beans were resolved for steps and decisions in this file
             for job in job_defs:
                 # Count resolved beans for tasklet steps
                 tasklet_steps = [s for s in job.steps.values() if s.step_kind == "TASKLET"]
                 chunk_steps = [s for s in job.steps.values() if s.step_kind == "CHUNK"]
-                
+
                 resolved_tasklet_steps = sum(1 for step in tasklet_steps if step.class_name)
                 unresolved_tasklet_steps = sum(1 for step in tasklet_steps if step.impl_bean and not step.class_name)
-                
+
                 # For chunk steps, count if all three beans are resolved
-                resolved_chunk_steps = sum(1 for step in chunk_steps 
+                resolved_chunk_steps = sum(1 for step in chunk_steps
                                           if (not step.reader_bean or step.reader_class) and
                                              (not step.processor_bean or step.processor_class) and
                                              (not step.writer_bean or step.writer_class))
@@ -956,10 +623,10 @@ def parse_directory(directory: str) -> List[JobDef]:
                     (1 if step.writer_bean and not step.writer_class else 0)
                     for step in chunk_steps
                 )
-                
+
                 resolved_decisions = sum(1 for dec in job.decisions.values() if dec.class_name)
                 unresolved_decisions = sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name)
-                
+
                 total_steps = len(job.steps)
                 if total_steps > 0 or resolved_decisions > 0 or unresolved_decisions > 0:
                     msg_parts = []
@@ -969,10 +636,10 @@ def parse_directory(directory: str) -> List[JobDef]:
                         msg_parts.append(f"{resolved_chunk_steps}/{len(chunk_steps)} chunk step(s)")
                     if unresolved_chunk_beans > 0:
                         msg_parts.append(f"{unresolved_chunk_beans} unresolved chunk bean(s)")
-                    
+
                     print(f"    Job '{job.name}': Resolved {', '.join(msg_parts)}, "
                           f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
-                    
+
                     if unresolved_tasklet_steps > 0:
                         print(f"        {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
                     if unresolved_chunk_beans > 0:
@@ -984,32 +651,32 @@ def parse_directory(directory: str) -> List[JobDef]:
             import traceback
             traceback.print_exc()
             continue
-    
+
     if not all_job_defs:
-        raise ValueError(f"No valid job definitions found in directory: {directory}")
-    
+        raise ValueError(f"No valid job definitions found in the provided XML files.")
+
     print(f"\n=== Summary ===")
     print(f"Total jobs found: {len(all_job_defs)}")
     print(f"Job details:")
     for job in all_job_defs:
         print(f"  - '{job.name}' from {os.path.basename(job.source_file)}")
-    
+
     # Calculate overall statistics
     total_steps = sum(len(job.steps) for job in all_job_defs)
     total_tasklet_steps = sum(sum(1 for s in job.steps.values() if s.step_kind == "TASKLET") for job in all_job_defs)
     total_chunk_steps = sum(sum(1 for s in job.steps.values() if s.step_kind == "CHUNK") for job in all_job_defs)
     total_decisions = sum(len(job.decisions) for job in all_job_defs)
     total_listeners = sum(len(job.listeners) for job in all_job_defs)
-    
+
     resolved_tasklet_steps = sum(
-        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.class_name) 
+        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.class_name)
         for job in all_job_defs
     )
     unresolved_tasklet_steps = sum(
-        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name) 
+        sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name)
         for job in all_job_defs
     )
-    
+
     # For chunk steps, count unresolved beans
     unresolved_chunk_beans = sum(
         sum(
@@ -1020,31 +687,31 @@ def parse_directory(directory: str) -> List[JobDef]:
         )
         for job in all_job_defs
     )
-    
+
     resolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.class_name) for job in all_job_defs)
     unresolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name) for job in all_job_defs)
-    
+
     print(f"\nTotal Steps: {total_steps} (Tasklet: {total_tasklet_steps}, Chunk: {total_chunk_steps})")
     print(f"  Tasklet Steps - Resolved: {resolved_tasklet_steps}, Unresolved: {unresolved_tasklet_steps}")
     if total_chunk_steps > 0:
         print(f"  Chunk Steps: {total_chunk_steps} (Unresolved beans: {unresolved_chunk_beans})")
     print(f"Total Decisions: {total_decisions} (Resolved: {resolved_decisions}, Unresolved: {unresolved_decisions})")
     print(f"Total Listeners: {total_listeners}")
-    
+
     if unresolved_tasklet_steps > 0 or unresolved_chunk_beans > 0 or unresolved_decisions > 0:
         print(f"\n  There are unresolved bean references. Check the warnings above for details.")
-        
+
         # Print list of tasklet steps with unresolved beans
         if unresolved_tasklet_steps > 0:
             print(f"\n  Tasklet Steps with unresolved bean references:")
             for job in all_job_defs:
-                unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values() 
+                unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values()
                                        if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name]
                 if unresolved_step_list:
                     print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, bean_ref in unresolved_step_list:
                         print(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
-        
+
         # Print list of chunk steps with unresolved beans
         if unresolved_chunk_beans > 0:
             print(f"\n  Chunk Steps with unresolved bean references:")
@@ -1061,40 +728,28 @@ def parse_directory(directory: str) -> List[JobDef]:
                             unresolved.append(f"writer='{step.writer_bean}'")
                         if unresolved:
                             chunk_steps_with_issues.append((step.name, unresolved))
-                
+
                 if chunk_steps_with_issues:
                     print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, unresolved_list in chunk_steps_with_issues:
                         print(f"    - Step '{step_name}' -> {', '.join(unresolved_list)}")
-        
+
         # Print list of decisions with unresolved beans
         if unresolved_decisions > 0:
             print(f"\n  Decisions with unresolved bean references:")
             for job in all_job_defs:
-                unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values() 
+                unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values()
                                            if dec.decider_bean and not dec.class_name]
                 if unresolved_decision_list:
                     print(f"  Job '{job.name}' (from: {job.source_file}):")
                     for dec_name, bean_ref in unresolved_decision_list:
                         print(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
-     
-    return all_job_defs, global_bean_map
 
-
-# ---------- Example entry point ----------
-
-if __name__ == "__main__":
-    # Point this to your directory containing Spring Batch XML files
-    # Can use single file or directory
-    #xml_directory = "sample_data"  # Change this to your directory path
-    xml_directory = "SpringProjects"  # Change this to your directory path
-    uri = "bolt://localhost:7687"
-    user = "neo4j"
-    password = "Rohit@123"  # Change this to your Neo4j password
+    return all_job_defs
 
     # Parse all XML files in directory and merge into single JobDef
-    job_defs, global_bean_map = parse_directory(xml_directory)
-    print(f"\nParsed and merged job definitions: {job_defs}")
+    #job_defs, global_bean_map = parse_directory(xml_directory)
+    #print(f"\nParsed and merged job definitions: {job_defs}")
     # Generate and optionally execute Cypher statements
     #cypher = generate_cypher(job_defs[0])
     # print(cypher)

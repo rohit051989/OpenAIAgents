@@ -138,3 +138,81 @@ class BeanDef:
         return all_deps
 
 
+@dataclass
+class ListenerDef:
+    name: str
+    scope: str          # "JOB", "STEP", "CHUNK", ...
+    impl_bean: str      # class name (if available)
+    source_path: str = ""  # Source file path for the class (if found)
+
+
+@dataclass
+class StepDef:
+    name: str
+    step_kind: str      # "TASKLET", "CHUNK", etc.
+    impl_bean: str      # tasklet ref bean name (for TASKLET steps)
+    class_name: str     # Class name for the ref bean (if available)
+    class_source_path: str = ""  # Source file path for the class (if found)
+
+    # For CHUNK steps
+    reader_bean: str = ""     # Reader bean reference
+    reader_class: str = ""    # Reader bean class name
+    reader_source_path: str = ""  # Source file path for reader class
+    processor_bean: str = "" # Processor bean reference
+    processor_class: str = "" # Processor bean class name
+    processor_source_path: str = ""  # Source file path for processor class
+    writer_bean: str = ""     # Writer bean reference
+    writer_class: str = ""    # Writer bean class name
+    writer_source_path: str = ""  # Source file path for writer class
+
+    listener_names: List[str] = field(default_factory=list)
+
+
+@dataclass
+class BlockDef:
+    id: str
+    block_type: str                 # "FLOW" or "PARALLEL"
+    contains_steps: List[str] = field(default_factory=list)
+    contains_blocks: List[str] = field(default_factory=list)
+    entry_node: str | None = None   # id of first node inside block
+    entry_kind: ExecNodeKind | None = None
+
+
+@dataclass
+class DecisionDef:
+    name: str
+    decider_bean: str
+    class_name: str = ""  # Class name for the decider bean (if available)
+    class_source_path: str = ""  # Source file path for the class (if found)
+
+
+@dataclass
+class PrecedesEdge:
+    src_kind: ExecNodeKind
+    src_id: str
+    dst_id: str          # we'll resolve kind later based on id presence
+    on: str
+
+
+@dataclass
+class JobDef:
+    name: str
+    source_file: str = ""  # Path to the XML file this job was parsed from
+
+    steps: Dict[str, StepDef] = field(default_factory=dict)
+    blocks: Dict[str, BlockDef] = field(default_factory=dict)
+    decisions: Dict[str, DecisionDef] = field(default_factory=dict)
+    listeners: Dict[str, ListenerDef] = field(default_factory=dict)
+
+    job_contains_steps: List[str] = field(default_factory=list)
+    job_contains_blocks: List[str] = field(default_factory=list)
+
+    job_entry_id: str | None = None
+    job_entry_kind: ExecNodeKind | None = None
+
+    precedes: List[PrecedesEdge] = field(default_factory=list)
+
+    # alias flow id -> parent flow block id (e.g. "J1.f1" -> "f1")
+    flow_alias_to_parent: Dict[str, str] = field(default_factory=dict)
+
+
