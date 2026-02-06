@@ -84,6 +84,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         processed_classes.add(class_fqn)
         class_info = all_classes_cache[class_fqn]
         
+        # Determine if this is a DAO class
+        dao_analyzer = DAOAnalyzer()
+        is_dao_class = dao_analyzer._is_dao_class(class_info)
+        is_dao_class_value = "true" if is_dao_class else "false"
+        
         # Create JavaClass node
         escaped_fqn = escape_cypher_string(class_fqn)
         escaped_class_name = escape_cypher_string(class_info.class_name)
@@ -92,7 +97,8 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         lines.append(
             f"MERGE (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
             f"SET c.className = '{escaped_class_name}', "
-            f"c.package = '{escaped_package}';"
+            f"c.package = '{escaped_package}', "
+            f"c.isDAOClass = {is_dao_class_value};"
         )
         
         # Process each method in the class
@@ -214,10 +220,16 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                     escaped_called_class_name = escape_cypher_string(called_class_info.class_name)
                     escaped_called_package = escape_cypher_string(called_class_info.package)
                     
+                    # Determine if this is a DAO class
+                    dao_analyzer_called = DAOAnalyzer()
+                    is_dao_class_called = dao_analyzer_called._is_dao_class(called_class_info)
+                    is_dao_class_called_value = "true" if is_dao_class_called else "false"
+                    
                     lines.append(
                         f"MERGE (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
                         f"SET cc.className = '{escaped_called_class_name}', "
-                        f"cc.package = '{escaped_called_package}';"
+                        f"cc.package = '{escaped_called_package}', "
+                        f"cc.isDAOClass = {is_dao_class_called_value};"
                     )
                     
                     # Create USES_CLASS relationship
@@ -747,7 +759,11 @@ class InformationGraphBuilder:
             stats['config_files'] += 1
     
     def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str):
-        """Create a JavaClass node with package property."""
+        """Create a JavaClass node with package property and isDAOClass flag."""
+        # Determine if this is a DAO class
+        dao_analyzer = DAOAnalyzer()
+        is_dao_class = dao_analyzer._is_dao_class(class_info)
+        
         query = """
         MERGE (n:Node:File:JavaClass {path: $path})
         ON CREATE SET 
@@ -761,6 +777,7 @@ class InformationGraphBuilder:
             n.imports = $imports,
             n.fields = $fields,
             n.method_count = $method_count,
+            n.isDAOClass = $isDAOClass,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -780,6 +797,7 @@ class InformationGraphBuilder:
                 imports=class_info.imports,
                 fields=json.dumps(class_info.fields),
                 method_count=len(class_info.methods),
+                isDAOClass=is_dao_class,
                 parent_path=parent_path
             )
             

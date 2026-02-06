@@ -1099,7 +1099,7 @@ def main():
 
             # Step 1: Create constraints and indexes
             print("\n📐 Step 1: Creating constraints and indexes...")
-            loader.create_constraints_and_indexes()
+            #loader.create_constraints_and_indexes()
             
             # Step 2: Load class-level data
             print("\n📦 Step 2: Loading class-level data...")

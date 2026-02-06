@@ -19,11 +19,9 @@ Date: 2025-12-01
 
 import pandas as pd
 from neo4j import GraphDatabase
-from typing import Dict, List
-from datetime import datetime
+from typing import Dict
 import logging
 from pathlib import Path
-import argparse
 import yaml
 import os
 from dotenv import load_dotenv
@@ -40,20 +38,12 @@ logger = logging.getLogger(__name__)
 class Neo4jInstanceLoaderV2:
     """Load Spring Batch instance data into Neo4j with JobContext support"""
     
-    def __init__(self, config_path: str = None,
-                 uri: str = None, 
-                 user: str = None, 
-                 password: str = None,
-                 database: str = None):
+    def __init__(self, config_path: str = None):
         """
         Initialize Neo4j connection
         
         Args:
             config_path: Path to YAML config file (preferred method)
-            uri: Neo4j connection URI (fallback if config_path not provided)
-            user: Username (fallback)
-            password: Password (fallback)
-            database: Target database for knowledge graph (fallback)
         """
         # Load from config file if provided
         if config_path:
@@ -65,15 +55,8 @@ class Neo4jInstanceLoaderV2:
             user = neo4j_config['user']
             password = neo4j_config['password']
             database = neo4j_config['database_kg']
-            self.instance_excel_path = config.get('instance_data', {}).get('excel_file', 'sample_data/instance_level_data.xlsx')
+            self.instance_excel_path = config.get('instance_data', {}).get('excel_file', '')
             logger.info(f"Loaded configuration from {config_path}")
-        else:
-            # Use provided parameters or defaults
-            uri = uri or "bolt://localhost:7687"
-            user = user or "neo4j"
-            password = password or "password"
-            database = database or "knowledgegraph"
-            self.instance_excel_path = "sample_data/instance_level_data.xlsx"
         
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.database = database
@@ -324,7 +307,6 @@ class Neo4jInstanceLoaderV2:
                 WHERE n:JobGroupExecution OR 
                       n:JobContextExecution OR 
                       n:StepExecution OR 
-                      n:StepActionExecution OR
                       n:ResourceAvailabilityEvent
                 DETACH DELETE n
             """)
@@ -348,33 +330,10 @@ class Neo4jInstanceLoaderV2:
 
 def main():
     """Main execution function"""
-    parser = argparse.ArgumentParser(
-        description='Load Spring Batch instance data into Neo4j (V2 with JobContext)'
-    )
-    parser.add_argument(
-        '--config',
-        type=str,
-        default='information_graph_config.yaml',
-        help='Path to YAML configuration file'
-    )
-    parser.add_argument(
-        '--file',
-        type=str,
-        help='Instance data Excel file (overrides config file)'
-    )
-    parser.add_argument(
-        '--clear',
-        action='store_true',
-        help='Clear existing instance data before loading'
-    )
     
-    args = parser.parse_args()
-
     load_dotenv()
-    env_config = os.getenv("KG_CONFIG_FILE")
-    if env_config:
-        args.config = env_config
-
+    config_path = os.getenv("KG_CONFIG_FILE")
+    
     print("=" * 80)
     print("Spring Batch Instance Data - Neo4j Direct Loader V2")
     print("=" * 80)
@@ -382,16 +341,11 @@ def main():
     
     try:
         # Create loader using config file
-        with Neo4jInstanceLoaderV2(config_path=args.config) as loader:
+        with Neo4jInstanceLoaderV2(config_path=config_path) as loader:
             
             # Determine Excel file path (command line arg overrides config)
-            excel_file = args.file if args.file else loader.instance_excel_path
+            excel_file = loader.instance_excel_path
             
-            # Clear if requested
-            if args.clear:
-                print("🧹 Clearing existing instance data...")
-                loader.clear_instance_data()
-                print("   ✓ Instance data cleared\n")
             
             # Create constraints and indexes
             #print("📐 Creating constraints and indexes...")
