@@ -8,3 +8,5 @@ pyyaml
 boto3
 openai
 python-dotenv
+requests
+anthropic

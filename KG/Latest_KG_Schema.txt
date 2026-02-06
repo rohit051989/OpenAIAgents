@@ -1,0 +1,404 @@
+{
+    "nodes_with_descriptions": {
+        "Job": "Spring Batch job definition with configuration and steps",
+        "ScheduleInstanceContext": "Scheduling context for a Job, linking it to execution flow and dependencies",
+        "Step": "Individual step within a Job representing a unit of work",
+        "SLA": "Service Level Agreement defining performance expectations",
+        "Calendar": "Scheduling calendar defining when Jobs can or cannot execute",
+        "Holiday": "Holiday date that affects Job execution schedules",
+        "DataAsset": "Specific data operation (read/write/delete/aggregate) on a Resource",
+        "JobGroupExecution": "Execution instance of a JobGroup",
+        "JobContextExecution": "Execution instance of a Job through its ScheduleInstanceContext",
+        "ResourceAvailabilityEvent": "Event indicating when a Resource became available",
+        "CriticalPathInstance": "CPM metrics for a specific JobContextExecution",
+        "CriticalPathCalculated": "CPM calculation results for a JobGroupExecution",
+        "CriticalPathSignature": "Unique critical path pattern library for a JobGroup",
+        "Tag": "Categorization label for Jobs, Steps, Resources, or other entities",
+        "Resource": "External dependency such as FILE or TABLE that Jobs/Steps require",
+        "JobGroup": "Group of related Jobs that execute together as a unit"
+    },
+    "nodes_properties": {
+        "Job": {
+            "id": "Unique identifier for the Job",
+            "name": "Name of the Job",
+            "description": "Description of the Job",
+            "enabled": "Whether the Job is enabled (boolean)",
+            "createdAt": "Timestamp when the Job was created",
+            "restartable": "Whether the Job is restartable (boolean)",
+            "sourceFile": "Source Spring XML configuration file path"
+        },
+        "ScheduleInstanceContext": {
+            "id": "Unique identifier for the ScheduleInstanceContext",
+            "name": "Name of the context",
+            "description": "Description of the context",
+            "enabled": "Whether the context is enabled (boolean)",
+            "contextForEntityId": "ID of the entity (Job) this context is for",
+            "estimatedDurationMs": "Estimated duration in milliseconds"
+        },
+        "Step": {
+            "name": "Name of the Step",
+            "processorBean": "Property 'processorBean' of node 'Step'",
+            "processorClass": "Property 'processorClass' of node 'Step'",
+            "processorSourcePath": "Property 'processorSourcePath' of node 'Step'",
+            "readerBean": "Property 'readerBean' of node 'Step'",
+            "readerClass": "Property 'readerClass' of node 'Step'",
+            "readerSourcePath": "Property 'readerSourcePath' of node 'Step'",
+            "stepKind": "Type of Step: TASKLET, CHUNK, etc.",
+            "writerBean": "Property 'writerBean' of node 'Step'",
+            "writerClass": "Property 'writerClass' of node 'Step'",
+            "writerSourcePath": "Property 'writerSourcePath' of node 'Step'",
+            "stepDbOperations": "Property 'stepDbOperations' of node 'Step'",
+            "stepDbOperationCount": "Property 'stepDbOperationCount' of node 'Step'",
+            "className": "Java class name implementing the Step",
+            "classSourcePath": "Property 'classSourcePath' of node 'Step'",
+            "implBean": "Spring bean name for Step implementation"
+        },
+        "SLA": {
+            "id": "Unique identifier for the SLA",
+            "name": "Name of the SLA",
+            "enabled": "Whether the SLA is enabled (boolean)",
+            "type": "SLA type: ABSOLUTE, RELATIVE",
+            "policy": "SLA policy: finish_by_time, duration_less_than, etc.",
+            "severity": "Severity level: CRITICAL, HIGH, MEDIUM, LOW",
+            "durationMs": "Maximum duration in milliseconds",
+            "time": "Absolute time for completion (e.g., 04:00:00)",
+            "tz": "Time zone for the SLA"
+        },
+        "Calendar": {
+            "id": "Unique identifier for the Calendar",
+            "name": "Name of the Calendar",
+            "description": "Description of the Calendar",
+            "enabled": "Whether the Calendar is enabled (boolean)",
+            "type": "Calendar type: DAY_OF_WEEK, TIME_WINDOW, DAY_OF_MONTH, HOLIDAY",
+            "blockedDays": "List of blocked days (for DAY_OF_WEEK or DAY_OF_MONTH)",
+            "startTime": "Start time for TIME_WINDOW type",
+            "endTime": "End time for TIME_WINDOW type",
+            "tz": "Time zone for the Calendar"
+        },
+        "Holiday": {
+            "id": "Unique identifier for the Holiday",
+            "name": "Name of the Holiday",
+            "enabled": "Whether the Holiday is enabled (boolean)",
+            "date": "Date of the Holiday"
+        },
+        "DataAsset": {
+            "id": "Unique identifier for the DataAsset",
+            "description": "Description of the data operation",
+            "enabled": "Whether the DataAsset is enabled (boolean)",
+            "method": "Method name performing the operation",
+            "methodReference": "Fully qualified method reference"
+        },
+        "JobGroupExecution": {
+            "id": "Unique execution identifier for JobGroupExecution",
+            "startTime": "Start time of the execution",
+            "businessDate": "Business date for the execution"
+        },
+        "JobContextExecution": {
+            "id": "Unique execution identifier for JobContextExecution",
+            "status": "Execution status: COMPLETED, FAILED, RUNNING, etc.",
+            "startTime": "Start time of the execution",
+            "endTime": "End time of the execution",
+            "businessDate": "Business date for the execution",
+            "durationMs": "Duration in milliseconds",
+            "volume": "Data volume processed",
+            "exitCode": "Exit code from execution",
+            "exitMessage": "Exit message or error message",
+            "retryCount": "Number of retries attempted",
+            "expectedStartTime": "Expected start time based on schedule"
+        },
+        "ResourceAvailabilityEvent": {
+            "id": "Unique identifier for the event",
+            "businessDate": "Property 'businessDate' of node 'ResourceAvailabilityEvent'",
+            "sizemb": "Property 'sizemb' of node 'ResourceAvailabilityEvent'",
+            "checksum": "Checksum of the resource",
+            "detectedBy": "Entity that detected the availability",
+            "availabilityTime": "Property 'availabilityTime' of node 'ResourceAvailabilityEvent'"
+        },
+        "CriticalPathInstance": {
+            "id": "Unique identifier for CriticalPathInstance",
+            "es": "Earliest start time in milliseconds",
+            "ef": "Earliest finish time in milliseconds",
+            "ls": "Latest start time in milliseconds",
+            "lf": "Latest finish time in milliseconds",
+            "slack": "Slack time in milliseconds",
+            "dur": "Duration in milliseconds",
+            "isLongest": "Whether this is on the longest/critical path (boolean)",
+            "computedAt": "Timestamp when CPM was computed"
+        },
+        "CriticalPathCalculated": {
+            "id": "Unique identifier for CriticalPathCalculated",
+            "cpm_completion_ms": "Total completion time in milliseconds",
+            "cpm_total_buffer_ms": "Total buffer time in milliseconds",
+            "cpm_longest_path": "Longest path as array of context IDs",
+            "cpm_critical_path": "Critical path as array of context IDs",
+            "signatureHash": "Hash of the critical path signature",
+            "signatureText": "Text representation of the critical path",
+            "cpm_computed_at": "Timestamp when CPM was computed"
+        },
+        "CriticalPathSignature": {
+            "id": "Unique identifier for CriticalPathSignature",
+            "signatureHash": "Hash of the critical path signature",
+            "signatureText": "Text representation of the critical path",
+            "occurrenceCount": "Number of times this signature has occurred",
+            "firstSeenAt": "Timestamp when first seen",
+            "lastSeenAt": "Timestamp when last seen"
+        },
+        "Tag": {
+            "id": "Unique identifier for the Tag",
+            "name": "Name of the Tag",
+            "description": "Description of the Tag",
+            "tagType": "Type of Tag: Business, Technical, etc.",
+            "enabled": "Whether the Tag is enabled (boolean)",
+            "createdAt": "Timestamp when the Tag was created"
+        },
+        "Resource": {
+            "id": "Unique identifier for the Resource",
+            "name": "Name of the Resource",
+            "enabled": "Whether the Resource is enabled (boolean)",
+            "type": "Resource type: FILE, TABLE, etc.",
+            "checkInterval": "Interval in minutes to check resource availability",
+            "resourceLocation": "File path for FILE type resources",
+            "schemaName": "Database schema name for TABLE type resources"
+        },
+        "JobGroup": {
+            "id": "Unique identifier for the JobGroup",
+            "name": "Name of the JobGroup",
+            "description": "Description of the JobGroup",
+            "enabled": "Whether the JobGroup is enabled (boolean)",
+            "createdAt": "Timestamp when the JobGroup was created",
+            "priority": "Priority level of the JobGroup"
+        }
+    },
+    "relationships_with_descriptions": {
+        "HAS_JOB": "Links JobGroup to its contained Jobs",
+        "FOR_JOB": "Links ScheduleInstanceContext to the Job it represents",
+        "FOR_GROUP": "Links ScheduleInstanceContext to the JobGroup it belongs to",
+        "PRECEDES": "Links ScheduleInstanceContext/Step/Decision to its successor in execution flow, with 'on' property indicating condition",
+        "ENTRY": "Links JobGroup/Job/Block to its entry point (ScheduleInstanceContext or Step)",
+        "CONTAINS": "Links Job to its Steps or Blocks; also links Block to its contained Steps",
+        "HAS_TAG": "Links entity (Job, Step, Resource, JobGroupExecution, etc.) to its Tag",
+        "Require_Resource": "Links JobGroup or Job to required Resource",
+        "HAS_SLA": "Links entity (JobGroup, Job, Resource) to its SLA",
+        "RELATIVE_TO_RESOURCE": "Links SLA to Resource it's relative to (for relative SLAs)",
+        "CAN_EXECUTE_ON": "Links JobGroup or Job to Calendar allowing execution",
+        "CANNOT_EXECUTE_ON": "Links JobGroup or Job to Calendar blocking execution",
+        "BLOCKS_ON": "Links Calendar to Holidays that block execution",
+        "FOR_RESOURCE": "Links DataAsset or ResourceAvailabilityEvent to its parent Resource",
+        "EXECUTES_JOB_GROUP": "Links JobGroupExecution to JobGroup being executed",
+        "EXECUTES_CONTEXT": "Links JobContextExecution to ScheduleInstanceContext being executed",
+        "EXECUTES_JOB": "Links JobContextExecution to Job being executed",
+        "EXECUTES_JOB_CONTEXT": "Links JobGroupExecution to JobContextExecution",
+        "FOR_RUN": "Links ResourceAvailabilityEvent or CriticalPathInstance to execution instance (JobGroupExecution or JobContextExecution)",
+        "IMPACTED": "Links ResourceAvailabilityEvent to execution instance it impacted",
+        "FOR_CONTEXT": "Links CriticalPathInstance to ScheduleInstanceContext it represents",
+        "HAS_CRITICAL_PATH_CALCULATED": "Links JobGroupExecution to its CriticalPathCalculated results",
+        "HAS_CRITICAL_PATH_SIGNATURE": "Links JobGroup or JobGroupExecution or CriticalPathCalculated to CriticalPathSignature library pattern"
+    },
+    "relationship_patterns": [
+        {
+            "source": "Calendar",
+            "relationship": "BLOCKS_ON",
+            "target": "Holiday",
+            "pattern": "(Calendar)-[:BLOCKS_ON]->(Holiday)"
+        },
+        {
+            "source": "CriticalPathCalculated",
+            "relationship": "HAS_CRITICAL_PATH_SIGNATURE",
+            "target": "CriticalPathSignature",
+            "pattern": "(CriticalPathCalculated)-[:HAS_CRITICAL_PATH_SIGNATURE]->(CriticalPathSignature)"
+        },
+        {
+            "source": "CriticalPathInstance",
+            "relationship": "FOR_CONTEXT",
+            "target": "ScheduleInstanceContext",
+            "pattern": "(CriticalPathInstance)-[:FOR_CONTEXT]->(ScheduleInstanceContext)"
+        },
+        {
+            "source": "CriticalPathInstance",
+            "relationship": "FOR_RUN",
+            "target": "JobContextExecution",
+            "pattern": "(CriticalPathInstance)-[:FOR_RUN]->(JobContextExecution)"
+        },
+        {
+            "source": "DataAsset",
+            "relationship": "FOR_RESOURCE",
+            "target": "Resource",
+            "pattern": "(DataAsset)-[:FOR_RESOURCE]->(Resource)"
+        },
+        {
+            "source": "Job",
+            "relationship": "CONTAINS",
+            "target": "Step",
+            "pattern": "(Job)-[:CONTAINS]->(Step)"
+        },
+        {
+            "source": "Job",
+            "relationship": "ENTRY",
+            "target": "Step",
+            "pattern": "(Job)-[:ENTRY]->(Step)"
+        },
+        {
+            "source": "Job",
+            "relationship": "HAS_SLA",
+            "target": "SLA",
+            "pattern": "(Job)-[:HAS_SLA]->(SLA)"
+        },
+        {
+            "source": "JobContextExecution",
+            "relationship": "EXECUTES_CONTEXT",
+            "target": "ScheduleInstanceContext",
+            "pattern": "(JobContextExecution)-[:EXECUTES_CONTEXT]->(ScheduleInstanceContext)"
+        },
+        {
+            "source": "JobContextExecution",
+            "relationship": "EXECUTES_JOB",
+            "target": "Job",
+            "pattern": "(JobContextExecution)-[:EXECUTES_JOB]->(Job)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "CANNOT_EXECUTE_ON",
+            "target": "Calendar",
+            "pattern": "(JobGroup)-[:CANNOT_EXECUTE_ON]->(Calendar)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "CAN_EXECUTE_ON",
+            "target": "Calendar",
+            "pattern": "(JobGroup)-[:CAN_EXECUTE_ON]->(Calendar)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "ENTRY",
+            "target": "ScheduleInstanceContext",
+            "pattern": "(JobGroup)-[:ENTRY]->(ScheduleInstanceContext)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "HAS_CRITICAL_PATH_SIGNATURE",
+            "target": "CriticalPathSignature",
+            "pattern": "(JobGroup)-[:HAS_CRITICAL_PATH_SIGNATURE]->(CriticalPathSignature)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "HAS_JOB",
+            "target": "Job",
+            "pattern": "(JobGroup)-[:HAS_JOB]->(Job)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "HAS_SLA",
+            "target": "SLA",
+            "pattern": "(JobGroup)-[:HAS_SLA]->(SLA)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "Require_Resource",
+            "target": "Resource",
+            "pattern": "(JobGroup)-[:Require_Resource]->(Resource)"
+        },
+        {
+            "source": "JobGroupExecution",
+            "relationship": "EXECUTES_JOB_CONTEXT",
+            "target": "JobContextExecution",
+            "pattern": "(JobGroupExecution)-[:EXECUTES_JOB_CONTEXT]->(JobContextExecution)"
+        },
+        {
+            "source": "JobGroupExecution",
+            "relationship": "EXECUTES_JOB_GROUP",
+            "target": "JobGroup",
+            "pattern": "(JobGroupExecution)-[:EXECUTES_JOB_GROUP]->(JobGroup)"
+        },
+        {
+            "source": "JobGroupExecution",
+            "relationship": "HAS_CRITICAL_PATH_CALCULATED",
+            "target": "CriticalPathCalculated",
+            "pattern": "(JobGroupExecution)-[:HAS_CRITICAL_PATH_CALCULATED]->(CriticalPathCalculated)"
+        },
+        {
+            "source": "JobGroupExecution",
+            "relationship": "HAS_CRITICAL_PATH_SIGNATURE",
+            "target": "CriticalPathSignature",
+            "pattern": "(JobGroupExecution)-[:HAS_CRITICAL_PATH_SIGNATURE]->(CriticalPathSignature)"
+        },
+        {
+            "source": "JobGroupExecution",
+            "relationship": "HAS_TAG",
+            "target": "Tag",
+            "pattern": "(JobGroupExecution)-[:HAS_TAG]->(Tag)"
+        },
+        {
+            "source": "Resource",
+            "relationship": "HAS_SLA",
+            "target": "SLA",
+            "pattern": "(Resource)-[:HAS_SLA]->(SLA)"
+        },
+        {
+            "source": "Resource",
+            "relationship": "HAS_TAG",
+            "target": "Tag",
+            "pattern": "(Resource)-[:HAS_TAG]->(Tag)"
+        },
+        {
+            "source": "ResourceAvailabilityEvent",
+            "relationship": "FOR_RESOURCE",
+            "target": "Resource",
+            "pattern": "(ResourceAvailabilityEvent)-[:FOR_RESOURCE]->(Resource)"
+        },
+        {
+            "source": "ResourceAvailabilityEvent",
+            "relationship": "FOR_RUN",
+            "target": "JobContextExecution",
+            "pattern": "(ResourceAvailabilityEvent)-[:FOR_RUN]->(JobContextExecution)"
+        },
+        {
+            "source": "ResourceAvailabilityEvent",
+            "relationship": "FOR_RUN",
+            "target": "JobGroupExecution",
+            "pattern": "(ResourceAvailabilityEvent)-[:FOR_RUN]->(JobGroupExecution)"
+        },
+        {
+            "source": "ResourceAvailabilityEvent",
+            "relationship": "IMPACTED",
+            "target": "JobContextExecution",
+            "pattern": "(ResourceAvailabilityEvent)-[:IMPACTED]->(JobContextExecution)"
+        },
+        {
+            "source": "ResourceAvailabilityEvent",
+            "relationship": "IMPACTED",
+            "target": "JobGroupExecution",
+            "pattern": "(ResourceAvailabilityEvent)-[:IMPACTED]->(JobGroupExecution)"
+        },
+        {
+            "source": "SLA",
+            "relationship": "RELATIVE_TO_RESOURCE",
+            "target": "Resource",
+            "pattern": "(SLA)-[:RELATIVE_TO_RESOURCE]->(Resource)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "FOR_GROUP",
+            "target": "JobGroup",
+            "pattern": "(ScheduleInstanceContext)-[:FOR_GROUP]->(JobGroup)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "FOR_JOB",
+            "target": "Job",
+            "pattern": "(ScheduleInstanceContext)-[:FOR_JOB]->(Job)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "PRECEDES",
+            "target": "ScheduleInstanceContext",
+            "pattern": "(ScheduleInstanceContext)-[:PRECEDES]->(ScheduleInstanceContext)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "Require_Resource",
+            "target": "Resource",
+            "pattern": "(ScheduleInstanceContext)-[:Require_Resource]->(Resource)"
+        }
+    ],
+    "description": "Spring Batch Knowledge Graph with class-level definitions, execution instances, Java code lineage, and CPM critical path analysis"
+}

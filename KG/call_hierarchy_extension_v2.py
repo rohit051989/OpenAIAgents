@@ -18,111 +18,21 @@ Architecture:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
 # Import from existing modules
+from classes.DataClasses import BeanDef
+from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
+from classes.SpringBeanRegistry import SpringBeanRegistry
 from neo4j_direct_step_loader_v2 import (
-    JobDef, StepDef, find_xml_files, parse_directory,
-    build_global_bean_map as original_build_global_bean_map
+    JobDef
 )
-from call_hierarchy_extension import (
-    JavaCallHierarchyParser, DAOAnalyzer, OracleProcedureAnalyzer, ShellScriptAnalyzer,
+from classes.DataClasses import (
     ClassInfo
 )
-
-
-@dataclass
-class BeanDef:
-    """Comprehensive bean definition with all metadata"""
-    bean_id: str
-    bean_class: str  # Fully qualified class name
-    bean_class_name: str  # Simple class name (no package)
-    class_source_path: Optional[str] = None
-    
-    # Dependencies: Dict[property_name, (dep_bean_id, dep_bean_class)]
-    # Stores both beanId and beanClass for quick lookup
-    property_dependencies: Dict[str, Tuple[str, str]] = field(default_factory=dict)
-    constructor_dependencies: Dict[str, Tuple[str, str]] = field(default_factory=dict)
-    
-    # Processing status
-    is_dependency_processed: bool = False  # True when all dependencies resolved
-    source_xml_file: Optional[str] = None
-    
-    # Parsed Java class info (populated later)
-    class_info: Optional[ClassInfo] = None
-    
-    def get_package(self) -> str:
-        """Extract package from bean_class"""
-        if '.' in self.bean_class:
-            return '.'.join(self.bean_class.split('.')[:-1])
-        return ""
-    
-    def get_all_dependencies(self) -> Dict[str, Tuple[str, str]]:
-        """Get all dependencies (properties + constructor args)"""
-        all_deps = {}
-        all_deps.update(self.property_dependencies)
-        all_deps.update(self.constructor_dependencies)
-        return all_deps
-
-
-class SpringBeanRegistry:
-    """
-    Central registry for all Spring beans with dual-indexed maps.
-    Provides fast lookup by both beanId and beanClass.
-    """
-    
-    def __init__(self):
-        self.beans_by_id: Dict[str, BeanDef] = {}
-        self.beans_by_class: Dict[str, List[BeanDef]] = {}  # Multiple beans can have same class
-        self.pending_processing: Set[str] = set()  # Bean IDs pending dependency processing
-        
-    def add_bean(self, bean_def: BeanDef):
-        """Add a bean to both indexes"""
-        # Add to ID index
-        if bean_def.bean_id in self.beans_by_id:
-            print(f"  Warning: Bean ID '{bean_def.bean_id}' already exists. Overwriting.")
-        self.beans_by_id[bean_def.bean_id] = bean_def
-        
-        # Add to class index
-        if bean_def.bean_class not in self.beans_by_class:
-            self.beans_by_class[bean_def.bean_class] = []
-        self.beans_by_class[bean_def.bean_class].append(bean_def)
-        
-        # Mark as pending if not processed
-        if not bean_def.is_dependency_processed:
-            self.pending_processing.add(bean_def.bean_id)
-    
-    def get_by_id(self, bean_id: str) -> Optional[BeanDef]:
-        """Get bean by ID"""
-        return self.beans_by_id.get(bean_id)
-    
-    def get_by_class(self, bean_class: str) -> List[BeanDef]:
-        """Get all beans with the specified class"""
-        return self.beans_by_class.get(bean_class, [])
-    
-    def mark_processed(self, bean_id: str):
-        """Mark a bean as dependency-processed"""
-        if bean_id in self.beans_by_id:
-            self.beans_by_id[bean_id].is_dependency_processed = True
-            self.pending_processing.discard(bean_id)
-    
-    def has_pending(self) -> bool:
-        """Check if there are beans pending processing"""
-        return len(self.pending_processing) > 0
-    
-    def get_stats(self) -> Dict[str, int]:
-        """Get registry statistics"""
-        return {
-            'total_beans': len(self.beans_by_id),
-            'unique_classes': len(self.beans_by_class),
-            'pending_processing': len(self.pending_processing),
-            'with_source_path': sum(1 for b in self.beans_by_id.values() if b.class_source_path)
-        }
-
 
 
 def build_global_bean_registry(spring_xml_files: List[str], original_bean_map: Dict[str, Tuple[str, str]]) -> SpringBeanRegistry:
@@ -249,6 +159,9 @@ def enrich_with_call_hierarchy_v2(
     Step 4-5: Build call hierarchy using the comprehensive bean registry.
     This is the enhanced version that leverages dual-indexed bean maps.
     
+    Note: DB operation analysis has been moved to a separate script (db_operation_enricher.py)
+    to allow for configurable analysis strategies after the graph is built.
+    
     Args:
         job_defs: List of JobDef objects from parse_directory
         registry: SpringBeanRegistry with all beans
@@ -262,14 +175,8 @@ def enrich_with_call_hierarchy_v2(
     print("=" * 80)
     
     parser = JavaCallHierarchyParser()
-    dao_analyzer = DAOAnalyzer()
-    procedure_analyzer = OracleProcedureAnalyzer()
-    shell_analyzer = ShellScriptAnalyzer()
     
     all_classes = {}
-    all_db_operations = []
-    all_procedure_calls = []
-    all_shell_executions = []
     parsed_classes_cache = set()  # Track what we've already parsed
     
     # Process initial job step classes
@@ -359,39 +266,10 @@ def enrich_with_call_hierarchy_v2(
         
         iteration += 1
     
-    # Analyze DAO methods
-    print("\n  Analyzing DAO Methods:")
-    for class_info in all_classes.values():
-        if dao_analyzer._is_dao_class(class_info):
-            print(f"    DAO Class: {class_info.class_name}")
-            for method_def in class_info.methods.values():
-                db_op = dao_analyzer.analyze_method(method_def, class_info)
-                if db_op:
-                    method_def.db_operations.append(db_op)  # Attach to method
-                    all_db_operations.append(db_op)  # Also collect for summary
-                    print(f"      {method_def.method_name}() -> {db_op.operation_type} {db_op.table_name or '?'}")
-    
-    # Analyze Oracle/Database stored procedures
-    print("\n  Analyzing Stored Procedure Calls:")
-    for class_info in all_classes.values():
-        for method_def in class_info.methods.values():
-            proc_call = procedure_analyzer.analyze_method(method_def, class_info)
-            if proc_call:
-                method_def.procedure_calls.append(proc_call)  # Attach to method
-                all_procedure_calls.append(proc_call)  # Also collect for summary
-                proc_type = "Function" if proc_call.is_function else "Procedure"
-                print(f"    {class_info.class_name}.{method_def.method_name}() -> {proc_call.database_type} {proc_type}: {proc_call.procedure_name}")
-    
-    # Analyze shell script executions
-    print("\n  Analyzing Shell Script Executions:")
-    for class_info in all_classes.values():
-        for method_def in class_info.methods.values():
-            shell_exec = shell_analyzer.analyze_method(method_def, class_info)
-            if shell_exec:
-                method_def.shell_executions.append(shell_exec)  # Attach to method
-                all_shell_executions.append(shell_exec)  # Also collect for summary
-                script_display = shell_exec.script_name if shell_exec.script_name else "[dynamic]"
-                print(f"    {class_info.class_name}.{method_def.method_name}() -> {shell_exec.script_type} script: {script_display} ({shell_exec.execution_method})")
+    # Note: DB operation analysis moved to separate script (db_operation_enricher.py)
+    # Note: Stored procedure analysis moved to separate script (procedure_call_enricher.py)
+    # Note: Shell script execution analysis moved to separate script (shell_execution_enricher.py)
+    # This allows for configurable analysis strategies after graph is built
     
     # Build call hierarchy graph: populate called_classes for each class
     print("\n  Building Call Hierarchy Graph:")
@@ -408,10 +286,7 @@ def enrich_with_call_hierarchy_v2(
     print(f"  Total Classes Parsed: {len(all_classes)}")
     print(f"  Total Methods: {sum(len(c.methods) for c in all_classes.values())}")
     print(f"  Total Method Calls: {sum(sum(len(m.calls) for m in c.methods.values()) for c in all_classes.values())}")
-    print(f"  Total DB Operations: {len(all_db_operations)}")
-    print(f"  Total Procedure Calls: {len(all_procedure_calls)}")
-    print(f"  Total Shell Script Executions: {len(all_shell_executions)}")
-    
+      
     # Build job-specific enrichment: only classes used in that job's steps
     print("\n  Building Job-Specific Call Graphs:")
     for job in job_defs:
@@ -565,93 +440,3 @@ def _find_java_source_by_fqn_v2(fqn: str, job_defs: List[JobDef]) -> Optional[st
     
     return None
 
-
-def build_call_hierarchy_v2(root_directory: str) -> Tuple[List[JobDef], SpringBeanRegistry]:
-    """
-    Main entry point for V2 call hierarchy builder.
-    Orchestrates all steps and returns enriched job definitions.
-    
-    Args:
-        root_directory: Root directory containing Spring Batch projects
-        
-    Returns:
-        Tuple of (enriched JobDef list, SpringBeanRegistry)
-    """
-    print("\n" + "=" * 80)
-    print("CALL HIERARCHY BUILDER V2")
-    print("=" * 80)
-    
-    # Step 1: Scan all Spring XML files
-    spring_xml_files = find_xml_files(root_directory)
-
-    # Step 2: Build original bean map for source paths
-    original_bean_map = original_build_global_bean_map(spring_xml_files, root_directory)
-    
-    # Step 2: Build comprehensive bean registry
-    registry = build_global_bean_registry(spring_xml_files, original_bean_map)
-    
-    # Step 3: Parse batch job definitions
-    job_defs = parse_directory(original_bean_map, spring_xml_files)
-    
-    # Step 4-5: Enrich with call hierarchy
-    enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, original_bean_map)
-    
-    print("\n" + "=" * 80)
-    print("✅ CALL HIERARCHY BUILD COMPLETE")
-    print("=" * 80)
-    
-    return enriched_jobs, registry
-
-
-if __name__ == '__main__':
-    # Example usage
-    root_directory = "SpringProjects"
-    
-    # Build call hierarchy with V2 architecture
-    enriched_jobs, registry = build_call_hierarchy_v2(root_directory)
-    
-    # Print summary
-    print("\n" + "=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
-    print(f"  Total Jobs: {len(enriched_jobs)}")
-    print(f"  Bean Registry: {registry.get_stats()}")
-    
-    for job in enriched_jobs:
-        if hasattr(job, 'enrichment'):
-            step_classes = job.enrichment.get('step_classes', {})
-            all_classes_cache = job.enrichment.get('all_classes_cache', {})
-            
-            # Count operations from step classes and their call hierarchy
-            visited = set()
-            def count_operations_recursive(class_fqn, visited_set):
-                if class_fqn in visited_set or class_fqn not in all_classes_cache:
-                    return 0, 0, 0
-                visited_set.add(class_fqn)
-                class_info = all_classes_cache[class_fqn]
-                db = sum(len(m.db_operations) for m in class_info.methods.values())
-                proc = sum(len(m.procedure_calls) for m in class_info.methods.values())
-                shell = sum(len(m.shell_executions) for m in class_info.methods.values())
-                # Recurse into called classes
-                for called_class in class_info.called_classes:
-                    sub_db, sub_proc, sub_shell = count_operations_recursive(called_class, visited_set)
-                    db += sub_db
-                    proc += sub_proc
-                    shell += sub_shell
-                return db, proc, shell
-            
-            total_db_ops = 0
-            total_proc_calls = 0
-            total_shell_execs = 0
-            for step_class_fqn in step_classes.keys():
-                db, proc, shell = count_operations_recursive(step_class_fqn, visited)
-                total_db_ops += db
-                total_proc_calls += proc
-                total_shell_execs += shell
-            
-            print(f"\n  Job '{job.name}':")
-            print(f"    Step Classes: {len(step_classes)}")
-            print(f"    Total Classes in Call Hierarchy: {len(visited)}")
-            print(f"    DB Operations: {total_db_ops}")
-            print(f"    Procedure Calls: {total_proc_calls}")
-            print(f"    Shell Executions: {total_shell_execs}")

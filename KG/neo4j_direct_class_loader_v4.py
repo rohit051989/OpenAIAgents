@@ -1076,25 +1076,21 @@ def main():
     print("=" * 70)
     print()
     
-    # Configuration
-    #DEFAULT_CONFIG_FILE = r"D:\Iris\practice\GenAI\code\Batch_KG\information_graph_config.yaml"
-    DEFAULT_CLASS_EXCEL = "sample_data/class_level_data_1.xlsx"
-
     load_dotenv()
-    config_file = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
+    config_path = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
 
     # Read class Excel path from config (fallback to default)
-    class_excel = DEFAULT_CLASS_EXCEL
+    class_excel = ''
     try:
-        with open(config_file, 'r', encoding='utf-8') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f) or {}
-        class_excel = cfg.get('class_data', {}).get('excel_file', DEFAULT_CLASS_EXCEL)
+        class_excel = cfg.get('class_data', {}).get('excel_file', '')
     except FileNotFoundError:
-        logger.warning(f"Config file not found at {config_file}; using default class Excel path")
+        logger.warning(f"Config file not found at {config_path}; using default class Excel path")
     
     try:
         # Create loader and connect to Neo4j using config file
-        with Neo4jLoader(config_path=config_file) as loader:
+        with Neo4jLoader(config_path=config_path) as loader:
 
             # Step 0: Clean the database state
             print("\n🧹 Step 0: Cleaning database state...")
