@@ -67,10 +67,15 @@ class DAOAnalyzer:
         1. Class name contains 'dao' or 'repository' (case-insensitive)
         2. Class imports database-related packages (javax.persistence, org.springframework.jdbc, etc.)
         3. Excludes Entity/Model/DTO classes even if they have DB imports
+        4. Excludes interfaces - only actual implementation classes can be DAOs
 
         Returns:
             True if class appears to be a DAO/Repository, False otherwise
         """
+        # Exclude interfaces - they don't have DB operation logic, only their implementations do
+        if hasattr(class_info, 'is_interface') and class_info.is_interface:
+            return False
+            
         name_lower = class_info.class_name.lower()
 
         # Exclude Entity, Model, DTO classes - these are data classes, not DAOs

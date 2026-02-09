@@ -65,6 +65,7 @@ class ClassInfo:
     source_path: str
     implements: List[str] = field(default_factory=list)
     extends: Optional[str] = None
+    is_interface: bool = False  # True if this is an interface, False if it's a class
     fields: Dict[str, str] = field(default_factory=dict)  # field_name -> type
     methods: Dict[str, MethodDef] = field(default_factory=dict)  # method_name -> MethodDef
     imports: List[str] = field(default_factory=list)

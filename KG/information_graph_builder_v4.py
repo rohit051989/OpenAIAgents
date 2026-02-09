@@ -115,20 +115,19 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                 escaped_signature = escape_cypher_string(method_def.signature)
                 modifiers_str = escape_cypher_string(",".join(method_def.modifiers))
                 
-                # Build cypher statement with base properties
+                # Build cypher statement - use MERGE to find existing JavaMethod from Shot 1
+                # Properties should already be set from Shot 1, so only set ON CREATE (as fallback)
                 cypher_stmt = (
                     f"MERGE (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                    f"SET m.methodName = '{escaped_method_name}', "
+                    f"ON CREATE SET m.methodName = '{escaped_method_name}', "
                     f"m.returnType = '{escaped_return_type}', "
                     f"m.signature = '{escaped_signature}', "
                     f"m.modifiers = '{modifiers_str}', "
-                    f"m.classFqn = '{escaped_fqn}'"
+                    f"m.classFqn = '{escaped_fqn}', "
+                    f"m.dbOperationCount = 0, "
+                    f"m.procedureCallCount = 0, "
+                    f"m.shellExecutionCount = 0;"
                 )
-                # Set additional properties for DB operations, procedures, shell executions
-                cypher_stmt += ", m.dbOperationCount = 0"                
-                cypher_stmt += ", m.procedureCallCount = 0"
-                cypher_stmt += ", m.shellExecutionCount = 0"                
-                cypher_stmt += ";"
                 lines.append(cypher_stmt)
 
                 # Create HAS_METHOD relationship
@@ -161,21 +160,18 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                 called_modifiers_str = escape_cypher_string(",".join(called_method_def.modifiers))
                                 escaped_called_class_fqn = escape_cypher_string(called_class_fqn)
                                 
-                                # Build cypher statement for called method with base properties
+                                # Build cypher statement for called method - use ON CREATE SET to avoid overwriting
                                 called_cypher_stmt = (
                                     f"MERGE (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"SET cm.methodName = '{escaped_called_method_name}', "
+                                    f"ON CREATE SET cm.methodName = '{escaped_called_method_name}', "
                                     f"cm.returnType = '{escaped_called_return_type}', "
                                     f"cm.signature = '{escaped_called_signature}', "
                                     f"cm.modifiers = '{called_modifiers_str}', "
-                                    f"cm.classFqn = '{escaped_called_class_fqn}'"
+                                    f"cm.classFqn = '{escaped_called_class_fqn}', "
+                                    f"cm.dbOperationCount = 0, "
+                                    f"cm.procedureCallCount = 0, "
+                                    f"cm.shellExecutionCount = 0;"
                                 )
-                                
-                                # Set additional properties for DB operations, procedures, shell executions
-                                called_cypher_stmt += ", cm.dbOperationCount = 0"
-                                called_cypher_stmt += ", cm.procedureCallCount = 0"
-                                called_cypher_stmt += ", cm.shellExecutionCount = 0"                                    
-                                called_cypher_stmt += ";"
                                 lines.append(called_cypher_stmt)                                    
                                 
                                 # Create CALLS relationship
@@ -759,7 +755,7 @@ class InformationGraphBuilder:
             stats['config_files'] += 1
     
     def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str):
-        """Create a JavaClass node with package property and isDAOClass flag."""
+        """Create a JavaClass node with package property, isDAOClass flag, and all its methods."""
         # Determine if this is a DAO class
         dao_analyzer = DAOAnalyzer()
         is_dao_class = dao_analyzer._is_dao_class(class_info)
@@ -805,6 +801,64 @@ class InformationGraphBuilder:
             record = result.single()
             if not record:
                 print(f"WARNING: Parent not found for {class_info.class_name} at {class_info.source_path}")
+                return
+            
+            # Create JavaMethod nodes and HAS_METHOD relationships for all methods
+            self._create_methods_for_class(class_info, session)
+    
+    def _create_methods_for_class(self, class_info: ClassInfo, session):
+        """Create JavaMethod nodes and HAS_METHOD relationships for all methods in a class."""
+        for method_name, method_def in class_info.methods.items():
+            method_fqn = f"{class_info.fqn}.{method_name}"
+            
+            # Prepare method properties
+            modifiers_str = ",".join(method_def.modifiers)
+            
+            # Extract counts from attached analysis results
+            db_operation_count = len(method_def.db_operations) if hasattr(method_def, 'db_operations') else 0
+            procedure_call_count = len(method_def.procedure_calls) if hasattr(method_def, 'procedure_calls') else 0
+            shell_execution_count = len(method_def.shell_executions) if hasattr(method_def, 'shell_executions') else 0
+            
+            # Extract operation details as arrays (if available)
+            db_operations = [f"{op.operation_type}:{op.table_name or 'UNKNOWN'}:{op.confidence}" 
+                           for op in method_def.db_operations] if hasattr(method_def, 'db_operations') else []
+            procedure_calls = [f"{pc.procedure_name}:{pc.database_type}" 
+                             for pc in method_def.procedure_calls] if hasattr(method_def, 'procedure_calls') else []
+            shell_executions = [f"{se.script_type}:{se.command}" 
+                              for se in method_def.shell_executions] if hasattr(method_def, 'shell_executions') else []
+            
+            query_method = """
+            MATCH (c:JavaClass {fqn: $class_fqn})
+            MERGE (m:JavaMethod {fqn: $method_fqn})
+            SET m.methodName = $method_name,
+                m.classFqn = $class_fqn,
+                m.returnType = $return_type,
+                m.signature = $signature,
+                m.modifiers = $modifiers,
+                m.dbOperationCount = $db_operation_count,
+                m.procedureCallCount = $procedure_call_count,
+                m.shellExecutionCount = $shell_execution_count,
+                m.dbOperations = $db_operations,
+                m.procedureCalls = $procedure_calls,
+                m.shellExecutions = $shell_executions
+            MERGE (c)-[:HAS_METHOD]->(m)
+            RETURN m
+            """
+            
+            session.run(query_method,
+                       class_fqn=class_info.fqn,
+                       method_fqn=method_fqn,
+                       method_name=method_name,
+                       return_type=method_def.return_type,
+                       signature=method_def.signature,
+                       modifiers=modifiers_str,
+                       db_operation_count=db_operation_count,
+                       procedure_call_count=procedure_call_count,
+                       shell_execution_count=shell_execution_count,
+                       db_operations=db_operations,
+                       procedure_calls=procedure_calls,
+                       shell_executions=shell_executions
+                       )
     
     # =====================================================================
     # SHOT 2: Mark package folders

@@ -36,7 +36,7 @@ class JavaCallHierarchyParser:
         imports = [imp.path for imp in tree.imports] if tree.imports else []
 
         # Helper function to process a class or interface node
-        def process_type_declaration(node):
+        def process_type_declaration(node, is_interface=False):
             class_name = node.name
             fqn = f"{package}.{class_name}" if package else class_name
 
@@ -59,6 +59,7 @@ class JavaCallHierarchyParser:
                 source_path=file_path,
                 implements=implements,
                 extends=extends,
+                is_interface=is_interface,
                 imports=imports
             )
 
@@ -84,11 +85,11 @@ class JavaCallHierarchyParser:
 
         # Try to find main class
         for path, node in tree.filter(javalang.tree.ClassDeclaration):
-            return process_type_declaration(node)
+            return process_type_declaration(node, is_interface=False)
 
         # Try to find interface if no class found
         for path, node in tree.filter(javalang.tree.InterfaceDeclaration):
-            return process_type_declaration(node)
+            return process_type_declaration(node, is_interface=True)
 
         return None
 
