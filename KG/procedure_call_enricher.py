@@ -3,25 +3,36 @@ Stored Procedure Call Enricher
 ================================
 
 This script enriches the information graph with stored procedure call analysis.
-It queries existing JavaMethod nodes and updates them with procedure call information.
+Analyzes DAO class methods for Oracle/database stored procedure invocations.
+
+Features:
+- Detects SimpleJdbcCall, CallableStatement, StoredProcedureQuery patterns
+- Updates class level: is_procedure_invoked flag
+- Updates method level: procedureCalls array and procedureCallCount
+- Creates PROCEDURE Resource nodes with INVOKES relationships
 
 Usage:
     python procedure_call_enricher.py
 
 Requirements:
-    - Run information_graph_builder_v3.py first to build the graph structure
+    - Run information_graph_builder_v4.py first to build the graph structure
     - Neo4j database running with information graph
+    - DAO classes marked with isDAOClass=true
 """
 
 import os
 import sys
 import logging
+import uuid
+import re
 from typing import Dict, List, Set
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 import yaml
+from pathlib import Path
 
-from classes.DataClasses import ProcedureAnalyzer
+from classes.ProcedureAnalyzer import ProcedureAnalyzer
+from classes.DataClasses import ClassInfo, MethodDef
 
 
 # Configure logging
@@ -32,12 +43,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def escape_cypher_string(s: str) -> str:
+    """Escape string for Cypher query"""
+    if not s:
+        return ""
+    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+
+
 class ProcedureCallEnricher:
     """
     Enriches JavaMethod nodes with stored procedure call information.
     """
     
-    def __init__(self, config_path: str = 'information_graph_config.yaml'):
+    def __init__(self, config_path: str = 'config/information_graph_config.yaml'):
         """
         Initialize the procedure call enricher.
         
@@ -46,8 +64,17 @@ class ProcedureCallEnricher:
         """
         self.config = self._load_config(config_path)
         self.driver = None
-        self.database = self.config.get('neo4j', {}).get('database', 'informationgraph')
+        self.database = self.config.get('neo4j', {}).get('database_ig', 'informationgraph')
         self.procedure_analyzer = ProcedureAnalyzer()
+        
+        # Statistics
+        self.stats = {
+            'classes_processed': 0,
+            'classes_with_procedures': 0,
+            'methods_processed': 0,
+            'methods_with_procedures': 0,
+            'total_procedures': 0,
+        }
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -61,10 +88,10 @@ class ProcedureCallEnricher:
         """Connect to Neo4j database."""
         neo4j_config = self.config.get('neo4j', {})
         uri = neo4j_config.get('uri', 'bolt://localhost:7687')
-        username = neo4j_config.get('username', 'neo4j')
+        user = neo4j_config.get('user', 'neo4j')
         password = neo4j_config.get('password', 'password')
         
-        self.driver = GraphDatabase.driver(uri, auth=(username, password))
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
         logger.info(f"Connected to Neo4j at {uri}, database: {self.database}")
     
     def close(self):
@@ -72,168 +99,185 @@ class ProcedureCallEnricher:
         if self.driver:
             self.driver.close()
     
-    def _get_java_methods(self) -> List[Dict]:
+    def _get_dao_classes(self) -> List[Dict]:
         """
-        Query Neo4j for all JavaMethod nodes with their source code.
+        Query Neo4j for all DAO classes (isDAOClass=true).
         
         Returns:
-            List of dictionaries with method information
+            List of dictionaries with class information
         """
         query = """
-        MATCH (jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod)
-        WHERE m.sourcePath IS NOT NULL
-        RETURN 
-            jc.fqn AS classFqn,
-            jc.className AS className,
-            jc.sourcePath AS classSourcePath,
-            m.methodName AS methodName,
-            m.signature AS signature,
-            m.startLine AS startLine,
-            m.endLine AS endLine,
-            m.sourcePath AS methodSourcePath
-        ORDER BY jc.fqn, m.methodName
+        MATCH (jc:JavaClass)
+        WHERE jc.isDAOClass = true
+        RETURN jc.fqn as fqn, 
+               jc.path as path,
+               jc.className as className
+        ORDER BY jc.fqn
         """
         
         with self.driver.session(database=self.database) as session:
             result = session.run(query)
-            methods = []
-            for record in result:
-                methods.append({
-                    'class_fqn': record['classFqn'],
-                    'class_name': record['className'],
-                    'class_source_path': record['classSourcePath'],
-                    'method_name': record['methodName'],
-                    'signature': record['signature'],
-                    'start_line': record['startLine'],
-                    'end_line': record['endLine'],
-                    'method_source_path': record['methodSourcePath']
-                })
+            dao_classes = [dict(record) for record in result]
             
-            logger.info(f"Retrieved {len(methods)} methods from graph")
-            return methods
+        logger.info(f"  Found {len(dao_classes)} DAO classes to analyze")
+        return dao_classes
     
-    def _read_method_source(self, source_path: str, start_line: int, end_line: int) -> str:
+    def _get_class_methods(self, class_fqn: str) -> List[Dict]:
         """
-        Read method source code from file.
+        Get all methods for a DAO class.
         
         Args:
-            source_path: Path to source file
-            start_line: Starting line number (1-based)
-            end_line: Ending line number (1-based)
+            class_fqn: Fully qualified class name
             
         Returns:
-            Method source code as string
+            List of method information dictionaries
         """
-        try:
-            if not os.path.exists(source_path):
-                logger.warning(f"Source file not found: {source_path}")
-                return ""
-            
-            with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                if start_line > 0 and end_line <= len(lines):
-                    return ''.join(lines[start_line-1:end_line])
-                else:
-                    logger.warning(f"Invalid line range [{start_line}:{end_line}] for {source_path}")
-                    return ""
-        except Exception as e:
-            logger.error(f"Error reading source file {source_path}: {e}")
-            return ""
-    
-    def _create_method_def_mock(self, method_info: Dict, source_code: str):
+        query = """
+        MATCH (jc:JavaClass {fqn: $fqn})-[:HAS_METHOD]->(m:JavaMethod)
+        RETURN m.fqn as fqn,
+               m.methodName as methodName,
+               m.signature as signature
+        ORDER BY m.methodName
         """
-        Create a minimal MethodDef object for the analyzer.
         
-        Args:
-            method_info: Method information from Neo4j
-            source_code: Method source code
-            
-        Returns:
-            Mock MethodDef object with required attributes
-        """
-        class MethodDefMock:
-            def __init__(self, name, signature, source):
-                self.method_name = name
-                self.signature = signature
-                self.source_code = source
-                self.procedure_calls = []  # Will be populated by analyzer
-        
-        return MethodDefMock(
-            method_info['method_name'],
-            method_info['signature'],
-            source_code
-        )
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query, fqn=class_fqn)
+            return [dict(record) for record in result]
     
-    def _create_class_info_mock(self, method_info: Dict):
+    def _create_class_info_mock(self, class_data: Dict) -> ClassInfo:
         """
         Create a minimal ClassInfo object for the analyzer.
         
         Args:
-            method_info: Method information from Neo4j
+            class_data: Class data from Neo4j
             
         Returns:
-            Mock ClassInfo object with required attributes
+            ClassInfo object
         """
-        class ClassInfoMock:
-            def __init__(self, name, fqn):
-                self.class_name = name
-                self.fqn = fqn
-        
-        return ClassInfoMock(
-            method_info['class_name'],
-            method_info['class_fqn']
+        return ClassInfo(
+            package='.'.join(class_data['fqn'].split('.')[:-1]),
+            class_name=class_data['className'],
+            fqn=class_data['fqn'],
+            source_path=class_data['path']
         )
     
-    def _update_method_procedures(self, method_info: Dict, procedure_calls: List) -> bool:
+    def _create_method_def_mock(self, method_data: Dict, class_fqn: str) -> MethodDef:
+        """
+        Create a minimal MethodDef object for the analyzer.
+        
+        Args:
+            method_data: Method data from Neo4j
+            class_fqn: Class FQN for the method
+            
+        Returns:
+            MethodDef object
+        """
+        return MethodDef(
+            class_fqn=class_fqn,
+            method_name=method_data['methodName'],
+            return_type='void',  # Not needed for procedure detection
+            parameters=[],
+            modifiers=[],
+            calls=[]
+        )
+    
+    def _update_method_procedures(self, method_fqn: str, procedure_call) -> bool:
         """
         Update JavaMethod node with procedure call information.
         
         Args:
-            method_info: Method information
-            procedure_calls: List of ProcedureCall objects
+            method_fqn: Method fully qualified name
+            procedure_call: ProcedureCall object
             
         Returns:
             True if update successful
         """
-        if not procedure_calls:
-            return False
-        
-        # Convert procedure calls to serializable format
-        procedures_data = []
-        for proc in procedure_calls:
-            procedures_data.append({
-                'databaseType': proc.database_type,
-                'procedureName': proc.procedure_name,
-                'isFunction': proc.is_function,
-                'callType': proc.call_type,
-                'parameters': proc.parameters if hasattr(proc, 'parameters') else []
-            })
+        # Format procedure call as string for Neo4j
+        proc_str = f"{procedure_call.procedure_name}:{procedure_call.database_type}:{'FUNCTION' if procedure_call.is_function else 'PROCEDURE'}:{procedure_call.confidence}"
         
         query = """
-        MATCH (jc:JavaClass {fqn: $classFqn})-[:HAS_METHOD]->(m:JavaMethod {methodName: $methodName})
-        SET m.procedureCalls = $procedureCalls,
-            m.procedureCallCount = $procedureCallCount
-        RETURN m.methodName AS methodName
+        MATCH (m:JavaMethod {fqn: $fqn})
+        SET m.procedureCalls = [$procedure],
+            m.procedureCallCount = 1
+        RETURN m.methodName as methodName
         """
         
         try:
             with self.driver.session(database=self.database) as session:
                 result = session.run(
                     query,
-                    classFqn=method_info['class_fqn'],
-                    methodName=method_info['method_name'],
-                    procedureCalls=procedures_data,
-                    procedureCallCount=len(procedures_data)
+                    fqn=method_fqn,
+                    procedure=proc_str
                 )
                 
                 if result.single():
+                    # Create procedure resource and relationship
+                    self._create_procedure_resource(method_fqn, procedure_call)
                     return True
                 else:
-                    logger.warning(f"Method not found for update: {method_info['class_fqn']}.{method_info['method_name']}")
+                    logger.warning(f"  Method not found: {method_fqn}")
                     return False
         except Exception as e:
-            logger.error(f"Error updating method {method_info['class_fqn']}.{method_info['method_name']}: {e}")
+            logger.error(f"  Error updating method {method_fqn}: {e}")
             return False
+    
+    def _create_procedure_resource(self, method_fqn: str, procedure_call):
+        """
+        Create PROCEDURE Resource node and INVOKES relationship.
+        
+        Args:
+            method_fqn: Method fully qualified name
+            procedure_call: ProcedureCall object
+        """
+        escaped_method_fqn = escape_cypher_string(method_fqn)
+        escaped_proc_name = escape_cypher_string(procedure_call.procedure_name)
+        escaped_db_type = escape_cypher_string(procedure_call.database_type)
+        
+        resource_type = 'FUNCTION' if procedure_call.is_function else 'PROCEDURE'
+        unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
+        escaped_resource_id = escape_cypher_string(unique_id)
+        
+        try:
+            with self.driver.session(database=self.database) as session:
+                # Create or update Resource node
+                resource_query = f"""
+                MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                ON CREATE SET r.id = '{escaped_resource_id}',
+                              r.enabled = true,
+                              r.databaseType = '{escaped_db_type}'
+                ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}')
+                """
+                session.run(resource_query)
+                
+                # Create INVOKES relationship
+                relationship_query = f"""
+                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
+                MATCH (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                MERGE (m)-[:INVOKES {{
+                    databaseType: '{escaped_db_type}',
+                    confidence: 'HIGH'
+                }}]->(r)
+                """
+                session.run(relationship_query)
+                
+        except Exception as e:
+            logger.warning(f"  Failed to create Resource relationship for {procedure_call.procedure_name}: {e}")
+    
+    def _update_class_flag(self, class_fqn: str):
+        """
+        Set is_procedure_invoked flag on JavaClass.
+        
+        Args:
+            class_fqn: Class fully qualified name
+        """
+        query = """
+        MATCH (jc:JavaClass {fqn: $fqn})
+        SET jc.is_procedure_invoked = true
+        RETURN jc.className as className
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            session.run(query, fqn=class_fqn)
     
     def enrich(self):
         """
@@ -243,65 +287,87 @@ class ProcedureCallEnricher:
         print("STORED PROCEDURE CALL ENRICHMENT")
         print("=" * 80)
         
-        # Get all methods from graph
-        methods = self._get_java_methods()
+        # Get all DAO classes
+        dao_classes = self._get_dao_classes()
         
-        if not methods:
-            print("\n  ⚠️  No methods found in graph. Run information_graph_builder_v3.py first.")
+        if not dao_classes:
+            print("\n  ⚠️  No DAO classes found (isDAOClass=true).")
+            print("     Run information_graph_builder_v4.py first.")
             return
         
-        print(f"\n  Analyzing {len(methods)} methods for stored procedure calls...\n")
+        print(f"\n  Analyzing {len(dao_classes)} DAO classes...\n")
         
-        analyzed_count = 0
-        found_count = 0
-        
-        for method_info in methods:
-            # Read method source code
-            source_path = method_info['method_source_path'] or method_info['class_source_path']
-            if not source_path:
+        # Analyze each DAO class
+        for idx, class_data in enumerate(dao_classes, 1):
+            class_fqn = class_data['fqn']
+            class_name = class_data['className']
+            
+            print(f"[{idx}/{len(dao_classes)}] {class_name}")
+            
+            # Get methods for this class
+            methods = self._get_class_methods(class_fqn)
+            
+            if not methods:
+                print(f"  No methods found for {class_fqn}")
                 continue
             
-            source_code = self._read_method_source(
-                source_path,
-                method_info['start_line'],
-                method_info['end_line']
-            )
+            self.stats['classes_processed'] += 1
+            class_has_procedures = False
             
-            if not source_code:
-                continue
+            # Create ClassInfo for analyzer
+            class_info = self._create_class_info_mock(class_data)
             
-            # Create mock objects for analyzer
-            method_def = self._create_method_def_mock(method_info, source_code)
-            class_info = self._create_class_info_mock(method_info)
-            
-            # Analyze for procedure calls
-            proc_call = self.procedure_analyzer.analyze_method(method_def, class_info)
-            
-            if proc_call:
-                method_def.procedure_calls.append(proc_call)
+            # Analyze each method
+            for method_data in methods:
+                self.stats['methods_processed'] += 1
                 
-                # Update graph
-                if self._update_method_procedures(method_info, method_def.procedure_calls):
-                    found_count += 1
-                    proc_type = "Function" if proc_call.is_function else "Procedure"
-                    print(f"    {method_info['class_name']}.{method_info['method_name']}() -> "
-                          f"{proc_call.database_type} {proc_type}: {proc_call.procedure_name}")
+                # Create MethodDef for analyzer
+                method_def = self._create_method_def_mock(method_data, class_fqn)
+                
+                # Analyze for procedure calls
+                procedure_call = self.procedure_analyzer.analyze_method(method_def, class_info)
+                
+                if procedure_call:
+                    proc_type = "Function" if procedure_call.is_function else "Procedure"
+                    print(f"  ✓ {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}")
+                    
+                    # Update method in graph
+                    if self._update_method_procedures(method_data['fqn'], procedure_call):
+                        self.stats['methods_with_procedures'] += 1
+                        self.stats['total_procedures'] += 1
+                        class_has_procedures = True
             
-            analyzed_count += 1
+            # Update class-level flag if any procedures found
+            if class_has_procedures:
+                self._update_class_flag(class_fqn)
+                self.stats['classes_with_procedures'] += 1
+                print(f"  → Class marked as is_procedure_invoked=true\n")
+            else:
+                print(f"  No procedure calls detected\n")
         
-        print(f"\n  ✓ Analyzed {analyzed_count} methods")
-        print(f"  ✓ Found procedure calls in {found_count} methods")
-        
-        print("\n" + "=" * 80)
-        print("✅ STORED PROCEDURE CALL ENRICHMENT COMPLETE")
+        # Print statistics
+        self._print_statistics()
+    
+    def _print_statistics(self):
+        """Print enrichment statistics."""
         print("=" * 80)
+        print("ENRICHMENT STATISTICS")
+        print("=" * 80)
+        print(f"  DAO Classes Processed:        {self.stats['classes_processed']}")
+        print(f"  Classes with Procedures:      {self.stats['classes_with_procedures']}")
+        print(f"  Methods Analyzed:             {self.stats['methods_processed']}")
+        print(f"  Methods with Procedures:      {self.stats['methods_with_procedures']}")
+        print(f"  Total Procedures Found:       {self.stats['total_procedures']}")
+        print("=" * 80)
+        print("✅ STORED PROCEDURE CALL ENRICHMENT COMPLETE")
+        print("=" * 80 + "\n")
 
 
 def main():
-
     """Main entry point."""
     load_dotenv()
-    config_path = os.getenv("KG_CONFIG_FILE")
+    config_path = os.getenv("CONFIG_FILE_PATH", "config/information_graph_config.yaml")
+    
     enricher = ProcedureCallEnricher(config_path=config_path)
     
     try:
@@ -316,3 +382,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

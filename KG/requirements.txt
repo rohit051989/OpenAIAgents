@@ -2,6 +2,8 @@ pandas
 openpyxl
 neo4j
 javalang
+tree-sitter>=0.22.0
+tree-sitter-java>=0.21.0
 pyyaml
 
 # Optional: For LLM-enhanced DAO analysis

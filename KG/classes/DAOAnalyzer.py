@@ -381,3 +381,5 @@ class DAOAnalyzer:
         """Convert entity name to table name"""
         name = entity_name.replace('Entity', '')
         return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+
+
