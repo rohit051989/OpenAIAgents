@@ -498,22 +498,33 @@ class DBOperationEnricher:
         """Update JavaMethod node with DB operations and create Resource nodes"""
         # Convert operations to proper format
         op_strings = []
+        requires_further_analysis = False
+        
         for op in operations:
             if isinstance(op, dict):
-                op_str = f"{op['operation_type']}:{op.get('table_name', 'UNKNOWN')}:{op.get('confidence', 'MEDIUM')}"
+                table_name = op.get('table_name', 'UNKNOWN')
+                op_str = f"{op['operation_type']}:{table_name}:{op.get('confidence', 'MEDIUM')}"
+                # Check if table name is unknown or dynamic
+                if table_name == 'UNKNOWN' or table_name is None or 'DYNAMIC' in str(table_name).upper():
+                    requires_further_analysis = True
             else:
-                op_str = f"{op.operation_type}:{op.table_name or 'UNKNOWN'}:{op.confidence}"
+                table_name = op.table_name or 'UNKNOWN'
+                op_str = f"{op.operation_type}:{table_name}:{op.confidence}"
+                # Check if table name is unknown or dynamic
+                if table_name == 'UNKNOWN' or table_name is None or 'DYNAMIC' in str(table_name).upper():
+                    requires_further_analysis = True
             op_strings.append(op_str)
         
         # Update JavaMethod node
         query = """
         MATCH (m:JavaMethod {fqn: $fqn})
         SET m.dbOperations = $operations,
-            m.dbOperationCount = $count
+            m.dbOperationCount = $count,
+            m.furtherAnalysisRequired = $furtherAnalysisRequired
         """
         
         with self.driver.session(database=self.database) as session:
-            session.run(query, fqn=method_fqn, operations=op_strings, count=len(op_strings))
+            session.run(query, fqn=method_fqn, operations=op_strings, count=len(op_strings), furtherAnalysisRequired=requires_further_analysis)
         
         # Create Resource nodes and relationships
         self._create_resource_relationships(method_fqn, operations)

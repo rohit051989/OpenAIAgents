@@ -195,10 +195,17 @@ class ProcedureCallEnricher:
         # Format procedure call as string for Neo4j
         proc_str = f"{procedure_call.procedure_name}:{procedure_call.database_type}:{'FUNCTION' if procedure_call.is_function else 'PROCEDURE'}:{procedure_call.confidence}"
         
+        # Check if procedure name/schema/catalog is dynamic and requires manual review
+        requires_further_analysis = (
+            'DYNAMIC' in procedure_call.procedure_name.upper() or
+            procedure_call.procedure_name == 'UNKNOWN'
+        )
+        
         query = """
         MATCH (m:JavaMethod {fqn: $fqn})
         SET m.procedureCalls = [$procedure],
-            m.procedureCallCount = 1
+            m.procedureCallCount = 1,
+            m.furtherAnalysisRequired = $furtherAnalysisRequired
         RETURN m.methodName as methodName
         """
         
@@ -207,7 +214,8 @@ class ProcedureCallEnricher:
                 result = session.run(
                     query,
                     fqn=method_fqn,
-                    procedure=proc_str
+                    procedure=proc_str,
+                    furtherAnalysisRequired=requires_further_analysis
                 )
                 
                 if result.single():
@@ -329,7 +337,9 @@ class ProcedureCallEnricher:
                 
                 if procedure_call:
                     proc_type = "Function" if procedure_call.is_function else "Procedure"
-                    print(f"  ✓ {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}")
+                    requires_review = 'DYNAMIC' in procedure_call.procedure_name.upper() or procedure_call.procedure_name == 'UNKNOWN'
+                    review_flag = " ⚠️ [Further Analysis Required]" if requires_review else ""
+                    print(f"  ✓ {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
                     
                     # Update method in graph
                     if self._update_method_procedures(method_data['fqn'], procedure_call):
