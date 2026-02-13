@@ -1102,7 +1102,7 @@ def main():
             #loader.create_constraints_and_indexes()
             
             # Step 2: Load class-level data
-            print("\n📦 Step 2: Loading class-level data...")
+            print("\n Step 2: Loading class-level data...")
             loader.load_class_level_data(class_excel)
 
             # Step 3: Compute CPM for Job Groups

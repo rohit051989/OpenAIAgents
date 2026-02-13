@@ -353,7 +353,7 @@ def main():
             #print()
             
             # Load instance data
-            print(f"📦 Loading instance data from {excel_file}...")
+            print(f" Loading instance data from {excel_file}...")
             loader.load_instance_data(excel_file)
             print()
             analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)

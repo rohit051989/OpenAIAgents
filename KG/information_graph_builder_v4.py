@@ -546,7 +546,7 @@ class InformationGraphBuilder:
         if not root.exists():
             raise ValueError(f"Path does not exist: {root_path}")
         
-        print(f"\n📂 SHOT 1: Creating tree structure")
+        print(f"\n SHOT 1: Creating tree structure")
         print(f"Scanning: {root}")
         print("=" * 80)
         
@@ -896,7 +896,7 @@ class InformationGraphBuilder:
         """
         Shot 2: Find all Java files, extract packages, mark folders as Package.
         """
-        print(f"\n📦 SHOT 2: Marking package folders")
+        print(f"\n SHOT 2: Marking package folders")
         print("=" * 60)
         
         # Find all JavaClass nodes with packages
@@ -986,7 +986,7 @@ class InformationGraphBuilder:
         Returns:
             List of absolute file paths to Spring XML configuration files
         """
-        print(f"\n📄 Loading Spring XML files from graph")
+        print(f"\n Loading Spring XML files from graph")
         print("=" * 60)
         
         query = """
@@ -1064,7 +1064,7 @@ class InformationGraphBuilder:
         Returns:
             Dictionary mapping bean ID to tuple of (class_name, source_path)
         """
-        print(f"\n🔧 Building Global Bean Map from Graph")
+        print(f"\n Building Global Bean Map from Graph")
         print("=" * 60)
         
         global_bean_map: Dict[str, Tuple[str, str]] = {}
@@ -1252,7 +1252,7 @@ class InformationGraphBuilder:
             bean_map: Dictionary mapping bean ID to tuple of (class_name, source_path)
             spring_xml_files: List of Spring XML files where beans are defined
         """
-        print(f"\n🔗 Storing Bean Map in Information Graph")
+        print(f"\n Storing Bean Map in Information Graph")
         print("=" * 60)
         
         # Build reverse map: xml_file -> list of bean_ids
