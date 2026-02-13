@@ -98,7 +98,7 @@ class LLMDAOAnalyzer:
         # Check cache first
         cache_key = f"{class_info.fqn}:{class_info.source_path}"
         if cache_key in self.cache:
-            print(f"    ✓ Using cached analysis for {class_info.class_name}")
+            print(f"     Using cached analysis for {class_info.class_name}")
             return self._deserialize_operations(self.cache[cache_key], class_info)
 
         # Read source file
@@ -127,7 +127,7 @@ class LLMDAOAnalyzer:
             return operations_by_method
 
         except Exception as e:
-            print(f"    ⚠️  LLM analysis failed: {e}")
+            print(f"      LLM analysis failed: {e}")
             return {}
 
     def _create_analysis_prompt(self, class_info: ClassInfo, source_code: str) -> str:
@@ -275,7 +275,7 @@ Analyze now:"""
         try:
             analysis_data = json.loads(json_str)
         except json.JSONDecodeError as e:
-            print(f"    ⚠️  Failed to parse LLM response as JSON: {e}")
+            print(f"      Failed to parse LLM response as JSON: {e}")
             print(f"    Response: {response[:200]}...")
             return {}
 

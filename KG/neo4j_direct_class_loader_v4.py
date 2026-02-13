@@ -142,7 +142,7 @@ class Neo4jLoader:
                 except Exception as e:
                     logger.warning(f"Index may already exist: {str(e)[:100]}")
         
-        logger.info("✓ Constraints and indexes created")
+        logger.info(" Constraints and indexes created")
     
     def compute_cpm_for_jobgroup(self, jobgroup_id: str, analyzer: CPMAnalyzer):
         res = analyzer.compute_for_jobgroup(jobgroup_id, persist=True)
@@ -184,7 +184,7 @@ class Neo4jLoader:
         self._load_associate_calendar(excel_file)
         self._load_holidays(excel_file)
         #self._load_step_interaction(excel_file)
-        logger.info("✓ Class-level data loaded successfully")
+        logger.info(" Class-level data loaded successfully")
     
     def _load_job_groups(self, excel_file):
         """Load JobGroups"""
@@ -195,7 +195,7 @@ class Neo4jLoader:
             for _, row in df.iterrows():
                 session.execute_write(self._create_job_group, row.to_dict())
         
-        logger.info(f"✓ Loaded {len(df)} JobGroups")
+        logger.info(f" Loaded {len(df)} JobGroups")
     
     @staticmethod
     def _create_job_group(tx, data: Dict):
@@ -221,7 +221,7 @@ class Neo4jLoader:
                 data = row.to_dict()
                 session.execute_write(self._create_tag, data)
         
-        logger.info(f"✓ Loaded {len(df)} Tags")
+        logger.info(f" Loaded {len(df)} Tags")
     
     @staticmethod
     def _create_tag(tx, data: Dict):
@@ -279,7 +279,7 @@ class Neo4jLoader:
             for job_data in jobs:
                 session.execute_write(self._create_job, job_data)
         
-        logger.info(f"✓ Loaded {len(jobs)} Jobs")
+        logger.info(f" Loaded {len(jobs)} Jobs")
     
 
     @staticmethod
@@ -310,7 +310,7 @@ class Neo4jLoader:
                 data = row.to_dict()
                 session.execute_write(self._create_job_association, data)
         
-        logger.info(f"✓ Loaded {len(df)} Jobs Association")
+        logger.info(f" Loaded {len(df)} Jobs Association")
 
     @staticmethod
     def _create_job_association(tx, data: Dict):
@@ -469,7 +469,7 @@ class Neo4jLoader:
                     #logger.info(f"Executing Cypher:: {stmt[:500]}...")
                     session.run(stmt)
 
-            logger.info(f"✓ Loaded {len(statements)} statements for job '{job_def.name}'")
+            logger.info(f" Loaded {len(statements)} statements for job '{job_def.name}'")
         
         # Copy consolidated DB operations from information graph
         self._copy_step_db_operations_from_info_graph()
@@ -641,7 +641,7 @@ class Neo4jLoader:
                                stepName=step_name)
                     created_count += 1
         
-        logger.info(f"  ✓ Created {created_count} DataAsset nodes with relationships in knowledge graph")
+        logger.info(f"   Created {created_count} DataAsset nodes with relationships in knowledge graph")
     
     def _load_resource_dependency(self, excel_file):
         """Load Resources Dependency"""
@@ -654,7 +654,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._associate_resource, data)
         
-        logger.info(f"✓ Loaded {len(df)} ResourceDependency")
+        logger.info(f" Loaded {len(df)} ResourceDependency")
     
     @staticmethod
     def _associate_resource(tx, data: Dict):
@@ -681,7 +681,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_resource, data)
         
-        logger.info(f"✓ Loaded {len(df)} Resources")
+        logger.info(f" Loaded {len(df)} Resources")
         
     @staticmethod
     def _create_resource(tx, data: Dict):
@@ -726,7 +726,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._associate_step_interaction, data)
         
-        logger.info(f"✓ Loaded {len(df)} DataInteraction_v2")
+        logger.info(f" Loaded {len(df)} DataInteraction_v2")
     
     @staticmethod
     def _associate_step_interaction(tx, data: Dict):
@@ -793,7 +793,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_job_successor, data)
         
-        logger.info(f"✓ Loaded {len(df)} JobSuccessor")
+        logger.info(f" Loaded {len(df)} JobSuccessor")
     
     @staticmethod
     def _create_job_successor(tx, data: Dict):
@@ -819,7 +819,7 @@ class Neo4jLoader:
                     """
 
                 query += " RETURN ctx"
-                #logger.info(f"✓ Query for JobContext {context_type} is {query}")
+                #logger.info(f" Query for JobContext {context_type} is {query}")
                 tx.run(query, **data)
 
             elif is_successor_simple_or_parallel == "PARALLEL":
@@ -840,7 +840,7 @@ class Neo4jLoader:
                         """
 
                     query += " RETURN ctx"
-                    #logger.info(f"✓ Query for JobContext {context_type} is {query}")
+                    #logger.info(f" Query for JobContext {context_type} is {query}")
                     tx.run(query, **data)
     
     def _load_job_contexts(self, excel_file):
@@ -855,7 +855,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_job_context, data)
 
-        logger.info(f"✓ Loaded {len(df)} JobContext")
+        logger.info(f" Loaded {len(df)} JobContext")
 
     @staticmethod
     def _create_job_context(tx, data: Dict):
@@ -886,7 +886,7 @@ class Neo4jLoader:
             """
 
         query += " RETURN ctx"
-        #logger.info(f"✓ Query for JobContext {context_type} is {query}")
+        #logger.info(f" Query for JobContext {context_type} is {query}")
         tx.run(query, **data)
 
     def _load_slas(self, excel_file):
@@ -900,7 +900,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_sla, data)
         
-        logger.info(f"✓ Loaded {len(df)} SLAs")
+        logger.info(f" Loaded {len(df)} SLAs")
     
     @staticmethod
     def _create_sla(tx, data: Dict):
@@ -949,7 +949,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._associate_calendar, data)
         
-        logger.info(f"✓ Loaded {len(df)} AssociateCalendar")
+        logger.info(f" Loaded {len(df)} AssociateCalendar")
     
     @staticmethod
     def _associate_calendar(tx, data: Dict):
@@ -987,7 +987,7 @@ class Neo4jLoader:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_calendar, data)
 
-        logger.info(f"✓ Loaded {len(df)} Calendar")
+        logger.info(f" Loaded {len(df)} Calendar")
 
     @staticmethod
     def _create_calendar(tx, data: Dict):
@@ -1026,7 +1026,7 @@ class Neo4jLoader:
                 data = row.to_dict()
                 session.execute_write(self._create_holiday, data)
         
-        logger.info(f"✓ Loaded {len(df)} Holidays")
+        logger.info(f" Loaded {len(df)} Holidays")
     
     @staticmethod
     def _create_holiday(tx, data: Dict):
@@ -1052,7 +1052,7 @@ class Neo4jLoader:
         logger.warning("Clearing entire database...")
         with self.driver.session(database=self.database) as session:
             session.run("MATCH (n) DETACH DELETE n")
-        logger.info("✓ Database cleared")
+        logger.info(" Database cleared")
     
     def get_statistics(self):
         """Get database statistics"""
@@ -1095,7 +1095,7 @@ def main():
             # Step 0: Clean the database state
             print("\n🧹 Step 0: Cleaning database state...")
             loader.clear_database()
-            print("   ✓ Database cleaned successfully")
+            print("    Database cleaned successfully")
 
             # Step 1: Create constraints and indexes
             print("\n📐 Step 1: Creating constraints and indexes...")
@@ -1119,7 +1119,7 @@ def main():
                 print(f"  {node_type}: {count}")
             
             print("\n" + "=" * 70)
-            print("✅ LOADING COMPLETE!")
+            print(" LOADING COMPLETE!")
             print("=" * 70)
             print()
             print("🎉 Your data is now in Neo4j!")

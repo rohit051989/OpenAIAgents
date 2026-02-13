@@ -380,7 +380,7 @@ class ShellExecutionEnricher:
         shell_classes = self._get_shell_executor_classes()
         
         if not shell_classes:
-            print("\n  ⚠️  No Shell Executor classes found.")
+            print("\n    No Shell Executor classes found.")
             print("      Run information_graph_builder_v4.py first to identify shell executor classes.")
             return
         
@@ -428,7 +428,7 @@ class ShellExecutionEnricher:
                         
                         # Print execution details
                         for exec_info in executions:
-                            status = "⚠️ " if exec_info['further_analysis'] else "✓"
+                            status = " " if exec_info['further_analysis'] else ""
                             logger.info(f"    {status} {method['name']}() -> {exec_info['script_name']} "
                                       f"({exec_info['execution_method']}, {exec_info['confidence']})")
                             if exec_info['further_analysis']:
@@ -454,13 +454,13 @@ class ShellExecutionEnricher:
         print("=" * 80)
         
         if methods_with_grey_areas > 0:
-            print("\n⚠️  MANUAL REVIEW REQUIRED:")
+            print("\n  MANUAL REVIEW REQUIRED:")
             print(f"   {methods_with_grey_areas} method(s) have grey areas (dynamic/unknown scripts)")
             print("   Update config/manual_mappings_sample.yaml with actual script details")
             print("   Then run: python manual_resource_associator.py")
         
         print("\n" + "=" * 80)
-        print("✅ SHELL SCRIPT EXECUTION ENRICHMENT COMPLETE")
+        print(" SHELL SCRIPT EXECUTION ENRICHMENT COMPLETE")
         print("=" * 80)
 
 

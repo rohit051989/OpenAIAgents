@@ -102,18 +102,18 @@ class Neo4jInstanceLoaderV2:
             for constraint in constraints:
                 try:
                     session.run(constraint)
-                    logger.info(f"  ✓ {constraint.split('IF NOT EXISTS')[0].strip()}")
+                    logger.info(f"   {constraint.split('IF NOT EXISTS')[0].strip()}")
                 except Exception as e:
                     logger.warning(f"  ⚠ Constraint already exists or error: {e}")
             
             for index in indexes:
                 try:
                     session.run(index)
-                    logger.info(f"  ✓ {index.split('IF NOT EXISTS')[0].strip()}")
+                    logger.info(f"   {index.split('IF NOT EXISTS')[0].strip()}")
                 except Exception as e:
                     logger.warning(f"  ⚠ Index already exists or error: {e}")
         
-        logger.info("✓ Constraints and indexes created")
+        logger.info(" Constraints and indexes created")
     
     # ========================================================================
     # INSTANCE DATA LOADING
@@ -136,7 +136,7 @@ class Neo4jInstanceLoaderV2:
         except Exception as e:
             logger.warning(f"No resource events to load or error: {e}")
         
-        logger.info("✓ All instance data loaded")
+        logger.info(" All instance data loaded")
     
     def _load_job_group_executions(self, excel_file):
         """Load JobGroupExecution nodes"""
@@ -149,7 +149,7 @@ class Neo4jInstanceLoaderV2:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_job_group_execution, data)
         
-        logger.info(f"✓ Loaded {len(df)} JobGroupExecutions")
+        logger.info(f" Loaded {len(df)} JobGroupExecutions")
     
     @staticmethod
     def _create_job_group_execution(tx, data: Dict):
@@ -188,7 +188,7 @@ class Neo4jInstanceLoaderV2:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_jobcontext_execution, data)
         
-        logger.info(f"✓ Loaded {len(df)} JobContextExecutions")
+        logger.info(f" Loaded {len(df)} JobContextExecutions")
     
     @staticmethod
     def _create_jobcontext_execution(tx, data: Dict):
@@ -232,7 +232,7 @@ class Neo4jInstanceLoaderV2:
                 session.execute_write(self._associate_resource_event_with_jobgroup, data)
                 session.execute_write(self._associate_resource_event_with_job, data)
         
-        logger.info(f"✓ Loaded {len(df)} ResourceAvailabilityEvents")
+        logger.info(f" Loaded {len(df)} ResourceAvailabilityEvents")
     
     @staticmethod
     def _create_resource_event(tx, data: Dict):
@@ -310,7 +310,7 @@ class Neo4jInstanceLoaderV2:
                       n:ResourceAvailabilityEvent
                 DETACH DELETE n
             """)
-        logger.info("✓ Instance data cleared")
+        logger.info(" Instance data cleared")
     
     def compute_cpm_for_jobgroup_execution(self, excel_file: str, analyzer: ExecutionCPMAnalyzer):
         df = pd.read_excel(excel_file, 'JobGroupExecutions')
@@ -359,7 +359,7 @@ def main():
             analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)
             loader.compute_cpm_for_jobgroup_execution(excel_file, analyzer)
             print("=" * 80)
-            print("✅ LOADING COMPLETE!")
+            print(" LOADING COMPLETE!")
             print("=" * 80)
             print()
             print("🎉 Instance data is now in Neo4j!")

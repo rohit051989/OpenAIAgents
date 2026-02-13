@@ -112,7 +112,7 @@ class ManualResourceAssociator:
                 check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
                 result = session.run(check_query, fqn=method_fqn)
                 if not result.single():
-                    logger.error(f"  ❌ Method not found: {method_fqn}")
+                    logger.error(f"   Method not found: {method_fqn}")
                     self.stats['errors'] += 1
                     return False
                 
@@ -143,7 +143,7 @@ class ManualResourceAssociator:
                 """
                 result = session.run(resource_query)
                 if result.single():
-                    logger.info(f"    ✓ Resource created/updated: {table_name}")
+                    logger.info(f"     Resource created/updated: {table_name}")
                     self.stats['resources_created'] += 1
                 
                 # Create relationship between JavaMethod and Resource
@@ -157,7 +157,7 @@ class ManualResourceAssociator:
                 }}]->(r)
                 """
                 session.run(relationship_query)
-                logger.info(f"    ✓ Relationship created: {method_fqn} -[DB_OPERATION:{operation_type}]-> {table_name}")
+                logger.info(f"     Relationship created: {method_fqn} -[DB_OPERATION:{operation_type}]-> {table_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Update method's dbOperations property to reflect resolved table
@@ -173,13 +173,13 @@ class ManualResourceAssociator:
                 m.furtherAnalysisRequired = false
                 """
                 session.run(update_method_query)
-                logger.info(f"    ✓ Method updated: furtherAnalysisRequired=false")
+                logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 
                 self.stats['db_operations_processed'] += 1
                 return True
                 
         except Exception as e:
-            logger.error(f"  ❌ Error associating DB operation: {e}")
+            logger.error(f"   Error associating DB operation: {e}")
             self.stats['errors'] += 1
             return False
     
@@ -203,7 +203,7 @@ class ManualResourceAssociator:
                 check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
                 result = session.run(check_query, fqn=method_fqn)
                 if not result.single():
-                    logger.error(f"  ❌ Method not found: {method_fqn}")
+                    logger.error(f"   Method not found: {method_fqn}")
                     self.stats['errors'] += 1
                     return False
                 
@@ -228,7 +228,7 @@ class ManualResourceAssociator:
                 """
                 result = session.run(resource_query)
                 if result.single():
-                    logger.info(f"    ✓ Resource created/updated: {procedure_name} ({resource_type})")
+                    logger.info(f"     Resource created/updated: {procedure_name} ({resource_type})")
                     self.stats['resources_created'] += 1
                 
                 # Create INVOKES relationship
@@ -242,7 +242,7 @@ class ManualResourceAssociator:
                 }}]->(r)
                 """
                 session.run(relationship_query)
-                logger.info(f"    ✓ Relationship created: {method_fqn} -[INVOKES]-> {procedure_name}")
+                logger.info(f"     Relationship created: {method_fqn} -[INVOKES]-> {procedure_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Update method's procedureCalls property to reflect resolved procedure
@@ -258,13 +258,13 @@ class ManualResourceAssociator:
                 m.furtherAnalysisRequired = false
                 """
                 session.run(update_method_query)
-                logger.info(f"    ✓ Method updated: furtherAnalysisRequired=false")
+                logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 
                 self.stats['procedure_calls_processed'] += 1
                 return True
                 
         except Exception as e:
-            logger.error(f"  ❌ Error associating procedure call: {e}")
+            logger.error(f"   Error associating procedure call: {e}")
             self.stats['errors'] += 1
             return False
     
@@ -297,7 +297,7 @@ class ManualResourceAssociator:
                 check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
                 result = session.run(check_query, fqn=method_fqn)
                 if not result.single():
-                    logger.error(f"  ❌ Method not found: {method_fqn}")
+                    logger.error(f"   Method not found: {method_fqn}")
                     self.stats['errors'] += 1
                     return False
                 
@@ -349,7 +349,7 @@ class ManualResourceAssociator:
                 """
                 result = session.run(resource_query)
                 if result.single():
-                    logger.info(f"    ✓ Resource created/updated: {script_name} ({script_type})")
+                    logger.info(f"     Resource created/updated: {script_name} ({script_type})")
                     if is_remote:
                         logger.info(f"      Remote: {remote_user}@{remote_host}:{script_path}")
                     else:
@@ -372,7 +372,7 @@ class ManualResourceAssociator:
                 MERGE (m)-[:EXECUTES {{{rel_set_clauses}}}]->(r)
                 """
                 session.run(relationship_query)
-                logger.info(f"    ✓ Relationship created: {method_fqn} -[EXECUTES]-> {script_name}")
+                logger.info(f"     Relationship created: {method_fqn} -[EXECUTES]-> {script_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Update method's shellExecutions property to reflect resolved script
@@ -388,13 +388,13 @@ class ManualResourceAssociator:
                 m.furtherAnalysisRequired = false
                 """
                 session.run(update_method_query)
-                logger.info(f"    ✓ Method updated: furtherAnalysisRequired=false")
+                logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 
                 self.stats['shell_executions_processed'] += 1
                 return True
                 
         except Exception as e:
-            logger.error(f"  ❌ Error associating shell execution: {e}")
+            logger.error(f"   Error associating shell execution: {e}")
             self.stats['errors'] += 1
             return False
     
@@ -414,10 +414,10 @@ class ManualResourceAssociator:
             with open(config_path, 'r') as f:
                 mappings = yaml.safe_load(f)
         except FileNotFoundError:
-            logger.error(f"❌ Config file not found: {config_path}")
+            logger.error(f" Config file not found: {config_path}")
             return
         except yaml.YAMLError as e:
-            logger.error(f"❌ Invalid YAML format: {e}")
+            logger.error(f" Invalid YAML format: {e}")
             return
         
         # Process DB operations
@@ -432,7 +432,7 @@ class ManualResourceAssociator:
                 confidence = op.get('confidence', 'HIGH')
                 
                 if not all([method_fqn, operation_type, table_name]):
-                    logger.error(f"  [{idx}] ❌ Missing required fields: method_fqn, operation_type, table_name")
+                    logger.error(f"  [{idx}]  Missing required fields: method_fqn, operation_type, table_name")
                     self.stats['errors'] += 1
                     continue
                 
@@ -452,7 +452,7 @@ class ManualResourceAssociator:
                 is_function = proc.get('is_function', False)
                 
                 if not all([method_fqn, procedure_name]):
-                    logger.error(f"  [{idx}] ❌ Missing required fields: method_fqn, procedure_name")
+                    logger.error(f"  [{idx}]  Missing required fields: method_fqn, procedure_name")
                     self.stats['errors'] += 1
                     continue
                 
@@ -478,7 +478,7 @@ class ManualResourceAssociator:
                 description = shell.get('description')
                 
                 if not all([method_fqn, script_name]):
-                    logger.error(f"  [{idx}] ❌ Missing required fields: method_fqn, script_name")
+                    logger.error(f"  [{idx}]  Missing required fields: method_fqn, script_name")
                     self.stats['errors'] += 1
                     continue
                 
@@ -512,9 +512,9 @@ class ManualResourceAssociator:
         print("="*80)
         
         if self.stats['errors'] == 0:
-            print("✅ MANUAL RESOURCE ASSOCIATION COMPLETE")
+            print(" MANUAL RESOURCE ASSOCIATION COMPLETE")
         else:
-            print(f"⚠️  COMPLETED WITH {self.stats['errors']} ERRORS")
+            print(f"  COMPLETED WITH {self.stats['errors']} ERRORS")
         print("="*80 + "\n")
 
 
@@ -551,7 +551,7 @@ def create_sample_config():
     with open(output_path, 'w') as f:
         yaml.dump(sample_config, f, default_flow_style=False, sort_keys=False)
     
-    print(f"\n✅ Sample config file created: {output_path}")
+    print(f"\n Sample config file created: {output_path}")
     print("Edit this file with your actual mappings and run:")
     print(f"   python manual_resource_associator.py --config {output_path}\n")
 

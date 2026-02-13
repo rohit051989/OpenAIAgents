@@ -52,7 +52,7 @@ class JavaCallHierarchyParser:
                 try:
                     result = self._parse_with_tree_sitter(file_path, source)
                     if result:
-                        print(f"           ✓ Successfully parsed with tree-sitter")
+                        print(f"            Successfully parsed with tree-sitter")
                         return result
                 except Exception as ts_error:
                     print(f"           ✗ tree-sitter also failed: {type(ts_error).__name__}: {str(ts_error)[:100]}")

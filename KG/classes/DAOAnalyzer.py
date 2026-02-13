@@ -394,7 +394,7 @@ class DAOAnalyzer:
             match = re.search(pattern, constant_source)
             if match:
                 sql_query = match.group(2).strip()
-                print(f"        ✓ Resolved constant {constant_class}.{constant_name}")
+                print(f"         Resolved constant {constant_class}.{constant_name}")
                 print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
@@ -406,7 +406,7 @@ class DAOAnalyzer:
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
-                    print(f"        ✓ Resolved concatenated constant {constant_class}.{constant_name}")
+                    print(f"         Resolved concatenated constant {constant_class}.{constant_name}")
                     print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                     return sql_query
 

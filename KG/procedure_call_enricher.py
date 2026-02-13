@@ -307,7 +307,7 @@ class ProcedureCallEnricher:
         dao_classes = self._get_dao_classes()
         
         if not dao_classes:
-            print("\n  ⚠️  No DAO classes found (isDAOClass=true).")
+            print("\n    No DAO classes found (isDAOClass=true).")
             print("     Run information_graph_builder_v4.py first.")
             return
         
@@ -346,8 +346,8 @@ class ProcedureCallEnricher:
                 if procedure_call:
                     proc_type = "Function" if procedure_call.is_function else "Procedure"
                     requires_review = 'DYNAMIC' in procedure_call.procedure_name.upper() or procedure_call.procedure_name == 'UNKNOWN'
-                    review_flag = " ⚠️ [Further Analysis Required]" if requires_review else ""
-                    print(f"  ✓ {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
+                    review_flag = "  [Further Analysis Required]" if requires_review else ""
+                    print(f"   {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
                     
                     # Update method in graph
                     if self._update_method_procedures(method_data['fqn'], procedure_call):
@@ -377,7 +377,7 @@ class ProcedureCallEnricher:
         print(f"  Methods with Procedures:      {self.stats['methods_with_procedures']}")
         print(f"  Total Procedures Found:       {self.stats['total_procedures']}")
         print("=" * 80)
-        print("✅ STORED PROCEDURE CALL ENRICHMENT COMPLETE")
+        print(" STORED PROCEDURE CALL ENRICHMENT COMPLETE")
         print("=" * 80 + "\n")
 
 

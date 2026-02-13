@@ -120,7 +120,7 @@ class MultiAgentLLMAnalyzer:
         # Check cache
         cache_key = f"{method_fqn}:{hash(method_source)}"
         if cache_key in self.cache:
-            logger.info(f"      ✓ Cache hit for {method_fqn}")
+            logger.info(f"       Cache hit for {method_fqn}")
             return self.cache[cache_key]
         
         logger.info(f"      🤖 Analyzing {method_fqn}")
@@ -227,7 +227,7 @@ Return ONLY the JSON:"""
                     
                     if content:
                         additional_sources.append(f"\n\n// ===== {fqn} =====\n{content}")
-                        logger.info(f"          ✓ Found {fqn}")
+                        logger.info(f"           Found {fqn}")
         
         return "".join(additional_sources)
     
@@ -436,14 +436,14 @@ class DBOperationEnricher:
                         table = op.get('table_name') if isinstance(op, dict) else op.table_name
                         logger.info(f"    {method_name}() -> {op_type} {table or '?'}")
         
-        print(f"\n  ✓ Analyzed {total_methods} methods")
-        print(f"  ✓ Found DB operations in {methods_with_ops} methods")
+        print(f"\n   Analyzed {total_methods} methods")
+        print(f"   Found DB operations in {methods_with_ops} methods")
         
         # Step 4: Consolidate at Step level
         self._consolidate_step_db_operations()
         
         print("\n" + "=" * 80)
-        print("✅ DB OPERATION ENRICHMENT COMPLETE")
+        print(" DB OPERATION ENRICHMENT COMPLETE")
         print("=" * 80)
     
     def _get_dao_classes(self) -> List[Dict]:
@@ -718,7 +718,7 @@ class DBOperationEnricher:
                 steps_updated += 1
                 logger.info(f"    Step '{step_name}': {len(step_ops_list)} unique DB operations")
         
-        print(f"\n  ✓ Updated {steps_updated} Steps with consolidated DB operations")
+        print(f"\n   Updated {steps_updated} Steps with consolidated DB operations")
         print("=" * 80)
     
     def close(self):

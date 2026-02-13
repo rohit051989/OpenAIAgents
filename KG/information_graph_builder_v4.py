@@ -376,7 +376,7 @@ class InformationGraphBuilder:
         """Clear all nodes and relationships."""
         with self.driver.session(database=self.database) as session:
             session.run("MATCH (n) DETACH DELETE n")
-            print(f"✓ Cleared database: {self.database}")
+            print(f" Cleared database: {self.database}")
     
     def create_constraints(self):
         """Create uniqueness constraints and indexes."""
@@ -415,7 +415,7 @@ class InformationGraphBuilder:
                 except Exception as e:
                     pass
         
-        print("✓ Created constraints and indexes")
+        print(" Created constraints and indexes")
     
     def _is_spring_xml(self, file_path: Path) -> bool:
         """Check if XML file contains Spring namespaces."""
@@ -584,7 +584,7 @@ class InformationGraphBuilder:
         self._scan_recursive_shot1(root, root_path_str, stats)
         
         print("\n" + "=" * 80)
-        print("✓ Shot 1 completed!")
+        print(" Shot 1 completed!")
         print("\nStatistics:")
         print(f"  Directories: {stats['directories']}")
         print(f"  Repositories: {stats['repositories']}")
@@ -919,7 +919,7 @@ class InformationGraphBuilder:
             # Mark folders based on this Java file's package
             self._mark_package_folders(Path(java_path), package_name, packages_marked)
         
-        print(f"\n✓ Marked {len(packages_marked)} unique package folders")
+        print(f"\n Marked {len(packages_marked)} unique package folders")
         print("=" * 60)
     
     def _mark_package_folders(self, java_file_path: Path, package_name: str, packages_marked: Set[str]):
@@ -1372,7 +1372,7 @@ class InformationGraphBuilder:
         enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, original_bean_map)
         
         print("\n" + "=" * 80)
-        print("✅ CALL HIERARCHY BUILD COMPLETE")
+        print(" CALL HIERARCHY BUILD COMPLETE")
         print("=" * 80)
     
         # Step 6: Load Steps and create relationships to Jobs
@@ -1387,7 +1387,7 @@ class InformationGraphBuilder:
                     #logger.info(f"Executing Cypher:: {stmt[:500]}...")
                     session.run(stmt)
 
-            logger.info(f"✓ Loaded {len(statements)} statements for Steps of job '{job_def.name}'")
+            logger.info(f" Loaded {len(statements)} statements for Steps of job '{job_def.name}'")
             
             # Load Java call hierarchy
             hierarchy_cypher = generate_cypher_for_hierarchy(job_def)
@@ -1402,12 +1402,12 @@ class InformationGraphBuilder:
                             logger.error(f"Error executing hierarchy statement: {str(e)[:200]}")
                             logger.debug(f"Failed statement: {stmt[:500]}")
                 
-                logger.info(f"✓ Loaded {len(hierarchy_statements)} hierarchy statements for job '{job_def.name}'")
+                logger.info(f" Loaded {len(hierarchy_statements)} hierarchy statements for job '{job_def.name}'")
         
         # Note: All analysis (DB, procedures, shell scripts) moved to separate scripts
         # Run enrichment scripts after this script completes
         print("\n" + "=" * 80)
-        print("✅ INFORMATION GRAPH BUILD COMPLETE")
+        print(" INFORMATION GRAPH BUILD COMPLETE")
         print("=" * 80)
         print("\nNext Steps: Run enrichment scripts to analyze operations")
         print("  1. python db_operation_enricher.py          # Analyze DB operations")
@@ -1477,10 +1477,10 @@ def main():
 
         builder._load_classes()
         
-        print("\n✓ Information Graph built successfully!")
+        print("\n Information Graph built successfully!")
         
     except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
+        print(f"\n Error: {str(e)}")
         import traceback
         traceback.print_exc()
     finally:
