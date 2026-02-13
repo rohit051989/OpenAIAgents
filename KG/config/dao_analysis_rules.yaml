@@ -1,0 +1,172 @@
+# DAO Analysis Rules Configuration
+# Simplified version with essential rules only
+
+# Database-related import patterns to identify DAO/Repository classes
+db_import_patterns:
+  - javax.persistence
+  - org.springframework.jdbc
+  - java.sql
+  - org.springframework.data
+  - org.hibernate
+  - jakarta.persistence
+  - javax.sql
+
+# Class names to exclude from DAO detection
+excluded_class_suffixes:
+  - entity
+  - model
+  - dto
+  - vo
+  - bean
+  - pojo
+
+# Method name keywords that indicate DAO behavior
+dao_method_keywords:
+  - find
+  - save
+  - delete
+  - update
+  - insert
+  - query
+  - get
+  - create
+  - persist
+  - fetch
+  - search
+  - remove
+  - merge
+  - select
+
+# Method name prefixes that indicate operation types
+operation_method_prefixes:
+  SELECT:
+    - find
+    - get
+    - select
+    - query
+    - search
+    - fetch
+  INSERT:
+    - save
+    - insert
+    - create
+    - persist
+    - add
+  UPDATE:
+    - update
+    - modify
+    - merge
+    - edit
+  DELETE:
+    - delete
+    - remove
+
+# JPA/ORM patterns for detecting operations (pattern only, no description)
+jpa_patterns:
+  SELECT:
+    - createQuery\s*\(\s*["']SELECT
+    - \.find\(
+    - \.findAll\(
+    - getResultList\(
+  INSERT:
+    - \.persist\(
+    - \.save\(
+    - createQuery\s*\(\s*["']INSERT
+  UPDATE:
+    - \.merge\(
+    - \.update\(
+    - createQuery\s*\(\s*["']UPDATE
+  DELETE:
+    - \.remove\(
+    - \.delete\(
+    - createQuery\s*\(\s*["']DELETE
+
+# Patterns that indicate direct database operations
+direct_db_operation_patterns:
+  - jdbcTemplate\.
+  - namedParameterJdbcTemplate\.
+  - entityManager\.(persist|merge|remove|find|createQuery|createNativeQuery)
+  - \.persist\s*\(
+  - \.merge\s*\(
+  - \.remove\s*\(
+  - session\.(save|update|delete|createQuery|createSQLQuery)
+  - PreparedStatement
+  - Statement\.execute
+  - connection\.(prepareStatement|createStatement)
+  - '@Query\s*\('
+  - '@Modifying'
+
+# SQL extraction patterns (pattern, type, capture_group)
+sql_extraction_patterns:
+  JPA_JPQL:
+    pattern: createQuery\s*\(\s*["']([^"']+)["']
+    capture_group: 1
+  JDBC_INLINE:
+    pattern: jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*["']([^"']+)["']
+    capture_group: 2
+  JDBC_CONSTANT:
+    pattern: jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*([A-Z][\w.]*)\.([A-Z_][A-Z_0-9]*)\s*[,)]
+    constant_class_group: 2
+    constant_name_group: 3
+
+# Patterns for detecting dynamic SQL
+dynamic_sql_patterns:
+  - '["''][^"'']["'']\s*\+|\+\s*["'']'
+  - String\.format
+  - StringBuilder
+  - StringBuffer
+
+# SQL patterns for extracting table names
+table_extraction_patterns:
+  - FROM\s+([\w.]+)
+  - INTO\s+([\w.]+)
+  - UPDATE\s+([\w.]+)
+  - JOIN\s+([\w.]+)
+
+# JPQL patterns for extracting entity names
+jpql_entity_patterns:
+  - FROM\s+(\w+)
+  - \.find\(\s*(\w+)\.class
+
+# Java types to exclude from table name inference
+excluded_java_types:
+  - List
+  - Set
+  - Map
+  - Collection
+  - ArrayList
+  - HashSet
+  - HashMap
+  - String
+  - Integer
+  - Long
+  - Double
+  - Float
+  - Boolean
+  - Character
+  - Byte
+  - Short
+  - Object
+  - void
+  - int
+  - long
+  - double
+  - float
+  - boolean
+  - char
+  - byte
+  - short
+
+# Entity naming rules
+entity_naming_rules:
+  entity_suffix: Entity
+  case_conversion: snake_case
+  pluralization: false
+
+# Keywords for skipping resource creation
+skip_resource_keywords:
+  - DYNAMIC
+  - UNKNOWN
+  - DYNAMIC_TABLE
+  - DYNAMIC_CATALOG
+  - DYNAMIC_SCHEMA

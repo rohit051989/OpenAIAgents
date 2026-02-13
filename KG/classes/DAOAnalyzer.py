@@ -1,31 +1,89 @@
 from classes.DataClasses import ClassInfo, DBOperation, MethodDef
-
-
 import re
+import yaml
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List, Any
 
 
 class DAOAnalyzer:
     """Analyzes DAO methods to extract database operations"""
 
-    # Database-related import patterns to identify DAO/Repository classes
-    DB_IMPORT_PATTERNS = [
-        'javax.persistence',           # JPA annotations and EntityManager
-        'org.springframework.jdbc',    # Spring JDBC templates
-        'java.sql',                    # Raw JDBC (Connection, Statement, ResultSet)
-        'org.springframework.data',    # Spring Data repositories
-        'org.hibernate',               # Hibernate ORM
-        'jakarta.persistence',         # Jakarta EE (JPA replacement for javax.persistence)
-        'javax.sql',                   # DataSource and connection pooling
-    ]
-
-    JPA_PATTERNS = {
-        'SELECT': [r'createQuery\s*\(\s*["\']SELECT', r'\.find\(', r'\.findAll\(', r'getResultList\('],
-        'INSERT': [r'\.persist\(', r'\.save\(', r'createQuery\s*\(\s*["\']INSERT'],
-        'UPDATE': [r'\.merge\(', r'\.update\(', r'createQuery\s*\(\s*["\']UPDATE'],
-        'DELETE': [r'\.remove\(', r'\.delete\(', r'createQuery\s*\(\s*["\']DELETE'],
-    }
+    def __init__(self, rules_config_path: str = None):
+        """
+        Initialize DAOAnalyzer with externalized rules.
+        
+        Args:
+            rules_config_path: Path to DAO analysis rules YAML file
+        """
+        if rules_config_path is None:
+            rules_config_path = Path(__file__).parent.parent / 'config' / 'dao_analysis_rules.yaml'
+        
+        self.rules = self._load_rules(rules_config_path)
+        
+        # Extract frequently used rules for performance
+        self.db_import_patterns = self.rules.get('db_import_patterns', [])
+        self.excluded_class_suffixes = self.rules.get('excluded_class_suffixes', [])
+        self.dao_method_keywords = self.rules.get('dao_method_keywords', [])
+        self.operation_method_prefixes = self.rules.get('operation_method_prefixes', {})
+        self.jpa_patterns = self._compile_jpa_patterns()
+        self.direct_db_patterns = self.rules.get('direct_db_operation_patterns', [])
+        self.table_extraction_patterns = self.rules.get('table_extraction_patterns', [])
+        self.excluded_java_types = self.rules.get('excluded_java_types', [])
+        self.dynamic_sql_patterns = self.rules.get('dynamic_sql_patterns', [])
+        self.skip_resource_keywords = self.rules.get('skip_resource_keywords', 
+                                                     ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_TABLE', 
+                                                      'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA'])
+    
+    def _load_rules(self, config_path: Path) -> Dict[str, Any]:
+        """Load analysis rules from YAML configuration file"""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                rules = yaml.safe_load(f)
+            #print(f"[OK] Loaded DAO analysis rules from: {config_path}")
+            return rules
+        except FileNotFoundError:
+            print(f"[WARN] DAO rules config not found: {config_path}, using defaults")
+            return self._get_default_rules()
+        except yaml.YAMLError as e:
+            print(f"[WARN] Error parsing DAO rules config: {e}, using defaults")
+            return self._get_default_rules()
+    
+    def _get_default_rules(self) -> Dict[str, Any]:
+        """Return minimal default rules if config file is not found"""
+        return {
+            'db_import_patterns': ['javax.persistence', 'org.springframework.jdbc', 'java.sql'],
+            'excluded_class_suffixes': ['entity', 'model', 'dto'],
+            'dao_method_keywords': ['find', 'save', 'delete', 'update', 'query'],
+            'operation_method_prefixes': {
+                'SELECT': ['find', 'get', 'select'],
+                'INSERT': ['save', 'insert', 'create'],
+                'UPDATE': ['update', 'modify'],
+                'DELETE': ['delete', 'remove']
+            },
+            'excluded_java_types': ['List', 'Set', 'Map', 'void', 'String', 'Integer']
+        }
+    
+    def _compile_jpa_patterns(self) -> Dict[str, List[re.Pattern]]:
+        """Compile JPA patterns from config for better performance"""
+        jpa_config = self.rules.get('jpa_patterns', {})
+        compiled = {}
+        
+        for operation, patterns in jpa_config.items():
+            compiled[operation] = []
+            for pattern_item in patterns:
+                # Handle both simple string patterns and dict-based patterns
+                if isinstance(pattern_item, dict):
+                    pattern_str = pattern_item.get('pattern', '')
+                else:
+                    pattern_str = pattern_item
+                
+                if pattern_str:
+                    try:
+                        compiled[operation].append(re.compile(pattern_str, re.IGNORECASE))
+                    except re.error as e:
+                        print(f"[WARN] Invalid JPA pattern for {operation}: {pattern_str} - {e}")
+        
+        return compiled
 
     def analyze_method(self, method_def: MethodDef, class_info: ClassInfo) -> Optional[DBOperation]:
         """Analyze a DAO method to detect database operations"""
@@ -60,40 +118,31 @@ class DAOAnalyzer:
 
     def _is_dao_class(self, class_info: ClassInfo) -> bool:
         """
-        Check if this looks like a DAO/Repository class.
-        Uses both class name heuristics and import analysis.
-
-        Detection criteria:
-        1. Class name contains 'dao' or 'repository' (case-insensitive)
-        2. Class imports database-related packages (javax.persistence, org.springframework.jdbc, etc.)
-        3. Excludes Entity/Model/DTO classes even if they have DB imports
-        4. Excludes interfaces - only actual implementation classes can be DAOs
+        Check if this looks like a DAO/Repository class using configured rules.
 
         Returns:
             True if class appears to be a DAO/Repository, False otherwise
         """
-        # Exclude interfaces - they don't have DB operation logic, only their implementations do
+        # Exclude interfaces - they don't have DB operation logic
         if hasattr(class_info, 'is_interface') and class_info.is_interface:
             return False
             
         name_lower = class_info.class_name.lower()
 
-        # Exclude Entity, Model, DTO classes - these are data classes, not DAOs
-        excluded_suffixes = ['entity', 'model', 'dto', 'vo', 'bean', 'pojo']
-        for suffix in excluded_suffixes:
-            if name_lower.endswith(suffix):
+        # Check 1: Exclude Entity/Model/DTO classes using configured suffixes
+        for suffix in self.excluded_class_suffixes:
+            if name_lower.endswith(suffix.lower()):
                 return False
 
-        # Check 1: Class name heuristics (strongest signal)
+        # Check 2: Class name heuristics (strongest signal)
         if 'dao' in name_lower or 'repository' in name_lower:
             return True
 
-        # Check 2: Database-related imports (for classes not following naming conventions)
-        # Only consider if class has methods that suggest DB operations
+        # Check 3: Database-related imports using configured patterns
         has_db_imports = False
         if class_info.imports:
             for import_stmt in class_info.imports:
-                for db_pattern in self.DB_IMPORT_PATTERNS:
+                for db_pattern in self.db_import_patterns:
                     if import_stmt.startswith(db_pattern):
                         has_db_imports = True
                         break
@@ -101,11 +150,10 @@ class DAOAnalyzer:
                     break
 
         if has_db_imports:
-            # Additional check: class should have typical DAO method names
+            # Additional check: class should have typical DAO method names from config
             method_names = [m.lower() for m in class_info.methods.keys()]
-            dao_method_keywords = ['find', 'save', 'delete', 'update', 'insert', 'query', 'get', 'create', 'persist']
             has_dao_methods = any(
-                any(keyword in method_name for keyword in dao_method_keywords)
+                any(keyword in method_name for keyword in self.dao_method_keywords)
                 for method_name in method_names
             )
 
@@ -115,155 +163,180 @@ class DAOAnalyzer:
         return False
 
     def _detect_operation_type(self, method_def: MethodDef, source: str) -> Optional[str]:
-        """Detect database operation type - only for direct DB operations"""
+        """Detect database operation type using configured rules"""
         
         # First, check if method directly uses DB APIs
-        # If it only delegates to other methods, return None
         if not self._has_direct_db_operation(source):
             return None
         
         method_lower = method_def.method_name.lower()
 
-        # Method name heuristics
-        if method_lower.startswith(('find', 'get', 'select', 'query', 'search', 'fetch')):
-            return 'SELECT'
-        elif method_lower.startswith(('save', 'insert', 'create', 'persist', 'add')):
-            return 'INSERT'
-        elif method_lower.startswith(('update', 'modify', 'merge', 'edit')):
-            return 'UPDATE'
-        elif method_lower.startswith(('delete', 'remove')):
-            return 'DELETE'
+        # Method name heuristics from configuration
+        for operation, prefixes in self.operation_method_prefixes.items():
+            for prefix in prefixes:
+                if method_lower.startswith(prefix.lower()):
+                    return operation
 
-        # Pattern matching
-        for op_type, patterns in self.JPA_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, source, re.IGNORECASE):
+        # Pattern matching using configured JPA patterns
+        for op_type, compiled_patterns in self.jpa_patterns.items():
+            for pattern in compiled_patterns:
+                if pattern.search(source):
                     return op_type
 
         return None
     
     def _has_direct_db_operation(self, source: str) -> bool:
         """
-        Check if method directly performs DB operations (not just delegation).
+        Check if method directly performs DB operations using configured patterns.
         
-        Returns True if method contains direct DB API calls:
-        - JdbcTemplate operations
-        - EntityManager operations
-        - Hibernate Session operations
-        - Raw JDBC (PreparedStatement, Statement)
-        
-        Returns False if method only calls other methods.
+        Returns True if method contains direct DB API calls.
         """
-        # Patterns for direct DB operations
-        direct_db_patterns = [
-            # Spring JDBC
-            r'jdbcTemplate\.',
-            r'namedParameterJdbcTemplate\.',
-            
-            # JPA EntityManager
-            r'entityManager\.(persist|merge|remove|find|createQuery|createNativeQuery)',
-            r'\.persist\s*\(',
-            r'\.merge\s*\(',
-            r'\.remove\s*\(',
-            
-            # Hibernate Session
-            r'session\.(save|update|delete|createQuery|createSQLQuery)',
-            
-            # Raw JDBC
-            r'PreparedStatement',
-            r'Statement\.execute',
-            r'connection\.(prepareStatement|createStatement)',
-            
-            # Spring Data repository (direct query annotations)
-            r'@Query\s*\(',
-            r'@Modifying',
-        ]
-        
-        for pattern in direct_db_patterns:
-            if re.search(pattern, source, re.IGNORECASE):
-                return True
+        for pattern_item in self.direct_db_patterns:
+            # Handle both simple string patterns and dict-based patterns
+            if isinstance(pattern_item, dict):
+                pattern_str = pattern_item.get('pattern', '')
+            else:
+                pattern_str = pattern_item
+                
+            if pattern_str:
+                try:
+                    if re.search(pattern_str, source, re.IGNORECASE):
+                        return True
+                except re.error:
+                    continue
         
         return False
 
     def _extract_entity_info(self, method_def: MethodDef, source: str, raw_query: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
-        """Extract entity type and table name"""
+        """Extract entity type and table name using configured rules"""
         entity_type = None
         table_name = None
 
         # Priority 1: Extract from SQL query if available
-        if raw_query:
-            # Parse table name from SQL: SELECT FROM table_name, INSERT INTO table_name, UPDATE table_name, DELETE FROM table_name
-            sql_patterns = [
-                r'FROM\s+([\w.]+)',  # SELECT/DELETE FROM table
-                r'INTO\s+([\w.]+)',  # INSERT INTO table
-                r'UPDATE\s+([\w.]+)',  # UPDATE table
-                r'JOIN\s+([\w.]+)',  # JOIN table (secondary, but useful)
-            ]
-            for pattern in sql_patterns:
-                match = re.search(pattern, raw_query, re.IGNORECASE)
-                if match:
-                    table_name = match.group(1).strip()
-                    # Remove schema prefix if present (e.g., SCHEMA.TABLE -> TABLE)
-                    if '.' in table_name:
-                        table_name = table_name.split('.')[-1]
-                    print(f"          Extracted table from SQL: {table_name}")
-                    break
+        if raw_query and raw_query != "DYNAMIC_SQL":
+            # Parse table name from SQL using configured patterns
+            for pattern_item in self.table_extraction_patterns:
+                # Handle both simple string patterns and dict-based patterns
+                if isinstance(pattern_item, dict):
+                    pattern_str = pattern_item.get('pattern', '')
+                else:
+                    pattern_str = pattern_item
+                    
+                try:
+                    match = re.search(pattern_str, raw_query, re.IGNORECASE)
+                    if match:
+                        table_name = match.group(1).strip()
+                        # Remove schema prefix if present
+                        if '.' in table_name:
+                            table_name = table_name.split('.')[-1]
+                        print(f"          Extracted table from SQL: {table_name}")
+                        break
+                except (re.error, IndexError):
+                    continue
+                    
+        elif raw_query == "DYNAMIC_SQL":
+            print(f"          Dynamic SQL detected - table name cannot be determined statically")
+            table_name = "DYNAMIC_TABLE"
 
-        # Priority 2: From return type
+        # Priority 2: From return type with 'Entity' suffix
         if not table_name and 'Entity' in method_def.return_type:
-            entity_type = method_def.return_type.replace('Entity', '')
+            entity_suffix = self.rules.get('entity_naming_rules', {}).get('entity_suffix', 'Entity')
+            entity_type = method_def.return_type.replace(entity_suffix, '')
             table_name = self._entity_to_table(entity_type)
             print(f"          Inferred table from Entity return type: {table_name}")
 
         # Priority 3: From JPQL query in source
         if not table_name:
-            query_match = re.search(r'FROM\s+(\w+)', source, re.IGNORECASE)
-            if query_match:
-                entity_type = query_match.group(1)
-                table_name = self._entity_to_table(entity_type)
-                print(f"          Inferred table from JPQL query: {table_name}")
+            jpql_patterns = self.rules.get('jpql_entity_patterns', [])
+            for pattern_item in jpql_patterns:
+                # Handle both simple string patterns and dict-based patterns
+                if isinstance(pattern_item, dict):
+                    pattern_str = pattern_item.get('pattern', '')
+                else:
+                    pattern_str = pattern_item
+                    
+                try:
+                    match = re.search(pattern_str, source, re.IGNORECASE)
+                    if match:
+                        entity_type = match.group(1)
+                        table_name = self._entity_to_table(entity_type)
+                        print(f"          Inferred table from JPQL query: {table_name}")
+                        break
+                except (re.error, IndexError):
+                    continue
 
-        # Priority 4: From EntityManager.find()
-        if not table_name:
-            find_match = re.search(r'\.find\(\s*(\w+)\.class', source)
-            if find_match:
-                entity_type = find_match.group(1)
-                table_name = self._entity_to_table(entity_type)
-                print(f"          Inferred table from EntityManager.find(): {table_name}")
-
-        # Priority 5: Infer from return type (even non-Entity classes)
+        # Priority 4: Infer from return type (even non-Entity classes)
         if not table_name and method_def.return_type:
             # Extract simple class name from return type
             return_type_simple = method_def.return_type.split('.')[-1]
-            # Common patterns: JobParams, CustomerInfo, UserData -> job_params, customer_info, user_data
-            if return_type_simple and return_type_simple[0].isupper():
+            
+            # Remove generic type parameters: List<String> -> List
+            return_type_simple = re.sub(r'<.*>', '', return_type_simple)
+            
+            # Check if it's a Java type using configured list
+            if return_type_simple in self.excluded_java_types:
+                print(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
+                table_name = "UNKNOWN"
+            elif return_type_simple and return_type_simple[0].isupper():
                 table_name = self._entity_to_table(return_type_simple)
                 print(f"          Inferred table from return type ({return_type_simple}): {table_name}")
 
         return entity_type, table_name.upper() if table_name else None
 
     def _extract_query(self, source: str, class_info: ClassInfo = None) -> Optional[str]:
-        """Extract SQL/JPQL query including Spring JDBC constant-based queries"""
-        # JPA createQuery pattern
-        query_match = re.search(r'createQuery\s*\(\s*["\']([^"\']+)["\']', source, re.DOTALL)
-        if query_match:
-            return query_match.group(1).strip()
-
-        # Spring JDBC inline query pattern: jdbcTemplate.query("SELECT...", ...)
-        jdbc_inline = re.search(r'jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*["\']([^"\']+)["\']', source, re.DOTALL)
-        if jdbc_inline:
-            return jdbc_inline.group(2).strip()
-
-        # Spring JDBC constant reference: jdbcTemplate.query(ConstantClass.CONSTANT_NAME, ...)
-        # Handle multi-line calls with whitespace/newlines
-        constant_match = re.search(r'jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*([A-Z][\w.]*)\.([A-Z_][A-Z_0-9]*)\s*[,)]', source, re.DOTALL)
-        if constant_match and class_info:
-            constant_class = constant_match.group(2)
-            constant_name = constant_match.group(3)
-            print(f"        Detected constant reference: {constant_class}.{constant_name}")
-            resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
-            if resolved_query:
-                return resolved_query
+        """Extract SQL/JPQL query using configured patterns"""
+        
+        # Use configured SQL extraction patterns
+        sql_patterns = self.rules.get('sql_extraction_patterns', {})
+        
+        for pattern_type, pattern_config in sql_patterns.items():
+            pattern_str = pattern_config.get('pattern', '')
+            
+            try:
+                match = re.search(pattern_str, source, re.DOTALL)
+                if not match:
+                    continue
+                
+                if pattern_type == 'JPA_JPQL':
+                    capture_group = pattern_config.get('capture_group', 1)
+                    return match.group(capture_group).strip()
+                
+                elif pattern_type == 'JDBC_INLINE':
+                    # Check for dynamic SQL patterns first
+                    call_start = match.end() - len(match.group(0))
+                    snippet = source[call_start:call_start+500]
+                    
+                    # Check for concatenation using configured patterns
+                    for dynamic_pattern_item in self.dynamic_sql_patterns:
+                        # Handle both simple string patterns and dict-based patterns
+                        if isinstance(dynamic_pattern_item, dict):
+                            dynamic_pattern = dynamic_pattern_item.get('pattern', '')
+                            desc = dynamic_pattern_item.get('description', 'dynamic SQL')
+                        else:
+                            dynamic_pattern = dynamic_pattern_item
+                            desc = 'dynamic SQL'
+                            
+                        if re.search(dynamic_pattern, snippet):
+                            print(f"        Detected {desc}")
+                            return "DYNAMIC_SQL"
+                    
+                    # Normal inline query
+                    capture_group = pattern_config.get('capture_group', 2)
+                    if match.lastindex and match.lastindex >= capture_group:
+                        return match.group(capture_group).strip()
+                
+                elif pattern_type == 'JDBC_CONSTANT' and class_info:
+                    const_class_group = pattern_config.get('constant_class_group', 2)
+                    const_name_group = pattern_config.get('constant_name_group', 3)
+                    constant_class = match.group(const_class_group)
+                    constant_name = match.group(const_name_group)
+                    print(f"        Detected constant reference: {constant_class}.{constant_name}")
+                    resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
+                    if resolved_query:
+                        return resolved_query
+            
+            except (re.error, IndexError) as e:
+                continue
 
         return None
 
@@ -317,9 +390,6 @@ class DAOAnalyzer:
                 constant_source = f.read()
 
             # Pattern: public static final String CONSTANT_NAME = "SQL...";
-            # Handles multi-line: public static final String CONSTANT_NAME = 
-            #                       "SQL...";
-            # Use [\s\S]*? to match across newlines (non-greedy)
             pattern = rf'(public\s+)?static\s+final\s+String\s+{re.escape(constant_name)}\s*=\s*\n?\s*"([\s\S]*?)";?'
             match = re.search(pattern, constant_source)
             if match:
@@ -328,12 +398,11 @@ class DAOAnalyzer:
                 print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
-            # Handle multi-line concatenation: "SELECT " + "FROM..." + "WHERE..."
+            # Handle multi-line concatenation
             concat_pattern = rf'(public\s+)?static\s+final\s+String\s+{re.escape(constant_name)}\s*=\s*([\s\S]+?);'
             concat_match = re.search(concat_pattern, constant_source)
             if concat_match:
                 sql_expr = concat_match.group(2)
-                # Extract all string literals and concatenate
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
@@ -353,7 +422,7 @@ class DAOAnalyzer:
         # Convert FQN to relative path
         relative_path = constant_fqn.replace('.', '/') + '.java'
 
-        # Start from the current source directory and navigate up to find 'java' or 'src'
+        # Start from the current source directory
         current_path = Path(current_source_path)
         source_root = current_path.parent
 
@@ -368,7 +437,7 @@ class DAOAnalyzer:
         if potential_path.exists():
             return str(potential_path)
 
-        # Try parent of source_root (e.g., src/main/java)
+        # Try parent of source_root
         if source_root.parent:
             potential_path = source_root.parent / relative_path
             if potential_path.exists():
@@ -376,10 +445,19 @@ class DAOAnalyzer:
 
         return None
 
-    @staticmethod
-    def _entity_to_table(entity_name: str) -> str:
-        """Convert entity name to table name"""
-        name = entity_name.replace('Entity', '')
-        return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
-
-
+    def _entity_to_table(self, entity_name: str) -> str:
+        """Convert entity name to table name using configured rules"""
+        entity_config = self.rules.get('entity_naming_rules', {})
+        entity_suffix = entity_config.get('entity_suffix', 'Entity')
+        case_conversion = entity_config.get('case_conversion', 'snake_case')
+        
+        name = entity_name.replace(entity_suffix, '')
+        
+        if case_conversion == 'snake_case':
+            return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+        elif case_conversion == 'lower':
+            return name.lower()
+        elif case_conversion == 'upper':
+            return name.upper()
+        else:
+            return name

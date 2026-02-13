@@ -232,11 +232,19 @@ class ProcedureCallEnricher:
     def _create_procedure_resource(self, method_fqn: str, procedure_call):
         """
         Create PROCEDURE Resource node and INVOKES relationship.
+        Skip creation for DYNAMIC/UNKNOWN procedure names - these require manual resolution.
         
         Args:
             method_fqn: Method fully qualified name
             procedure_call: ProcedureCall object
         """
+        # Skip Resource creation for DYNAMIC/UNKNOWN procedure names
+        # These need manual resolution before Resource association
+        skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_PROCEDURE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']
+        if any(keyword in procedure_call.procedure_name.upper() for keyword in skip_keywords):
+            logger.info(f"  Skipping Resource creation for {procedure_call.procedure_name} (requires manual resolution)")
+            return
+        
         escaped_method_fqn = escape_cypher_string(method_fqn)
         escaped_proc_name = escape_cypher_string(procedure_call.procedure_name)
         escaped_db_type = escape_cypher_string(procedure_call.database_type)

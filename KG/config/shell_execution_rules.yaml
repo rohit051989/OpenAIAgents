@@ -1,0 +1,121 @@
+# Shell Script Execution Analysis Rules Configuration
+# =================================================
+# This file defines patterns and rules for detecting shell script execution in Java code
+
+# Import patterns that indicate shell/process execution capabilities
+shell_execution_imports:
+  required:
+    - java.lang.Runtime
+    - java.lang.ProcessBuilder
+    - org.apache.commons.exec.CommandLine
+    - org.apache.commons.exec.DefaultExecutor
+    - org.apache.commons.exec.Executor
+  
+  optional:
+    - java.lang.Process
+    - org.apache.commons.exec
+    - org.springframework.util.exec
+    - java.io.BufferedReader
+    - java.io.InputStreamReader
+
+# Code patterns that indicate ACTUAL shell execution (not just method names)
+# These are regex patterns to detect actual execution code
+actual_execution_patterns:
+  runtime_exec:
+    pattern: 'Runtime\.getRuntime\(\)\.exec\s*\('
+    description: "Runtime.getRuntime().exec() method call"
+    execution_method: "Runtime.exec"
+    confidence: HIGH
+    
+  processbuilder:
+    pattern: 'new\s+ProcessBuilder\s*\('
+    description: "ProcessBuilder instantiation"
+    execution_method: "ProcessBuilder"
+    confidence: HIGH
+    
+  commons_exec_execute:
+    pattern: 'executor\.execute\s*\('
+    description: "Apache Commons Exec executor.execute()"
+    execution_method: "CommonsExec"
+    confidence: HIGH
+    
+  commandline_parse:
+    pattern: 'CommandLine\.parse\s*\('
+    description: "Apache Commons Exec CommandLine.parse()"
+    execution_method: "CommonsExec"
+    confidence: MEDIUM
+
+# Class name patterns that SUGGEST shell execution (must be validated with imports and code)
+# These alone are NOT sufficient to mark a class as shell executor
+class_name_hints:
+  strong:
+    - BatchUtils
+    - ShellExecutor
+    - CommandExecutor
+    - ProcessExecutor
+  
+  weak:
+    - ShellService  # Too generic, needs validation
+    - ScriptService  # Too generic, needs validation
+    - Runtime       # Too generic, needs validation
+
+# Method name patterns that indicate shell execution methods
+# These are used to identify which methods to analyze, not to determine if they execute shells
+method_name_patterns:
+  execution_indicators:
+    - executeShellScript
+    - executeCommand
+    - executeNativeCommand
+    - executeProcess
+    - runShellScript
+    - runCommand
+    - exec
+
+# Patterns to IGNORE (methods that sound like shell execution but aren't)
+# These help reduce false positives
+ignore_patterns:
+  method_names:
+    - executeQuery         # Database query, not shell
+    - executeUpdate        # Database update, not shell  
+    - executeTransaction   # Database transaction, not shell
+    - executeBatch         # Database batch, not shell
+    
+  class_names:
+    - QueryExecutor       # Database query executor
+    - TaskExecutor        # Spring TaskExecutor (thread pool)
+    - JobExecutor         # Batch job executor
+    - Executor            # Generic executor interface
+
+# Grey area detection patterns
+grey_area_indicators:
+  dynamic_path:
+    - 'String\.format'
+    - 'String\.join'
+    - '\+'  # String concatenation
+    - 'StringBuilder'
+    
+  parameterized:
+    - 'scriptDir'
+    - 'scriptFile'
+    - 'scriptPath'
+    - 'scriptCommand'
+    - 'command'
+    - 'cmd'
+    
+  remote_execution:
+    - 'ssh '
+    - 'scp '
+    - 'sftp'
+    - 'rsync'
+
+# Confidence scoring
+confidence_rules:
+  HIGH:
+    - "Has required imports AND actual execution pattern"
+  MEDIUM:
+    - "Has optional imports AND actual execution pattern"
+  LOW:
+    - "Has execution pattern but missing imports"
+  REJECT:
+    - "Only has method name pattern, no actual execution code"
+    - "Class name matches but no execution code"

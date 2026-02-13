@@ -552,6 +552,14 @@ class DBOperationEnricher:
                 
                 # Normalize and escape values
                 table_name = table_name.upper() if table_name else "UNKNOWN"
+                
+                # Skip Resource creation for DYNAMIC/UNKNOWN table names
+                # These need manual resolution before Resource association
+                skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_TABLE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']
+                if any(keyword in table_name for keyword in skip_keywords):
+                    logger.info(f"  Skipping Resource creation for {table_name} (requires manual resolution)")
+                    continue
+                
                 escaped_table_name = escape_cypher_string(table_name)
                 escaped_entity_type = escape_cypher_string(entity_type if entity_type else "UNKNOWN")
                 escaped_operation_type = escape_cypher_string(operation_type)

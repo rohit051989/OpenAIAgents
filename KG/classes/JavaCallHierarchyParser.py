@@ -1,6 +1,5 @@
 from classes.DataClasses import ClassInfo, MethodCall, MethodDef
 
-
 import javalang
 try:
     from tree_sitter import Language, Parser
@@ -202,7 +201,7 @@ class JavaCallHierarchyParser:
             imports=imports
         )
         
-        # Extract methods (basic info only, no call hierarchy)
+        # Extract methods WITH call hierarchy
         class_body = self._ts_find_child_by_type(class_node, "class_body")
         if class_body:
             for method_node in self._ts_find_children_by_type(class_body, "method_declaration"):
@@ -218,14 +217,17 @@ class JavaCallHierarchyParser:
                     if type_node:
                         return_type = self._ts_get_text(type_node, source)
                     
-                    # Create basic MethodDef (signature and fqn are computed properties)
+                    # Extract method calls from method body
+                    method_calls = self._ts_extract_method_calls(method_node, class_info, source)
+                    
+                    # Create MethodDef WITH calls
                     method_def = MethodDef(
                         class_fqn=fqn,
                         method_name=method_name,
                         return_type=return_type,
                         parameters=[],
                         modifiers=[],
-                        calls=[]
+                        calls=method_calls
                     )
                     class_info.methods[method_name] = method_def
         
@@ -263,6 +265,84 @@ class JavaCallHierarchyParser:
     def _ts_get_text(self, node, source: str) -> str:
         """Extract text from tree-sitter node"""
         return source[node.start_byte:node.end_byte]
+    
+    def _ts_extract_method_calls(self, method_node, class_info: ClassInfo, source: str) -> List[MethodCall]:
+        """
+        Extract method invocations from method body using tree-sitter.
+        Recursively searches for method_invocation nodes in the method body.
+        """
+        
+        calls = []
+        
+        # Find method body
+        method_body = self._ts_find_child_by_type(method_node, "block")
+        if not method_body:
+            return calls
+        
+        # Recursively search for method invocations
+        def search_invocations(node):
+            if node.type == "method_invocation":
+                # In tree-sitter, method_invocation structure:
+                # - last identifier before '(' is the method name
+                # - anything before that is the object/class qualifier
+                
+                method_name = None
+                qualifier = None
+                
+                # Parse the method invocation text to extract components
+                invocation_text = self._ts_get_text(node, source)
+                
+                # Find the argument_list to determine where method name ends
+                arg_list_node = self._ts_find_child_by_type(node, "argument_list")
+                if arg_list_node:
+                    # Get text before argument list
+                    call_prefix = source[node.start_byte:arg_list_node.start_byte].strip()
+                    
+                    # Split by dots to get qualifier and method name
+                    parts = call_prefix.split('.')
+                    if len(parts) > 1:
+                        method_name = parts[-1]
+                        qualifier = '.'.join(parts[:-1])
+                    else:
+                        method_name = parts[0]
+                        qualifier = None
+                else:
+                    # Fallback: just get the last identifier
+                    identifiers = [child for child in node.children if child.type == "identifier"]
+                    if identifiers:
+                        method_name = self._ts_get_text(identifiers[-1], source)
+                        if len(identifiers) > 1:
+                            qualifier = self._ts_get_text(identifiers[0], source)
+                
+                if not method_name:
+                    return
+                
+                # Determine target class from qualifier
+                target_class = None
+                if qualifier:
+                    # Check if it's a field reference
+                    if qualifier in class_info.fields:
+                        target_class = class_info.fields[qualifier]
+                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                    # Check if it's a class name (static method call)
+                    else:
+                        target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
+                
+                # Add the method call
+                calls.append(MethodCall(
+                    target_class=target_class,
+                    method_name=method_name,
+                    line_number=0
+                ))
+            
+            # Recursively search children
+            for child in node.children:
+                search_invocations(child)
+        
+        # Start searching from method body
+        search_invocations(method_body)
+        return calls
+
 
     def _parse_method(self, method_node, class_info: ClassInfo, source: str) -> MethodDef:
         """Parse method and extract method calls"""
@@ -358,6 +438,12 @@ class JavaCallHierarchyParser:
                         target_class = local_var_types[qualifier]
                         # Resolve short names to FQN
                         target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                    # Check if it's an imported class (static method call)
+                    else:
+                        # Try to resolve as a class name from imports
+                        target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
+                        # If resolved to same as qualifier, it might not be in imports (target_class will be qualifier)
+                        # This is ok - we keep it as the simple name
 
                 calls.append(MethodCall(
                     target_class=target_class,

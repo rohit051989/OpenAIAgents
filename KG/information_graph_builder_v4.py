@@ -24,6 +24,7 @@ from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
 from classes.DataClasses import BeanDef, ClassInfo, JobDef
 from classes.DAOAnalyzer import DAOAnalyzer
+from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from neo4j_direct_step_loader import parse_directory
 from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
@@ -63,6 +64,8 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     
     step_classes = job.enrichment.get('step_classes', {})
     all_classes_cache = job.enrichment.get('all_classes_cache', {})
+    dao_analyzer = DAOAnalyzer()
+    shell_analyzer = ShellScriptAnalyzer()
     
     if not step_classes:
         logger.warning(f"Job '{job.name}' has no step_classes in enrichment. Skipping.")
@@ -85,9 +88,12 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         class_info = all_classes_cache[class_fqn]
         
         # Determine if this is a DAO class
-        dao_analyzer = DAOAnalyzer()
         is_dao_class = dao_analyzer._is_dao_class(class_info)
         is_dao_class_value = "true" if is_dao_class else "false"
+        
+        # Determine if this is a Shell Executor class
+        is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
+        is_shell_executor_value = "true" if is_shell_executor else "false"
         
         # Create JavaClass node
         escaped_fqn = escape_cypher_string(class_fqn)
@@ -98,7 +104,8 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             f"MERGE (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
             f"SET c.className = '{escaped_class_name}', "
             f"c.package = '{escaped_package}', "
-            f"c.isDAOClass = {is_dao_class_value};"
+            f"c.isDAOClass = {is_dao_class_value}, "
+            f"c.isShellExecutorClass = {is_shell_executor_value};"
         )
         
         # Process each method in the class
@@ -221,11 +228,17 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                     is_dao_class_called = dao_analyzer_called._is_dao_class(called_class_info)
                     is_dao_class_called_value = "true" if is_dao_class_called else "false"
                     
+                    # Determine if this is a Shell Executor class
+                    shell_analyzer_called = ShellScriptAnalyzer()
+                    is_shell_executor_called = shell_analyzer_called.is_shell_executor_class(called_class_info)
+                    is_shell_executor_called_value = "true" if is_shell_executor_called else "false"
+                    
                     lines.append(
                         f"MERGE (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
                         f"SET cc.className = '{escaped_called_class_name}', "
                         f"cc.package = '{escaped_called_package}', "
-                        f"cc.isDAOClass = {is_dao_class_called_value};"
+                        f"cc.isDAOClass = {is_dao_class_called_value}, "
+                        f"cc.isShellExecutorClass = {is_shell_executor_called_value};"
                     )
                     
                     # Create USES_CLASS relationship
@@ -285,10 +298,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                 f"MERGE (s)-[:IMPLEMENTED_BY]->(c);"
             )
     
-    # Set isDAOClass property using DAOAnalyzer
-    logger.info(f"Setting isDAOClass property for {len(processed_classes)} classes")
-    dao_analyzer = DAOAnalyzer()
+    # Set isDAOClass and isShellExecutorClass properties using Analyzers
+    logger.info(f"Setting isDAOClass and isShellExecutorClass properties for {len(processed_classes)} classes")
+    #dao_analyzer = DAOAnalyzer()
     dao_class_count = 0
+    shell_executor_count = 0
     for class_fqn in processed_classes:
         if class_fqn in all_classes_cache:
             class_info = all_classes_cache[class_fqn]
@@ -297,16 +311,23 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             # This checks for DAO naming patterns and common DAO frameworks
             is_dao = dao_analyzer._is_dao_class(class_info)
             
+            # Use ShellScriptAnalyzer to determine if this is a shell executor class
+            is_shell_exec = shell_analyzer.is_shell_executor_class(class_info)
+            
             escaped_fqn = escape_cypher_string(class_fqn)
             is_dao_class_value = "true" if is_dao else "false"
+            is_shell_executor_value = "true" if is_shell_exec else "false"
             
             lines.append(
                 f"MATCH (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-                f"SET c.isDAOClass = {is_dao_class_value};"
+                f"SET c.isDAOClass = {is_dao_class_value}, "
+                f"c.isShellExecutorClass = {is_shell_executor_value};"
             )
             
             if is_dao:
                 dao_class_count += 1
+            if is_shell_exec:
+                shell_executor_count += 1
     
     logger.info(f"Generated {len(lines)} Cypher statements for job '{job.name}' call hierarchy")
     logger.info(f"  - Processed {len(processed_classes)} classes")
@@ -314,6 +335,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     logger.info(f"  - Processed {len(processed_method_calls)} method calls")
     logger.info(f"  - Processed {len(processed_class_relationships)} class relationships")
     logger.info(f"  - Identified {dao_class_count} DAO classes")
+    logger.info(f"  - Identified {shell_executor_count} Shell Executor classes")
     
     return "\n".join(lines)
 
@@ -755,10 +777,14 @@ class InformationGraphBuilder:
             stats['config_files'] += 1
     
     def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str):
-        """Create a JavaClass node with package property, isDAOClass flag, and all its methods."""
+        """Create a JavaClass node with package property, isDAOClass flag, isShellExecutorClass flag, and all its methods."""
         # Determine if this is a DAO class
         dao_analyzer = DAOAnalyzer()
         is_dao_class = dao_analyzer._is_dao_class(class_info)
+        
+        # Determine if this is a Shell Executor class
+        shell_analyzer = ShellScriptAnalyzer()
+        is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
         
         query = """
         MERGE (n:Node:File:JavaClass {path: $path})
@@ -774,6 +800,7 @@ class InformationGraphBuilder:
             n.fields = $fields,
             n.method_count = $method_count,
             n.isDAOClass = $isDAOClass,
+            n.isShellExecutorClass = $isShellExecutorClass,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -794,6 +821,7 @@ class InformationGraphBuilder:
                 fields=json.dumps(class_info.fields),
                 method_count=len(class_info.methods),
                 isDAOClass=is_dao_class,
+                isShellExecutorClass=is_shell_executor,
                 parent_path=parent_path
             )
             

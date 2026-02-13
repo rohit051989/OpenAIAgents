@@ -1,52 +1,68 @@
 """
-Shell Script Execution Enricher
-================================
+Shell Script Execution Enricher V2
 
-This script enriches the information graph with shell script execution analysis.
-It queries existing JavaMethod nodes and updates them with shell execution information.
+This script enriches an existing Information Graph with shell script execution analysis.
+Runs after information_graph_builder_v4.py completes.
 
-Usage:
-    python shell_execution_enricher.py
+Architecture:
+- Queries Neo4j for Shell Executor classes (isShellExecutorClass=true)
+- For each Shell Executor class, extracts all methods
+- For each method:
+  - Analyzes for shell script execution patterns
+  - Detects grey areas (dynamic paths, parameterized scripts, unknown locations)
+  - Marks methods with furtherAnalysisRequired flag for manual review
+- Creates ShellScript Resource nodes for identified scripts
+- Updates Neo4j with shellExecutions and shellExecutionCount
+- Consolidates shell executions at Step level
 
-Requirements:
-    - Run information_graph_builder_v3.py first to build the graph structure
-    - Neo4j database running with information graph
+Grey Area Detection:
+- DYNAMIC_PATH: Script path is built dynamically (variables, concatenation)
+- UNKNOWN_SCRIPT: Cannot determine which script is executed
+- REMOTE_EXECUTION: SSH/remote execution with dynamic host/credentials
+- PARAMETERIZED: Script path contains placeholders or parameters
+
+Manual Resolution:
+- Methods marked with furtherAnalysisRequired need manual review
+- Update config/manual_mappings_sample.yaml with actual script details
+- Run manual_resource_associator.py to apply manual mappings
 """
 
 import os
-import sys
-import logging
-from typing import Dict, List, Set
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
 import yaml
+import logging
+from neo4j import GraphDatabase
+from typing import Dict, List, Optional, Set
+from pathlib import Path
+import re
 
+# Import analyzers
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
+from classes.DataClasses import ClassInfo, MethodDef
 
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def escape_cypher_string(s: str) -> str:
+    """Escape string for Cypher query"""
+    if not s:
+        return ""
+    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
 
 
 class ShellExecutionEnricher:
     """
     Enriches JavaMethod nodes with shell script execution information.
+    Marks grey areas for manual resolution.
     """
     
-    def __init__(self, config_path: str = 'information_graph_config.yaml'):
-        """
-        Initialize the shell execution enricher.
-        
-        Args:
-            config_path: Path to configuration file
-        """
+    def __init__(self, config_path: str = 'config/information_graph_config.yaml'):
+        """Initialize the shell execution enricher."""
         self.config = self._load_config(config_path)
         self.driver = None
-        self.database = self.config.get('neo4j', {}).get('database', 'informationgraph')
+        self.database = self.config['neo4j']['database_ig']
         self.shell_analyzer = ShellScriptAnalyzer()
         
     def _load_config(self, config_path: str) -> dict:
@@ -59,12 +75,12 @@ class ShellExecutionEnricher:
     
     def connect(self):
         """Connect to Neo4j database."""
-        neo4j_config = self.config.get('neo4j', {})
-        uri = neo4j_config.get('uri', 'bolt://localhost:7687')
-        username = neo4j_config.get('username', 'neo4j')
-        password = neo4j_config.get('password', 'password')
+        neo4j_config = self.config['neo4j']
+        uri = neo4j_config['uri']
+        user = neo4j_config['user']
+        password = neo4j_config['password']
         
-        self.driver = GraphDatabase.driver(uri, auth=(username, password))
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
         logger.info(f"Connected to Neo4j at {uri}, database: {self.database}")
     
     def close(self):
@@ -72,223 +88,376 @@ class ShellExecutionEnricher:
         if self.driver:
             self.driver.close()
     
-    def _get_java_methods(self) -> List[Dict]:
+    def _get_shell_executor_classes(self) -> List[Dict]:
         """
-        Query Neo4j for all JavaMethod nodes with their source code.
+        Query Neo4j for Shell Executor classes.
         
         Returns:
-            List of dictionaries with method information
+            List of shell executor class information
         """
         query = """
-        MATCH (jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod)
-        WHERE jc.path IS NOT NULL
+        MATCH (jc:JavaClass {isShellExecutorClass: true})
         RETURN 
             jc.fqn AS classFqn,
             jc.className AS className,
             jc.path AS path,
-            m.methodName AS methodName,
-            m.signature AS signature,
-            m.startLine AS startLine,
-            m.endLine AS endLine
-        ORDER BY jc.fqn, m.methodName
+            jc.package AS package
+        ORDER BY jc.fqn
         """
         
         with self.driver.session(database=self.database) as session:
             result = session.run(query)
-            methods = []
+            classes = []
             for record in result:
-                methods.append({
+                classes.append({
                     'class_fqn': record['classFqn'],
                     'class_name': record['className'],
                     'path': record['path'],
-                    'method_name': record['methodName'],
-                    'signature': record['signature'],
-                    'start_line': record['startLine'],
-                    'end_line': record['endLine']
+                    'package': record['package']
                 })
             
-            logger.info(f"Retrieved {len(methods)} methods from graph")
+            logger.info(f"  Found {len(classes)} Shell Executor classes")
+            return classes
+    
+    def _get_class_methods(self, class_fqn: str) -> List[Dict]:
+        """Get all methods for a class."""
+        query = """
+        MATCH (jc:JavaClass {fqn: $classFqn})-[:HAS_METHOD]->(m:JavaMethod)
+        RETURN 
+            m.fqn AS methodFqn,
+            m.methodName AS methodName,
+            m.signature AS signature,
+            m.returnType AS returnType
+        ORDER BY m.methodName
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query, classFqn=class_fqn)
+            methods = []
+            for record in result:
+                methods.append({
+                    'fqn': record['methodFqn'],
+                    'name': record['methodName'],
+                    'signature': record['signature'],
+                    'return_type': record['returnType']
+                })
             return methods
     
-    def _read_method_source(self, source_path: str, start_line: int, end_line: int) -> str:
-        """
-        Read method source code from file.
-        
-        Args:
-            source_path: Path to source file
-            start_line: Starting line number (1-based)
-            end_line: Ending line number (1-based)
-            
-        Returns:
-            Method source code as string
-        """
+    def _read_source_file(self, file_path: str) -> str:
+        """Read entire source file."""
         try:
-            if not os.path.exists(source_path):
-                logger.warning(f"Source file not found: {source_path}")
+            if not os.path.exists(file_path):
+                logger.warning(f"  Source file not found: {file_path}")
                 return ""
             
-            with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                if start_line > 0 and end_line <= len(lines):
-                    return ''.join(lines[start_line-1:end_line])
-                else:
-                    logger.warning(f"Invalid line range [{start_line}:{end_line}] for {source_path}")
-                    return ""
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()
         except Exception as e:
-            logger.error(f"Error reading source file {source_path}: {e}")
+            logger.error(f"  Error reading source file {file_path}: {e}")
             return ""
     
-    def _create_method_def_mock(self, method_info: Dict, source_code: str):
+    def _analyze_shell_execution(self, method_source: str, method_name: str) -> List[Dict]:
         """
-        Create a minimal MethodDef object for the analyzer.
+        Analyze method source for shell script executions.
+        Detects patterns and marks grey areas.
+        Only counts DIRECT execution patterns (Runtime.exec, ProcessBuilder, executor.execute).
         
-        Args:
-            method_info: Method information from Neo4j
-            source_code: Method source code
-            
         Returns:
-            Mock MethodDef object with required attributes
+            List of shell execution dictionaries with grey area flags
         """
-        class MethodDefMock:
-            def __init__(self, name, signature, source):
-                self.method_name = name
-                self.signature = signature
-                self.source_code = source
-                self.shell_executions = []  # Will be populated by analyzer
+        executions = []
         
-        return MethodDefMock(
-            method_info['method_name'],
-            method_info['signature'],
-            source_code
-        )
+        # Pattern 1: Runtime.exec() calls
+        runtime_pattern = r'Runtime\.getRuntime\(\)\.exec\s*\(\s*([^)]+)\)'
+        for match in re.finditer(runtime_pattern, method_source, re.DOTALL):
+            command_arg = match.group(1).strip()
+            execution = self._parse_command_argument(command_arg, 'Runtime.exec')
+            executions.append(execution)
+        
+        # Pattern 2: ProcessBuilder
+        processbuilder_pattern = r'new\s+ProcessBuilder\s*\(\s*([^)]+)\)'
+        for match in re.finditer(processbuilder_pattern, method_source, re.DOTALL):
+            command_arg = match.group(1).strip()
+            execution = self._parse_command_argument(command_arg, 'ProcessBuilder')
+            executions.append(execution)
+        
+        # Pattern 3: Apache Commons Exec - executor.execute()
+        commons_exec_pattern = r'executor\.execute\s*\(\s*([^)]+)\)'
+        for match in re.finditer(commons_exec_pattern, method_source, re.DOTALL):
+            command_arg = match.group(1).strip()
+            execution = self._parse_command_argument(command_arg, 'CommonsExec')
+            executions.append(execution)
+        
+        # NOTE: Removed Pattern 4 (indirect method calls) to avoid false positives
+        # Methods that call other execution methods don't need to be flagged
+        
+        return executions
     
-    def _create_class_info_mock(self, method_info: Dict):
+    def _parse_command_argument(self, command_arg: str, execution_method: str) -> Dict:
         """
-        Create a minimal ClassInfo object for the analyzer.
+        Parse command argument to extract script details and detect grey areas.
         
-        Args:
-            method_info: Method information from Neo4j
-            
         Returns:
-            Mock ClassInfo object with required attributes
+            Dictionary with execution details and grey area flags
         """
-        class ClassInfoMock:
-            def __init__(self, name, fqn):
-                self.class_name = name
-                self.fqn = fqn
+        command_arg = command_arg.strip()
         
-        return ClassInfoMock(
-            method_info['class_name'],
-            method_info['class_fqn']
-        )
+        # Check if it's a simple string literal
+        if command_arg.startswith('"') and command_arg.endswith('"'):
+            script_path = command_arg.strip('"')
+            return {
+                'execution_method': execution_method,
+                'script_type': self._detect_script_type(script_path),
+                'script_name': script_path,
+                'confidence': 'HIGH',
+                'is_dynamic': False,
+                'further_analysis': False,
+                'grey_area_reason': None
+            }
+        
+        # Check for variable references
+        if re.search(r'\w+\s*\+|\+\s*\w+|String\.format|String\.join', command_arg):
+            return {
+                'execution_method': execution_method,
+                'script_type': 'SHELL',
+                'script_name': 'DYNAMIC_PATH',
+                'confidence': 'LOW',
+                'is_dynamic': True,
+                'further_analysis': True,
+                'grey_area_reason': 'DYNAMIC_PATH:String concatenation or formatting detected'
+            }
+        
+        # Check for method parameters
+        if re.search(r'\b(scriptDir|scriptFile|scriptPath|hostname|user|command|cmd)\b', command_arg, re.IGNORECASE):
+            return {
+                'execution_method': execution_method,
+                'script_type': 'SHELL',
+                'script_name': 'PARAMETERIZED',
+                'confidence': 'LOW',
+                'is_dynamic': True,
+                'further_analysis': True,
+                'grey_area_reason': 'PARAMETERIZED:Script path passed as parameter'
+            }
+        
+        # Check for SSH/remote execution patterns
+        if re.search(r'ssh|scp|sftp|rsync', command_arg, re.IGNORECASE):
+            return {
+                'execution_method': execution_method,
+                'script_type': 'REMOTE_SHELL',
+                'script_name': 'REMOTE_EXECUTION',
+                'confidence': 'LOW',
+                'is_dynamic': True,
+                'further_analysis': True,
+                'grey_area_reason': 'REMOTE_EXECUTION:SSH or remote execution detected'
+            }
+        
+        # Default: unknown script
+        return {
+            'execution_method': execution_method,
+            'script_type': 'UNKNOWN',
+            'script_name': 'UNKNOWN_SCRIPT',
+            'confidence': 'LOW',
+            'is_dynamic': True,
+            'further_analysis': True,
+            'grey_area_reason': 'UNKNOWN_SCRIPT:Cannot determine script from source'
+        }
     
-    def _update_method_shell_executions(self, method_info: Dict, shell_executions: List) -> bool:
+    def _detect_script_type(self, script_path: str) -> str:
+        """Detect script type from file extension or content."""
+        script_lower = script_path.lower()
+        
+        if '.sh' in script_lower or 'bash' in script_lower:
+            return 'BASH'
+        elif '.py' in script_lower or 'python' in script_lower:
+            return 'PYTHON'
+        elif '.ps1' in script_lower or 'powershell' in script_lower:
+            return 'POWERSHELL'
+        elif '.bat' in script_lower or '.cmd' in script_lower:
+            return 'BATCH'
+        elif '.pl' in script_lower or 'perl' in script_lower:
+            return 'PERL'
+        else:
+            return 'SHELL'
+    
+    def _update_method_with_executions(self, method_fqn: str, executions: List[Dict]) -> bool:
         """
         Update JavaMethod node with shell execution information.
-        
-        Args:
-            method_info: Method information
-            shell_executions: List of ShellExecution objects
-            
-        Returns:
-            True if update successful
         """
-        if not shell_executions:
+        if not executions:
             return False
         
-        # Convert shell executions to serializable format
-        executions_data = []
-        for shell_exec in shell_executions:
-            executions_data.append({
-                'scriptType': shell_exec.script_type,
-                'scriptName': shell_exec.script_name,
-                'executionMethod': shell_exec.execution_method,
-                'command': shell_exec.command if hasattr(shell_exec, 'command') else None,
-                'isStaticPath': shell_exec.is_static_path if hasattr(shell_exec, 'is_static_path') else False
-            })
+        # Build execution list strings
+        execution_strs = []
+        further_analysis_reasons = []
         
-        query = """
-        MATCH (jc:JavaClass {fqn: $classFqn})-[:HAS_METHOD]->(m:JavaMethod {methodName: $methodName})
-        SET m.shellExecutions = $shellExecutions,
-            m.shellExecutionCount = $shellExecutionCount
+        for exec_info in executions:
+            exec_str = f"{exec_info['execution_method']}:{exec_info['script_name']}:{exec_info['confidence']}"
+            execution_strs.append(exec_str)
+            
+            if exec_info['further_analysis'] and exec_info['grey_area_reason']:
+                further_analysis_reasons.append(exec_info['grey_area_reason'])
+        
+        further_analysis_required = any(e['further_analysis'] for e in executions)
+        
+        escaped_method_fqn = escape_cypher_string(method_fqn)
+        
+        query = f"""
+        MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
+        SET m.shellExecutions = {execution_strs},
+            m.shellExecutionCount = {len(executions)},
+            m.furtherAnalysisRequired = {str(further_analysis_required).lower()},
+            m.furtherAnalysisReasons = {further_analysis_reasons if further_analysis_reasons else []}
         RETURN m.methodName AS methodName
         """
         
         try:
             with self.driver.session(database=self.database) as session:
-                result = session.run(
-                    query,
-                    classFqn=method_info['class_fqn'],
-                    methodName=method_info['method_name'],
-                    shellExecutions=executions_data,
-                    shellExecutionCount=len(executions_data)
-                )
-                
-                if result.single():
-                    return True
-                else:
-                    logger.warning(f"Method not found for update: {method_info['class_fqn']}.{method_info['method_name']}")
-                    return False
+                result = session.run(query)
+                return result.single() is not None
         except Exception as e:
-            logger.error(f"Error updating method {method_info['class_fqn']}.{method_info['method_name']}: {e}")
+            logger.error(f"  Error updating method {method_fqn}: {e}")
             return False
     
+    def _create_shell_script_resource(self, script_name: str, script_type: str, confidence: str):
+        """
+        Create or update ShellScript Resource node.
+        """
+        if not script_name or script_name in ['DYNAMIC_PATH', 'PARAMETERIZED', 'UNKNOWN_SCRIPT', 'REMOTE_EXECUTION']:
+            return  # Don't create resources for grey areas
+        
+        escaped_name = escape_cypher_string(script_name)
+        escaped_type = escape_cypher_string(script_type)
+        escaped_confidence = escape_cypher_string(confidence)
+        
+        query = f"""
+        MERGE (r:Resource {{name: '{escaped_name}', type: 'SHELL_SCRIPT'}})
+        ON CREATE SET r.scriptType = '{escaped_type}',
+                      r.confidence = '{escaped_confidence}',
+                      r.enabled = true
+        RETURN r.name AS name
+        """
+        
+        try:
+            with self.driver.session(database=self.database) as session:
+                session.run(query)
+        except Exception as e:
+            logger.error(f"  Error creating resource for {script_name}: {e}")
+    
+    def _clear_shell_execution_data(self):
+        """Clear all shell execution properties from JavaMethod nodes."""
+        query = """
+        MATCH (m:JavaMethod)
+        WHERE m.shellExecutions IS NOT NULL 
+           OR m.shellExecutionCount IS NOT NULL
+           OR m.furtherAnalysisRequired IS NOT NULL
+           OR m.furtherAnalysisReasons IS NOT NULL
+        REMOVE m.shellExecutions, m.shellExecutionCount, 
+               m.furtherAnalysisRequired, m.furtherAnalysisReasons
+        RETURN count(m) AS cleared
+        """
+        
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query)
+                record = result.single()
+                if record:
+                    count = record['cleared']
+                    print(f"    Cleared shell execution data from {count} methods")
+        except Exception as e:
+            logger.error(f"  Error clearing shell execution data: {e}")
+    
     def enrich(self):
-        """
-        Main enrichment process.
-        """
+        """Main enrichment process."""
         print("\n" + "=" * 80)
         print("SHELL SCRIPT EXECUTION ENRICHMENT")
         print("=" * 80)
         
-        # Get all methods from graph
-        methods = self._get_java_methods()
+        # Clear old shell execution data
+        #print("\n  Clearing old shell execution data...")
+        #self._clear_shell_execution_data()
         
-        if not methods:
-            print("\n  ⚠️  No methods found in graph. Run information_graph_builder_v3.py first.")
+        # Get shell executor classes
+        shell_classes = self._get_shell_executor_classes()
+        
+        if not shell_classes:
+            print("\n  ⚠️  No Shell Executor classes found.")
+            print("      Run information_graph_builder_v4.py first to identify shell executor classes.")
             return
         
-        print(f"\n  Analyzing {len(methods)} methods for shell script executions...\n")
+        total_methods = 0
+        methods_with_executions = 0
+        methods_with_grey_areas = 0
+        total_executions = 0
         
-        analyzed_count = 0
-        found_count = 0
-        
-        for method_info in methods:
-            # Read method source code
-            source_path = method_info['path']
-            if not source_path:
-                continue
+        for class_info in shell_classes:
+            logger.info(f"\n  Analyzing class: {class_info['class_name']}")
             
-            source_code = self._read_method_source(
-                source_path,
-                method_info['start_line'],
-                method_info['end_line']
-            )
+            # Get all methods for this class
+            methods = self._get_class_methods(class_info['class_fqn'])
+            
+            # Read source file once
+            source_code = self._read_source_file(class_info['path']) if class_info['path'] else ""
             
             if not source_code:
+                logger.warning(f"    No source code available for {class_info['class_name']}")
                 continue
             
-            # Create mock objects for analyzer
-            method_def = self._create_method_def_mock(method_info, source_code)
-            class_info = self._create_class_info_mock(method_info)
-            
-            # Analyze for shell executions
-            shell_exec = self.shell_analyzer.analyze_method(method_def, class_info)
-            
-            if shell_exec:
-                method_def.shell_executions.append(shell_exec)
+            for method in methods:
+                # Extract method source using ShellScriptAnalyzer's improved extraction
+                method_source = self.shell_analyzer._extract_method_source(source_code, method['name'])
                 
-                # Update graph
-                if self._update_method_shell_executions(method_info, method_def.shell_executions):
-                    found_count += 1
-                    script_display = shell_exec.script_name if shell_exec.script_name else "[dynamic]"
-                    print(f"    {method_info['class_name']}.{method_info['method_name']}() -> "
-                          f"{shell_exec.script_type} script: {script_display} ({shell_exec.execution_method})")
-            
-            analyzed_count += 1
+                if not method_source:
+                    continue
+                
+                # Only count methods that were analyzed (not all methods in class)
+                total_methods += 1
+                
+                # Analyze for shell executions (only direct execution patterns)
+                executions = self._analyze_shell_execution(method_source, method['name'])
+                
+                # Only process if actual executions found
+                if executions:
+                    methods_with_executions += 1
+                    total_executions += len(executions)
+                    
+                    # Update method in graph
+                    if self._update_method_with_executions(method['fqn'], executions):
+                        has_grey_area = any(e['further_analysis'] for e in executions)
+                        if has_grey_area:
+                            methods_with_grey_areas += 1
+                        
+                        # Print execution details
+                        for exec_info in executions:
+                            status = "⚠️ " if exec_info['further_analysis'] else "✓"
+                            logger.info(f"    {status} {method['name']}() -> {exec_info['script_name']} "
+                                      f"({exec_info['execution_method']}, {exec_info['confidence']})")
+                            if exec_info['further_analysis']:
+                                logger.info(f"       Grey Area: {exec_info['grey_area_reason']}")
+                        
+                        # Create resource nodes for static scripts
+                        for exec_info in executions:
+                            if not exec_info['is_dynamic']:
+                                self._create_shell_script_resource(
+                                    exec_info['script_name'],
+                                    exec_info['script_type'],
+                                    exec_info['confidence']
+                                )
         
-        print(f"\n  ✓ Analyzed {analyzed_count} methods")
-        print(f"  ✓ Found shell executions in {found_count} methods")
+        print("\n" + "=" * 80)
+        print("ENRICHMENT SUMMARY")
+        print("=" * 80)
+        print(f"  Shell Executor Classes: {len(shell_classes)}")
+        print(f"  Total Methods Analyzed: {total_methods}")
+        print(f"  Methods with Shell Executions: {methods_with_executions}")
+        print(f"  Total Shell Executions Found: {total_executions}")
+        print(f"  Methods Requiring Manual Review: {methods_with_grey_areas}")
+        print("=" * 80)
+        
+        if methods_with_grey_areas > 0:
+            print("\n⚠️  MANUAL REVIEW REQUIRED:")
+            print(f"   {methods_with_grey_areas} method(s) have grey areas (dynamic/unknown scripts)")
+            print("   Update config/manual_mappings_sample.yaml with actual script details")
+            print("   Then run: python manual_resource_associator.py")
         
         print("\n" + "=" * 80)
         print("✅ SHELL SCRIPT EXECUTION ENRICHMENT COMPLETE")
@@ -297,10 +466,10 @@ class ShellExecutionEnricher:
 
 def main():
     """Main entry point."""
-
     load_dotenv()
-    config_path = os.getenv("KG_CONFIG_FILE")
-
+    
+    config_path = os.getenv('KG_CONFIG_FILE', 'config/information_graph_config.yaml')
+    
     enricher = ShellExecutionEnricher(config_path=config_path)
     
     try:
@@ -308,7 +477,7 @@ def main():
         enricher.enrich()
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", exc_info=True)
-        sys.exit(1)
+        raise
     finally:
         enricher.close()
 

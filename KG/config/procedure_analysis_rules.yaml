@@ -1,0 +1,125 @@
+# Procedure Call Analysis Rules Configuration
+# Configuration for detecting stored procedure calls in Java code
+
+# Main procedure call pattern configurations
+procedure_call_patterns:
+  SimpleJdbcCall:
+    indicators:
+      - new SimpleJdbcCall
+      - SimpleJdbcCall\s+\w+\s*=
+    extraction_patterns:
+      procedure_name:
+        pattern: withProcedureName\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+      function_name:
+        pattern: withFunctionName\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+      schema_name:
+        pattern: withSchemaName\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+      catalog_name:
+        pattern: withCatalogName\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+    dynamic_detection:
+      - pattern: withProcedureName\s*\(\s*[\w\[\].]+\s*\)
+        placeholder: DYNAMIC_PROCEDURE
+      - pattern: withSchemaName\s*\(\s*[\w\[\].]+\s*\)
+        placeholder: DYNAMIC_SCHEMA
+      - pattern: withCatalogName\s*\(\s*[\w\[\].]+\s*\)
+        placeholder: DYNAMIC_CATALOG
+    
+  CallableStatement:
+    indicators:
+      - connection.prepareCall
+      - CallableStatement
+      - \{\s*call\s+
+    extraction_patterns:
+      procedure_name:
+        pattern: call\s+([\w.]+)\s*\(
+        capture_group: 1
+      function_call:
+        pattern: \{\s*\?\s*=\s*call\s+([\w.]+)\s*\(
+        capture_group: 1
+    dynamic_detection:
+      - pattern: prepareCall\s*\(\s*\w+\s*\+
+        placeholder: DYNAMIC_PROCEDURE
+      - pattern: String\.format
+        placeholder: DYNAMIC_PROCEDURE
+    
+  StoredProcedureQuery:
+    indicators:
+      - createStoredProcedureQuery
+      - createNamedStoredProcedureQuery
+      - StoredProcedureQuery
+    extraction_patterns:
+      procedure_name:
+        pattern: createStoredProcedureQuery\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+      named_procedure:
+        pattern: createNamedStoredProcedureQuery\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+    dynamic_detection:
+      - pattern: createStoredProcedureQuery\s*\(\s*\w+\s*\)
+        placeholder: DYNAMIC_PROCEDURE
+    
+  NamedParameterJdbcTemplate:
+    indicators:
+      - NamedParameterJdbcTemplate
+      - namedParameterJdbcTemplate.call
+    extraction_patterns:
+      procedure_name:
+        pattern: call\s*\(\s*["']([^"']+)["']
+        capture_group: 1
+    dynamic_detection:
+      - pattern: \.call\s*\(\s*\w+\s*\)
+        placeholder: DYNAMIC_PROCEDURE
+
+# Parameter detection patterns
+parameter_patterns:
+  - \.setString\s*\(
+  - \.setInt\s*\(
+  - \.setLong\s*\(
+  - \.setDouble\s*\(
+  - \.setBoolean\s*\(
+  - \.setDate\s*\(
+  - \.setTimestamp\s*\(
+  - \.setBigDecimal\s*\(
+  - \.setObject\s*\(
+  - \.setParameter\s*\(
+  - \.registerOutParameter\s*\(
+
+# Maximum number of parameters to extract
+max_parameters: 10
+
+# Database type keywords for inferring database platform
+database_type_keywords:
+  ORACLE:
+    - oracle
+    - OracleConnection
+    - OracleTypes
+  POSTGRESQL:
+    - postgresql
+    - postgres
+    - PGConnection
+  MYSQL:
+    - mysql
+    - com.mysql
+    - MariaDB
+  SQL_SERVER:
+    - sqlserver
+    - mssql
+    - SQLServerConnection
+  DB2:
+    - db2
+    - DB2Connection
+
+# Default database type when not detected
+default_database_type: UNKNOWN
+
+# Keywords for skipping procedure resource creation
+skip_resource_keywords:
+  - DYNAMIC
+  - UNKNOWN
+  - DYNAMIC_PROCEDURE
+  - DYNAMIC_SCHEMA
+  - DYNAMIC_CATALOG

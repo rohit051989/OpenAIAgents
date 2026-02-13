@@ -21,4 +21,10 @@ RETURN j.name AS Job,
          method: m.methodName, 
          dbOps: m.dbOperationCount,
          dbDetails: m.dbOperations
-       }] AS CallChainWithDB
+       }] AS CallChainWithDB;
+
+// Query 3: For one Job, show the sequence of all “steps” in the job
+MATCH (j:Job {id:'NEW-BB-FUNDING-RATES-DOWNLOAD'})-[:ENTRY]->(start)
+MATCH p=(start)-[:PRECEDES*0..]->(n)
+WHERE NOT (n)-[:PRECEDES]->()
+RETURN p;

@@ -1,0 +1,70 @@
+# Manual Resource Mappings Configuration
+# =========================================
+# This file allows you to manually map grey areas identified during enrichment
+# to their actual resource details (tables, procedures, scripts, etc.)
+
+# Database Operations
+# -------------------
+# For methods that were marked with DYNAMIC_TABLE, UNKNOWN, or require further analysis
+db_operations:
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus  
+  operation_type: SELECT
+  table_name: batch_job
+  schema_name: batch_schema
+  confidence: HIGH
+  
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobDetails
+  operation_type: SELECT
+  table_name: batch_job_execution
+  schema_name: batch_schema
+  confidence: HIGH
+
+# Stored Procedure Calls  
+# ----------------------
+# For methods that call stored procedures or functions
+procedure_calls:
+- method_fqn: com.companyname.dao.CustomerDAOImpl.uploadLoadStatus
+  procedure_name: UPLOAD_LOAD_STATUS
+  database_type: ORACLE
+  is_function: false
+
+# Shell Script Executions
+# ------------------------
+# For methods that execute shell scripts with dynamic paths or unknown details
+shell_executions:
+- method_fqn: com.companyname.util.BatchUtils.executeShellScript
+  script_name: customer_export.sh
+  script_path: /opt/batch/scripts/customer_export.sh
+  script_type: BASH
+  remote_host: batch-server-01.company.com
+  remote_user: batchuser
+  remote_port: 22
+  ssh_key_location: /home/batchuser/.ssh/id_rsa
+  confidence: HIGH
+  description: "Customer export shell script - runs on remote batch server"
+  
+- method_fqn: com.companyname.util.BatchUtils.executeNativeCommand
+  script_name: data_validation.sh
+  script_path: /opt/batch/scripts/data_validation.sh
+  script_type: BASH
+  remote_host: null  # null means local execution
+  confidence: HIGH
+  description: "Local data validation script"
+  
+- method_fqn: com.companyname.batch.CustomerExportTasklet.executePostProcessing
+  script_name: cleanup_temp_files.sh
+  script_path: /tmp/batch/cleanup_temp_files.sh
+  script_type: BASH
+  confidence: MEDIUM
+  description: "Cleanup temporary files after customer export"
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus
+  operation_type: SELECT
+  table_name: batch_job
+  schema_name: batch_schema
+  confidence: HIGH
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobDetails
+  operation_type: SELECT
+  table_name: batch_job_execution
+  schema_name: batch_schema
+  confidence: HIGH
+
