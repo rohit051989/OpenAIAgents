@@ -26,10 +26,11 @@ from dotenv import load_dotenv
 from neo4j_direct_step_loader import generate_cypher
 from cpm_analyzer_v1 import CPMAnalyzer
 
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -146,11 +147,11 @@ class Neo4jLoader:
     
     def compute_cpm_for_jobgroup(self, jobgroup_id: str, analyzer: CPMAnalyzer):
         res = analyzer.compute_for_jobgroup(jobgroup_id, persist=True)
-        print(f"\n=== CPM Summary for {jobgroup_id} ===")
-        print("SLA(ms):", res.group_sla_ms)
-        print("Completion(ms):", res.completion_ms)
-        print("Total Buffer(ms):", res.total_buffer_ms)
-        print("Longest Path:", " -> ".join(res.longest_path))
+        logger.info(f"\n=== CPM Summary for {jobgroup_id} ===")
+        logger.info("SLA(ms):", res.group_sla_ms)
+        logger.info("Completion(ms):", res.completion_ms)
+        logger.info("Total Buffer(ms):", res.total_buffer_ms)
+        logger.info("Longest Path:", " -> ".join(res.longest_path))
             
 
 
@@ -778,7 +779,7 @@ class Neo4jLoader:
             query +=   """
                 RETURN di, r
                 """
-        #print("Executing Step Interaction Query:", query, " with data:", data)
+        #logger.info("Executing Step Interaction Query:", query, " with data:", data)
         tx.run(query, **data)        
     
     def _load_job_successors(self, excel_file):
@@ -1071,10 +1072,10 @@ class Neo4jLoader:
 
 def main():
     """Main execution function"""
-    print("=" * 70)
-    print("Spring Batch Knowledge Graph - Neo4j Direct Loader")
-    print("=" * 70)
-    print()
+    logger.info("=" * 70)
+    logger.info("Spring Batch Knowledge Graph - Neo4j Direct Loader")
+    logger.info("=" * 70)
+    logger.info()
     
     load_dotenv()
     config_path = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
@@ -1093,37 +1094,37 @@ def main():
         with Neo4jLoader(config_path=config_path) as loader:
 
             # Step 0: Clean the database state
-            print("\n🧹 Step 0: Cleaning database state...")
+            logger.info("\n🧹 Step 0: Cleaning database state...")
             loader.clear_database()
-            print("    Database cleaned successfully")
+            logger.info("    Database cleaned successfully")
 
             # Step 1: Create constraints and indexes
-            print("\n📐 Step 1: Creating constraints and indexes...")
+            logger.info("\n📐 Step 1: Creating constraints and indexes...")
             #loader.create_constraints_and_indexes()
             
             # Step 2: Load class-level data
-            print("\n Step 2: Loading class-level data...")
+            logger.info("\n Step 2: Loading class-level data...")
             loader.load_class_level_data(class_excel)
 
             # Step 3: Compute CPM for Job Groups
-            #print("\n🕒 Step 3: Computing CPM for Job Groups...")
+            #logger.info("\n🕒 Step 3: Computing CPM for Job Groups...")
             #analyzer = CPMAnalyzer(loader.driver)
             #loader.compute_cpm_for_jobgroup("JG_EOD", analyzer)
             #loader.compute_cpm_for_jobgroup("JG_MID", analyzer)
             #loader.compute_cpm_for_jobgroup("JG_TEST", analyzer)
             
             # Step 4: Show statistics
-            print("\n📈 Step 4: Database statistics...")
+            logger.info("\n📈 Step 4: Database statistics...")
             stats = loader.get_statistics()
             for node_type, count in stats.items():
-                print(f"  {node_type}: {count}")
+                logger.info(f"  {node_type}: {count}")
             
-            print("\n" + "=" * 70)
-            print(" LOADING COMPLETE!")
-            print("=" * 70)
-            print()
-            print("🎉 Your data is now in Neo4j!")
-            print()
+            logger.info("\n" + "=" * 70)
+            logger.info(" LOADING COMPLETE!")
+            logger.info("=" * 70)
+            logger.info()
+            logger.info("🎉 Your data is now in Neo4j!")
+            logger.info()
     
     except Exception as e:
         logger.error(f"Error during loading: {str(e)}", exc_info=True)

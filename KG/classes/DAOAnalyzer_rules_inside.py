@@ -4,7 +4,14 @@ from classes.DataClasses import ClassInfo, DBOperation, MethodDef
 import re
 from pathlib import Path
 from typing import Tuple, Optional
+import logging
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 class DAOAnalyzer:
     """Analyzes DAO methods to extract database operations"""
@@ -206,17 +213,17 @@ class DAOAnalyzer:
                     # Remove schema prefix if present (e.g., SCHEMA.TABLE -> TABLE)
                     if '.' in table_name:
                         table_name = table_name.split('.')[-1]
-                    print(f"          Extracted table from SQL: {table_name}")
+                    logger.info(f"          Extracted table from SQL: {table_name}")
                     break
         elif raw_query == "DYNAMIC_SQL":
-            print(f"          Dynamic SQL detected - table name cannot be determined statically")
+            logger.info(f"          Dynamic SQL detected - table name cannot be determined statically")
             table_name = "DYNAMIC_TABLE"
 
         # Priority 2: From return type
         if not table_name and 'Entity' in method_def.return_type:
             entity_type = method_def.return_type.replace('Entity', '')
             table_name = self._entity_to_table(entity_type)
-            print(f"          Inferred table from Entity return type: {table_name}")
+            logger.info(f"          Inferred table from Entity return type: {table_name}")
 
         # Priority 3: From JPQL query in source
         if not table_name:
@@ -224,7 +231,7 @@ class DAOAnalyzer:
             if query_match:
                 entity_type = query_match.group(1)
                 table_name = self._entity_to_table(entity_type)
-                print(f"          Inferred table from JPQL query: {table_name}")
+                logger.info(f"          Inferred table from JPQL query: {table_name}")
 
         # Priority 4: From EntityManager.find()
         if not table_name:
@@ -232,7 +239,7 @@ class DAOAnalyzer:
             if find_match:
                 entity_type = find_match.group(1)
                 table_name = self._entity_to_table(entity_type)
-                print(f"          Inferred table from EntityManager.find(): {table_name}")
+                logger.info(f"          Inferred table from EntityManager.find(): {table_name}")
 
         # Priority 5: Infer from return type (even non-Entity classes)
         if not table_name and method_def.return_type:
@@ -248,11 +255,11 @@ class DAOAnalyzer:
                          'double', 'float', 'boolean', 'byte', 'short', 'char']
             
             if return_type_simple in java_types:
-                print(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
+                logger.info(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
                 table_name = "UNKNOWN"
             elif return_type_simple and return_type_simple[0].isupper():
                 table_name = self._entity_to_table(return_type_simple)
-                print(f"          Inferred table from return type ({return_type_simple}): {table_name}")
+                logger.info(f"          Inferred table from return type ({return_type_simple}): {table_name}")
 
         return entity_type, table_name.upper() if table_name else None
 
@@ -274,12 +281,12 @@ class DAOAnalyzer:
             
             # Check for concatenation patterns: "..." + ... or ... + "..."
             if re.search(r'["\'][^"\']*["\']\s*\+|\+\s*["\']', snippet):
-                print(f"        Detected SQL string concatenation with + operator")
+                logger.info(f"        Detected SQL string concatenation with + operator")
                 return "DYNAMIC_SQL"
             
             # Check for String.format or StringBuilder (also indicates dynamic SQL)
             if re.search(r'String\.format|StringBuilder|StringBuffer', snippet):
-                print(f"        Detected dynamic SQL generation with String.format/StringBuilder")
+                logger.info(f"        Detected dynamic SQL generation with String.format/StringBuilder")
                 return "DYNAMIC_SQL"
             
             # Normal inline query: jdbcTemplate.query("SELECT...", ...)
@@ -293,7 +300,7 @@ class DAOAnalyzer:
         if constant_match and class_info:
             constant_class = constant_match.group(2)
             constant_name = constant_match.group(3)
-            print(f"        Detected constant reference: {constant_class}.{constant_name}")
+            logger.info(f"        Detected constant reference: {constant_class}.{constant_name}")
             resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
             if resolved_query:
                 return resolved_query
@@ -341,7 +348,7 @@ class DAOAnalyzer:
         # Find the source file
         constant_source_path = self._find_constant_source_file(constant_fqn, class_info.source_path)
         if not constant_source_path:
-            print(f"        Warning: Could not find source file for constant class {constant_fqn}")
+            logger.info(f"        Warning: Could not find source file for constant class {constant_fqn}")
             return None
 
         # Parse the constant file to find the SQL string
@@ -357,8 +364,8 @@ class DAOAnalyzer:
             match = re.search(pattern, constant_source)
             if match:
                 sql_query = match.group(2).strip()
-                print(f"         Resolved constant {constant_class}.{constant_name}")
-                print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+                logger.info(f"         Resolved constant {constant_class}.{constant_name}")
+                logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
             # Handle multi-line concatenation: "SELECT " + "FROM..." + "WHERE..."
@@ -370,14 +377,14 @@ class DAOAnalyzer:
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
-                    print(f"         Resolved concatenated constant {constant_class}.{constant_name}")
-                    print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+                    logger.info(f"         Resolved concatenated constant {constant_class}.{constant_name}")
+                    logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                     return sql_query
 
-            print(f"        Warning: Could not match pattern for {constant_name} in {constant_source_path}")
+            logger.info(f"        Warning: Could not match pattern for {constant_name} in {constant_source_path}")
 
         except Exception as e:
-            print(f"        Warning: Failed to parse constant file {constant_source_path}: {e}")
+            logger.info(f"        Warning: Failed to parse constant file {constant_source_path}: {e}")
 
         return None
 

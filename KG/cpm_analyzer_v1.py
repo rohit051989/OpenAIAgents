@@ -3,6 +3,15 @@ from typing import Dict, List, Tuple, Set, Optional
 from collections import defaultdict, deque
 import hashlib
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 @dataclass
 class CPMResult:
     job_group_id: str

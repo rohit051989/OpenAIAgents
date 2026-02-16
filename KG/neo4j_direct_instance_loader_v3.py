@@ -27,10 +27,11 @@ import os
 from dotenv import load_dotenv
 from execution_cpm_analyzer_v3 import ExecutionCPMAnalyzer
 
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -321,11 +322,11 @@ class Neo4jInstanceLoaderV2:
             if 'id' in data:
                 jobgroup_execution_id = data.get('id', '')
                 res = analyzer.compute_for_jobgroup_execution(jobgroup_execution_id, persist=True)
-                print(f"\n=== CPM Summary for {jobgroup_execution_id} ===")
-                print("SLA(ms):", res.group_sla_ms)
-                print("Completion(ms):", res.completion_ms)
-                print("Total Buffer(ms):", res.total_buffer_ms)
-                print("Longest Path:", " -> ".join(res.longest_path))   
+                logger.info(f"\n=== CPM Summary for {jobgroup_execution_id} ===")
+                logger.info("SLA(ms):", res.group_sla_ms)
+                logger.info("Completion(ms):", res.completion_ms)
+                logger.info("Total Buffer(ms):", res.total_buffer_ms)
+                logger.info("Longest Path:", " -> ".join(res.longest_path))   
 
 
 def main():
@@ -334,10 +335,10 @@ def main():
     load_dotenv()
     config_path = os.getenv("KG_CONFIG_FILE")
     
-    print("=" * 80)
-    print("Spring Batch Instance Data - Neo4j Direct Loader V2")
-    print("=" * 80)
-    print()
+    logger.info("=" * 80)
+    logger.info("Spring Batch Instance Data - Neo4j Direct Loader V2")
+    logger.info("=" * 80)
+    logger.info()
     
     try:
         # Create loader using config file
@@ -348,22 +349,22 @@ def main():
             
             
             # Create constraints and indexes
-            #print("📐 Creating constraints and indexes...")
+            #logger.info("📐 Creating constraints and indexes...")
             #loader.create_instance_constraints_and_indexes()
-            #print()
+            #logger.info()
             
             # Load instance data
-            print(f" Loading instance data from {excel_file}...")
+            logger.info(f" Loading instance data from {excel_file}...")
             loader.load_instance_data(excel_file)
-            print()
+            logger.info()
             analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)
             loader.compute_cpm_for_jobgroup_execution(excel_file, analyzer)
-            print("=" * 80)
-            print(" LOADING COMPLETE!")
-            print("=" * 80)
-            print()
-            print("🎉 Instance data is now in Neo4j!")
-            print()
+            logger.info("=" * 80)
+            logger.info(" LOADING COMPLETE!")
+            logger.info("=" * 80)
+            logger.info()
+            logger.info("🎉 Instance data is now in Neo4j!")
+            logger.info()
     
     except Exception as e:
         logger.error(f"Error during loading: {str(e)}", exc_info=True)

@@ -5,6 +5,14 @@ import re
 import os
 import yaml
 from typing import List, Tuple, Optional, Dict, Any
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 class ShellScriptAnalyzer:
@@ -25,15 +33,15 @@ class ShellScriptAnalyzer:
     def _load_rules(self, rules_path: str) -> Dict[str, Any]:
         """Load rules from YAML configuration file."""
         if not os.path.exists(rules_path):
-            print(f"Warning: Rules file not found: {rules_path}")
-            print("Using minimal default rules")
+            logger.info(f"Warning: Rules file not found: {rules_path}")
+            logger.info("Using minimal default rules")
             return self._get_default_rules()
         
         try:
             with open(rules_path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
         except Exception as e:
-            print(f"Error loading rules file: {e}")
+            logger.info(f"Error loading rules file: {e}")
             return self._get_default_rules()
     
     def _get_default_rules(self) -> Dict[str, Any]:

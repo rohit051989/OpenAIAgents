@@ -2,6 +2,14 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Literal, Tuple
 import xml.etree.ElementTree as ET
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 from classes.DataClasses import (
     ListenerDef, StepDef, BlockDef, DecisionDef, PrecedesEdge, JobDef
@@ -35,10 +43,10 @@ def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None)
     # Find the job
     job_els = root.findall(f".//{N_BATCH}job")
     if not job_els:
-        print(f"No <batch:job> found in XML: {xml_path}")
+        logger.info(f"No <batch:job> found in XML: {xml_path}")
         return job_defs
     else:
-        print(f"Found {len(job_els)} <batch:job>(s) in XML: {xml_path}")
+        logger.info(f"Found {len(job_els)} <batch:job>(s) in XML: {xml_path}")
         for job_el in job_els:
             job_defs.append(parse_job_defination(job_el, root, bean_class_map, xml_path))        
 
@@ -116,7 +124,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             
             # Flag if bean reference exists but class not found
             if ref and not impl_class:
-                print(f"Warning: Listener references bean '{ref}' but class not found in bean definitions")
+                logger.info(f"Warning: Listener references bean '{ref}' but class not found in bean definitions")
             
             job.listeners[ref] = ListenerDef(
                 name=ref,
@@ -222,11 +230,11 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         
         # Flag unresolved bean references
         if reader_bean and not reader_class:
-            print(f"Warning: Step '{sid}' reader references bean '{reader_bean}' but class not found")
+            logger.info(f"Warning: Step '{sid}' reader references bean '{reader_bean}' but class not found")
         if processor_bean and not processor_class:
-            print(f"Warning: Step '{sid}' processor references bean '{processor_bean}' but class not found")
+            logger.info(f"Warning: Step '{sid}' processor references bean '{processor_bean}' but class not found")
         if writer_bean and not writer_class:
-            print(f"Warning: Step '{sid}' writer references bean '{writer_bean}' but class not found")
+            logger.info(f"Warning: Step '{sid}' writer references bean '{writer_bean}' but class not found")
         
         if sid not in job.steps:
             job.steps[sid] = StepDef(
@@ -256,7 +264,7 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         
         # Flag if bean reference exists but class not found
         if impl_ref and not class_name:
-            print(f"Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
+            logger.info(f"Warning: Step '{sid}' references bean '{impl_ref}' but class not found in bean definitions")
         
         if sid not in job.steps:
             job.steps[sid] = StepDef(
@@ -307,7 +315,7 @@ def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict
     
     # Flag if bean reference exists but class not found
     if decider and not class_name:
-        print(f"Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
+        logger.info(f"Warning: Decision '{did}' references bean '{decider}' but class not found in bean definitions")
 
     if did not in job.decisions:
         job.decisions[did] = DecisionDef(name=did, decider_bean=decider, class_name=class_name, class_source_path=source_path)
@@ -590,18 +598,18 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List
     """
 
     # SECOND PASS: Parse batch jobs using the global bean map
-    print("\n=== Second Pass: Parsing Batch Jobs ===")
+    logger.info(" === Second Pass: Parsing Batch Jobs ===")
     all_job_defs = []
 
     for xml_file in xml_files:
         try:
-            print(f"\nParsing: {os.path.basename(xml_file)}")
+            logger.info(f" Parsing: {os.path.basename(xml_file)}")
             job_defs = parse_spring_batch_xml(xml_file, global_bean_map)
             all_job_defs.extend(job_defs)
             if job_defs:
-                print(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
+                logger.info(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
             else:
-                print(f"  No batch jobs found")
+                logger.info(f"  No batch jobs found")
 
             # Show which beans were resolved for steps and decisions in this file
             for job in job_defs:
@@ -637,17 +645,17 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List
                     if unresolved_chunk_beans > 0:
                         msg_parts.append(f"{unresolved_chunk_beans} unresolved chunk bean(s)")
 
-                    print(f"    Job '{job.name}': Resolved {', '.join(msg_parts)}, "
+                    logger.info(f"    Job '{job.name}': Resolved {', '.join(msg_parts)}, "
                           f"{resolved_decisions}/{len(job.decisions)} decision bean(s)")
 
                     if unresolved_tasklet_steps > 0:
-                        print(f"        {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
+                        logger.info(f"        {unresolved_tasklet_steps} unresolved tasklet step bean(s)")
                     if unresolved_chunk_beans > 0:
-                        print(f"        {unresolved_chunk_beans} unresolved chunk bean reference(s)")
+                        logger.info(f"        {unresolved_chunk_beans} unresolved chunk bean reference(s)")
                     if unresolved_decisions > 0:
-                        print(f"        {unresolved_decisions} unresolved decision bean(s)")
+                        logger.info(f"        {unresolved_decisions} unresolved decision bean(s)")
         except Exception as e:
-            print(f"Warning: Failed to parse {xml_file}: {e}")
+            logger.info(f"Warning: Failed to parse {xml_file}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -655,11 +663,11 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List
     if not all_job_defs:
         raise ValueError(f"No valid job definitions found in the provided XML files.")
 
-    print(f"\n=== Summary ===")
-    print(f"Total jobs found: {len(all_job_defs)}")
-    print(f"Job details:")
+    logger.info(f" === Summary ===")
+    logger.info(f"Total jobs found: {len(all_job_defs)}")
+    logger.info(f"Job details:")
     for job in all_job_defs:
-        print(f"  - '{job.name}' from {os.path.basename(job.source_file)}")
+        logger.info(f"  - '{job.name}' from {os.path.basename(job.source_file)}")
 
     # Calculate overall statistics
     total_steps = sum(len(job.steps) for job in all_job_defs)
@@ -691,30 +699,30 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List
     resolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.class_name) for job in all_job_defs)
     unresolved_decisions = sum(sum(1 for dec in job.decisions.values() if dec.decider_bean and not dec.class_name) for job in all_job_defs)
 
-    print(f"\nTotal Steps: {total_steps} (Tasklet: {total_tasklet_steps}, Chunk: {total_chunk_steps})")
-    print(f"  Tasklet Steps - Resolved: {resolved_tasklet_steps}, Unresolved: {unresolved_tasklet_steps}")
+    logger.info(f" Total Steps: {total_steps} (Tasklet: {total_tasklet_steps}, Chunk: {total_chunk_steps})")
+    logger.info(f"  Tasklet Steps - Resolved: {resolved_tasklet_steps}, Unresolved: {unresolved_tasklet_steps}")
     if total_chunk_steps > 0:
-        print(f"  Chunk Steps: {total_chunk_steps} (Unresolved beans: {unresolved_chunk_beans})")
-    print(f"Total Decisions: {total_decisions} (Resolved: {resolved_decisions}, Unresolved: {unresolved_decisions})")
-    print(f"Total Listeners: {total_listeners}")
+        logger.info(f"  Chunk Steps: {total_chunk_steps} (Unresolved beans: {unresolved_chunk_beans})")
+    logger.info(f"Total Decisions: {total_decisions} (Resolved: {resolved_decisions}, Unresolved: {unresolved_decisions})")
+    logger.info(f"Total Listeners: {total_listeners}")
 
     if unresolved_tasklet_steps > 0 or unresolved_chunk_beans > 0 or unresolved_decisions > 0:
-        print(f"\n  There are unresolved bean references. Check the warnings above for details.")
+        logger.info(f"   There are unresolved bean references. Check the warnings above for details.")
 
         # Print list of tasklet steps with unresolved beans
         if unresolved_tasklet_steps > 0:
-            print(f"\n  Tasklet Steps with unresolved bean references:")
+            logger.info(f"   Tasklet Steps with unresolved bean references:")
             for job in all_job_defs:
                 unresolved_step_list = [(step.name, step.impl_bean) for step in job.steps.values()
                                        if step.step_kind == "TASKLET" and step.impl_bean and not step.class_name]
                 if unresolved_step_list:
-                    print(f"  Job '{job.name}' (from: {job.source_file}):")
+                    logger.info(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, bean_ref in unresolved_step_list:
-                        print(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
+                        logger.info(f"    - Step '{step_name}' -> Bean '{bean_ref}'")
 
         # Print list of chunk steps with unresolved beans
         if unresolved_chunk_beans > 0:
-            print(f"\n  Chunk Steps with unresolved bean references:")
+            logger.info(f"   Chunk Steps with unresolved bean references:")
             for job in all_job_defs:
                 chunk_steps_with_issues = []
                 for step in job.steps.values():
@@ -730,29 +738,29 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List
                             chunk_steps_with_issues.append((step.name, unresolved))
 
                 if chunk_steps_with_issues:
-                    print(f"  Job '{job.name}' (from: {job.source_file}):")
+                    logger.info(f"  Job '{job.name}' (from: {job.source_file}):")
                     for step_name, unresolved_list in chunk_steps_with_issues:
-                        print(f"    - Step '{step_name}' -> {', '.join(unresolved_list)}")
+                        logger.info(f"    - Step '{step_name}' -> {', '.join(unresolved_list)}")
 
         # Print list of decisions with unresolved beans
         if unresolved_decisions > 0:
-            print(f"\n  Decisions with unresolved bean references:")
+            logger.info(f"   Decisions with unresolved bean references:")
             for job in all_job_defs:
                 unresolved_decision_list = [(dec.name, dec.decider_bean) for dec in job.decisions.values()
                                            if dec.decider_bean and not dec.class_name]
                 if unresolved_decision_list:
-                    print(f"  Job '{job.name}' (from: {job.source_file}):")
+                    logger.info(f"  Job '{job.name}' (from: {job.source_file}):")
                     for dec_name, bean_ref in unresolved_decision_list:
-                        print(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
+                        logger.info(f"    - Decision '{dec_name}' -> Bean '{bean_ref}'")
 
     return all_job_defs
 
     # Parse all XML files in directory and merge into single JobDef
     #job_defs, global_bean_map = parse_directory(xml_directory)
-    #print(f"\nParsed and merged job definitions: {job_defs}")
+    #logger.info(f" Parsed and merged job definitions: {job_defs}")
     # Generate and optionally execute Cypher statements
     #cypher = generate_cypher(job_defs[0])
-    # print(cypher)
+    # logger.info(cypher)
     #execute_cypher_statements(uri, user, password, cypher)
     
     # For now just print; you can paste into Neo4j Browser,

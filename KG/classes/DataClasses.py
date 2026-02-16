@@ -118,6 +118,10 @@ class BeanDef:
     property_dependencies: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     constructor_dependencies: Dict[str, Tuple[str, str]] = field(default_factory=dict)
 
+    # Resolved dependencies after DI analysis: Dict[field_name, (original_type, resolved_type)]
+    # Tracks what field types were resolved from generic types to actual bean classes
+    resolved_dependencies: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+
     # Processing status
     is_dependency_processed: bool = False  # True when all dependencies resolved
     source_xml_file: Optional[str] = None

@@ -23,6 +23,15 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 # Import from existing modules
 from classes.DataClasses import BeanDef
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
@@ -47,9 +56,9 @@ def build_global_bean_registry(spring_xml_files: List[str], original_bean_map: D
     Returns:
         SpringBeanRegistry with all beans indexed
     """
-    print("\n" + "=" * 80)
-    print("Step 2: Building Global Bean Registry")
-    print("=" * 80)
+    logger.info(" " + "=" * 80)
+    logger.info("Step 2: Building Global Bean Registry")
+    logger.info("=" * 80)
     
     registry = SpringBeanRegistry()
     
@@ -119,15 +128,15 @@ def build_global_bean_registry(spring_xml_files: List[str], original_bean_map: D
                 registry.add_bean(bean_def)
                 
         except Exception as e:
-            print(f"  Warning: Failed to process {xml_file}: {e}")
+            logger.info(f"  Warning: Failed to process {xml_file}: {e}")
     
     # Print statistics
     stats = registry.get_stats()
-    print(f"\n  Registry Statistics:")
-    print(f"    Total Beans: {stats['total_beans']}")
-    print(f"    Unique Classes: {stats['unique_classes']}")
-    print(f"    With Source Path: {stats['with_source_path']}")
-    print(f"    Pending Processing: {stats['pending_processing']}")
+    logger.info(f"   Registry Statistics:")
+    logger.info(f"    Total Beans: {stats['total_beans']}")
+    logger.info(f"    Unique Classes: {stats['unique_classes']}")
+    logger.info(f"    With Source Path: {stats['with_source_path']}")
+    logger.info(f"    Pending Processing: {stats['pending_processing']}")
     
     return registry
 
@@ -170,9 +179,9 @@ def enrich_with_call_hierarchy_v2(
     Returns:
         Enriched JobDef list with call hierarchy
     """
-    print("\n" + "=" * 80)
-    print("Step 4-5: Building Call Hierarchy (V2)")
-    print("=" * 80)
+    logger.info(" " + "=" * 80)
+    logger.info("Step 4-5: Building Call Hierarchy (V2)")
+    logger.info("=" * 80)
     
     parser = JavaCallHierarchyParser()
     
@@ -180,12 +189,12 @@ def enrich_with_call_hierarchy_v2(
     parsed_classes_cache = set()  # Track what we've already parsed
     
     # Process initial job step classes
-    print("\n  Processing Job Step Classes:")
+    logger.info("   Processing Job Step Classes:")
     for job in job_defs:
-        print(f"\n    Job: {job.name}")
+        logger.info(f"     Job: {job.name}")
         
         for step_name, step in job.steps.items():
-            print(f"      Step: {step_name} ({step.step_kind})")
+            logger.info(f"      Step: {step_name} ({step.step_kind})")
             
             if step.step_kind == "TASKLET" and step.class_source_path:
                 _parse_and_enrich_class(
@@ -211,12 +220,12 @@ def enrich_with_call_hierarchy_v2(
                     )
     
     # Recursive parsing of referenced classes
-    print("\n  Recursively Parsing Referenced Classes:")
+    logger.info("   Recursively Parsing Referenced Classes:")
     iteration = 1
-    max_iterations = 20  # Increased for complex projects
+    max_iterations = 30  # Increased for complex projects
     
     while iteration <= max_iterations:
-        print(f"\n    Iteration {iteration}:")
+        logger.info(f"     Iteration {iteration}:")
         
         # Collect all referenced classes not yet parsed
         classes_to_parse = set()
@@ -229,13 +238,14 @@ def enrich_with_call_hierarchy_v2(
                         classes_to_parse.add(call.target_class)
         
         if not classes_to_parse:
-            print(f"      No new classes to parse. Stopping.")
+            logger.info(f"      No new classes to parse. Stopping.")
             break
         
-        print(f"      Found {len(classes_to_parse)} new classes to parse")
+        logger.info(f"      Found {len(classes_to_parse)} new classes to parse")
         
         newly_parsed = 0
         for class_fqn in classes_to_parse:
+            logger.info(f"        Processing class: {class_fqn}")
             # Use registry for faster lookup
             source_path = _find_source_from_registry(class_fqn, registry)
             
@@ -250,7 +260,7 @@ def enrich_with_call_hierarchy_v2(
             if source_path:
                 # Find bean_id from registry for dependency resolution
                 bean_id = _find_bean_id_from_registry(class_fqn, registry)
-                
+                logger.info(f"          Processing class {class_fqn} With Source: {source_path} and (bean_id: {bean_id})")
                 if _parse_and_enrich_class(
                     bean_id, source_path, parser, registry, 
                     all_classes, parsed_classes_cache
@@ -259,7 +269,7 @@ def enrich_with_call_hierarchy_v2(
             else:
                 parsed_classes_cache.add(class_fqn)  # Mark as attempted
         
-        print(f"      Successfully parsed {newly_parsed} new classes")
+        logger.info(f"      Successfully parsed {newly_parsed} new classes")
         
         if newly_parsed == 0:
             break
@@ -272,7 +282,7 @@ def enrich_with_call_hierarchy_v2(
     # This allows for configurable analysis strategies after graph is built
     
     # Build call hierarchy graph: populate called_classes for each class
-    print("\n  Building Call Hierarchy Graph:")
+    logger.info("   Building Call Hierarchy Graph:")
     for class_info in all_classes.values():
         for method_def in class_info.methods.values():
             for call in method_def.calls:
@@ -280,15 +290,15 @@ def enrich_with_call_hierarchy_v2(
                     class_info.called_classes.add(call.target_class)
     
     # Store enrichment data
-    print("\n" + "=" * 80)
-    print("Enrichment Summary")
-    print("=" * 80)
-    print(f"  Total Classes Parsed: {len(all_classes)}")
-    print(f"  Total Methods: {sum(len(c.methods) for c in all_classes.values())}")
-    print(f"  Total Method Calls: {sum(sum(len(m.calls) for m in c.methods.values()) for c in all_classes.values())}")
+    logger.info(" " + "=" * 80)
+    logger.info("Enrichment Summary")
+    logger.info("=" * 80)
+    logger.info(f"  Total Classes Parsed: {len(all_classes)}")
+    logger.info(f"  Total Methods: {sum(len(c.methods) for c in all_classes.values())}")
+    logger.info(f"  Total Method Calls: {sum(sum(len(m.calls) for m in c.methods.values()) for c in all_classes.values())}")
       
     # Build job-specific enrichment: only classes used in that job's steps
-    print("\n  Building Job-Specific Call Graphs:")
+    logger.info("   Building Job-Specific Call Graphs:")
     for job in job_defs:
         if not hasattr(job, 'enrichment'):
             job.enrichment = {}
@@ -311,7 +321,7 @@ def enrich_with_call_hierarchy_v2(
         job.enrichment['all_classes_cache'] = all_classes  # Reference to all classes for traversal
         job.enrichment['registry'] = registry
         
-        print(f"    Job '{job.name}': {len(step_classes)} step classes")
+        logger.info(f"    Job '{job.name}': {len(step_classes)} step classes")
     
     return job_defs
 
@@ -337,6 +347,7 @@ def _parse_and_enrich_class(
         return False
     
     # Mark as parsed
+    logger.info(f"          Parsed class: {class_info.fqn} from {source_path}")
     parsed_cache.add(class_info.fqn)
     
     # Apply bean dependencies from registry
@@ -366,6 +377,7 @@ def _apply_bean_dependencies_v2(class_info: ClassInfo, bean_def: BeanDef):
     """
     Apply bean dependencies using the registry for fast lookup.
     Updates field types and method call targets.
+    Stores resolved dependencies in the BeanDef for later reference.
     """
     field_mappings = {}
     all_deps = bean_def.get_all_dependencies()
@@ -377,7 +389,12 @@ def _apply_bean_dependencies_v2(class_info: ClassInfo, bean_def: BeanDef):
             dep_bean_class = dep_bean_class_obj.split(':')[-1]  # Extract actual class name
             class_info.fields[field_name] = dep_bean_class
             field_mappings[field_name] = (old_type, dep_bean_class)
-            print(f"          Resolved field '{field_name}' -> {dep_bean_class}")
+            logger.info(f"          Resolved field '{field_name}' -> {dep_bean_class}")
+    
+    # Store resolved dependencies in BeanDef
+    if field_mappings:
+        bean_def.resolved_dependencies = field_mappings
+        logger.info(f"          Stored {len(field_mappings)} resolved dependencies in BeanDef '{bean_def.bean_id}'")
     
     # Update method call targets
     if field_mappings:
@@ -391,7 +408,7 @@ def _apply_bean_dependencies_v2(class_info: ClassInfo, bean_def: BeanDef):
                             updated_count += 1
                             break
         if updated_count > 0:
-            print(f"          Updated {updated_count} method call(s)")
+            logger.info(f"          Updated {updated_count} method call(s)")
 
 
 def _find_source_from_registry(class_fqn: str, registry: SpringBeanRegistry) -> Optional[str]:

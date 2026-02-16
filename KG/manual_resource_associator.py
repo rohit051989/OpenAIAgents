@@ -36,15 +36,17 @@ import sys
 import yaml
 import uuid
 import argparse
-import logging
+
 from typing import Dict, List, Optional
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
-# Setup logging
+import logging
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -405,10 +407,10 @@ class ManualResourceAssociator:
         Args:
             config_path: Path to YAML config file
         """
-        print("\n" + "="*80)
-        print("MANUAL RESOURCE ASSOCIATION")
-        print("="*80)
-        print(f"Config File: {config_path}\n")
+        logger.info("\n" + "="*80)
+        logger.info("MANUAL RESOURCE ASSOCIATION")
+        logger.info("="*80)
+        logger.info(f"Config File: {config_path}\n")
         
         try:
             with open(config_path, 'r') as f:
@@ -423,7 +425,7 @@ class ManualResourceAssociator:
         # Process DB operations
         db_operations = mappings.get('db_operations', [])
         if db_operations:
-            print(f"Processing {len(db_operations)} DB operations:\n")
+            logger.info(f"Processing {len(db_operations)} DB operations:\n")
             for idx, op in enumerate(db_operations, 1):
                 method_fqn = op.get('method_fqn')
                 operation_type = op.get('operation_type')
@@ -436,15 +438,15 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     continue
                 
-                print(f"  [{idx}] {method_fqn}")
-                print(f"      Operation: {operation_type} on table '{table_name}'")
+                logger.info(f"  [{idx}] {method_fqn}")
+                logger.info(f"      Operation: {operation_type} on table '{table_name}'")
                 self.associate_db_operation(method_fqn, operation_type, table_name, schema_name, confidence)
-                print()
+                logger.info()
         
         # Process procedure calls
         procedure_calls = mappings.get('procedure_calls', [])
         if procedure_calls:
-            print(f"Processing {len(procedure_calls)} procedure calls:\n")
+            logger.info(f"Processing {len(procedure_calls)} procedure calls:\n")
             for idx, proc in enumerate(procedure_calls, 1):
                 method_fqn = proc.get('method_fqn')
                 procedure_name = proc.get('procedure_name')
@@ -456,15 +458,15 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     continue
                 
-                print(f"  [{idx}] {method_fqn}")
-                print(f"      Procedure: {procedure_name} ({database_type})")
+                logger.info(f"  [{idx}] {method_fqn}")
+                logger.info(f"      Procedure: {procedure_name} ({database_type})")
                 self.associate_procedure_call(method_fqn, procedure_name, database_type, is_function)
-                print()
+                logger.info()
         
         # Process shell executions
         shell_executions = mappings.get('shell_executions', [])
         if shell_executions:
-            print(f"Processing {len(shell_executions)} shell executions:\n")
+            logger.info(f"Processing {len(shell_executions)} shell executions:\n")
             for idx, shell in enumerate(shell_executions, 1):
                 method_fqn = shell.get('method_fqn')
                 script_name = shell.get('script_name')
@@ -482,40 +484,40 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     continue
                 
-                print(f"  [{idx}] {method_fqn}")
-                print(f"      Script: {script_name} ({script_type})")
+                logger.info(f"  [{idx}] {method_fqn}")
+                logger.info(f"      Script: {script_name} ({script_type})")
                 if remote_host:
-                    print(f"      Execution: REMOTE ({remote_user}@{remote_host})")
+                    logger.info(f"      Execution: REMOTE ({remote_user}@{remote_host})")
                 else:
-                    print(f"      Execution: LOCAL")
+                    logger.info(f"      Execution: LOCAL")
                 self.associate_shell_execution(
                     method_fqn, script_name, script_path, script_type,
                     remote_host, remote_user, remote_port, ssh_key_location,
                     confidence, description
                 )
-                print()
+                logger.info()
         
         # Print statistics
         self.print_statistics()
     
     def print_statistics(self):
         """Print processing statistics"""
-        print("="*80)
-        print("STATISTICS")
-        print("="*80)
-        print(f"  DB Operations Processed:     {self.stats['db_operations_processed']}")
-        print(f"  Procedure Calls Processed:   {self.stats['procedure_calls_processed']}")
-        print(f"  Shell Executions Processed:  {self.stats['shell_executions_processed']}")
-        print(f"  Resources Created/Updated:   {self.stats['resources_created']}")
-        print(f"  Relationships Created:       {self.stats['relationships_created']}")
-        print(f"  Errors:                      {self.stats['errors']}")
-        print("="*80)
+        logger.info("="*80)
+        logger.info("STATISTICS")
+        logger.info("="*80)
+        logger.info(f"  DB Operations Processed:     {self.stats['db_operations_processed']}")
+        logger.info(f"  Procedure Calls Processed:   {self.stats['procedure_calls_processed']}")
+        logger.info(f"  Shell Executions Processed:  {self.stats['shell_executions_processed']}")
+        logger.info(f"  Resources Created/Updated:   {self.stats['resources_created']}")
+        logger.info(f"  Relationships Created:       {self.stats['relationships_created']}")
+        logger.info(f"  Errors:                      {self.stats['errors']}")
+        logger.info("="*80)
         
         if self.stats['errors'] == 0:
-            print(" MANUAL RESOURCE ASSOCIATION COMPLETE")
+            logger.info(" MANUAL RESOURCE ASSOCIATION COMPLETE")
         else:
-            print(f"  COMPLETED WITH {self.stats['errors']} ERRORS")
-        print("="*80 + "\n")
+            logger.info(f"  COMPLETED WITH {self.stats['errors']} ERRORS")
+        logger.info("="*80 + "\n")
 
 
 def create_sample_config():
@@ -551,9 +553,9 @@ def create_sample_config():
     with open(output_path, 'w') as f:
         yaml.dump(sample_config, f, default_flow_style=False, sort_keys=False)
     
-    print(f"\n Sample config file created: {output_path}")
-    print("Edit this file with your actual mappings and run:")
-    print(f"   python manual_resource_associator.py --config {output_path}\n")
+    logger.info(f"\n Sample config file created: {output_path}")
+    logger.info("Edit this file with your actual mappings and run:")
+    logger.info(f"   python manual_resource_associator.py --config {output_path}\n")
 
 
 def main():

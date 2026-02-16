@@ -30,7 +30,6 @@ Manual Resolution:
 import os
 from dotenv import load_dotenv
 import yaml
-import logging
 from neo4j import GraphDatabase
 from typing import Dict, List, Optional, Set
 from pathlib import Path
@@ -40,8 +39,13 @@ import re
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from classes.DataClasses import ClassInfo, MethodDef
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -362,26 +366,26 @@ class ShellExecutionEnricher:
                 record = result.single()
                 if record:
                     count = record['cleared']
-                    print(f"    Cleared shell execution data from {count} methods")
+                    logger.info(f"    Cleared shell execution data from {count} methods")
         except Exception as e:
             logger.error(f"  Error clearing shell execution data: {e}")
     
     def enrich(self):
         """Main enrichment process."""
-        print("\n" + "=" * 80)
-        print("SHELL SCRIPT EXECUTION ENRICHMENT")
-        print("=" * 80)
+        logger.info("\n" + "=" * 80)
+        logger.info("SHELL SCRIPT EXECUTION ENRICHMENT")
+        logger.info("=" * 80)
         
         # Clear old shell execution data
-        #print("\n  Clearing old shell execution data...")
+        #logger.info("\n  Clearing old shell execution data...")
         #self._clear_shell_execution_data()
         
         # Get shell executor classes
         shell_classes = self._get_shell_executor_classes()
         
         if not shell_classes:
-            print("\n    No Shell Executor classes found.")
-            print("      Run information_graph_builder_v4.py first to identify shell executor classes.")
+            logger.info("\n    No Shell Executor classes found.")
+            logger.info("      Run information_graph_builder_v4.py first to identify shell executor classes.")
             return
         
         total_methods = 0
@@ -443,25 +447,25 @@ class ShellExecutionEnricher:
                                     exec_info['confidence']
                                 )
         
-        print("\n" + "=" * 80)
-        print("ENRICHMENT SUMMARY")
-        print("=" * 80)
-        print(f"  Shell Executor Classes: {len(shell_classes)}")
-        print(f"  Total Methods Analyzed: {total_methods}")
-        print(f"  Methods with Shell Executions: {methods_with_executions}")
-        print(f"  Total Shell Executions Found: {total_executions}")
-        print(f"  Methods Requiring Manual Review: {methods_with_grey_areas}")
-        print("=" * 80)
+        logger.info("\n" + "=" * 80)
+        logger.info("ENRICHMENT SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"  Shell Executor Classes: {len(shell_classes)}")
+        logger.info(f"  Total Methods Analyzed: {total_methods}")
+        logger.info(f"  Methods with Shell Executions: {methods_with_executions}")
+        logger.info(f"  Total Shell Executions Found: {total_executions}")
+        logger.info(f"  Methods Requiring Manual Review: {methods_with_grey_areas}")
+        logger.info("=" * 80)
         
         if methods_with_grey_areas > 0:
-            print("\n  MANUAL REVIEW REQUIRED:")
-            print(f"   {methods_with_grey_areas} method(s) have grey areas (dynamic/unknown scripts)")
-            print("   Update config/manual_mappings_sample.yaml with actual script details")
-            print("   Then run: python manual_resource_associator.py")
+            logger.info("\n  MANUAL REVIEW REQUIRED:")
+            logger.info(f"   {methods_with_grey_areas} method(s) have grey areas (dynamic/unknown scripts)")
+            logger.info("   Update config/manual_mappings_sample.yaml with actual script details")
+            logger.info("   Then run: python manual_resource_associator.py")
         
-        print("\n" + "=" * 80)
-        print(" SHELL SCRIPT EXECUTION ENRICHMENT COMPLETE")
-        print("=" * 80)
+        logger.info("\n" + "=" * 80)
+        logger.info(" SHELL SCRIPT EXECUTION ENRICHMENT COMPLETE")
+        logger.info("=" * 80)
 
 
 def main():

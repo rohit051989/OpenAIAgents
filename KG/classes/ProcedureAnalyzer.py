@@ -4,6 +4,15 @@ import yaml
 import logging
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 
 
 class ProcedureAnalyzer:
@@ -35,13 +44,13 @@ class ProcedureAnalyzer:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 rules = yaml.safe_load(f)
-            print(f"[OK] Loaded procedure analysis rules from: {config_path}")
+            logger.info(f"[OK] Loaded procedure analysis rules from: {config_path}")
             return rules
         except FileNotFoundError:
-            print(f"[WARN] Procedure rules config not found: {config_path}, using defaults")
+            logger.info(f"[WARN] Procedure rules config not found: {config_path}, using defaults")
             return self._get_default_rules()
         except yaml.YAMLError as e:
-            print(f"[WARN] Error parsing procedure rules config: {e}, using defaults")
+            logger.info(f"[WARN] Error parsing procedure rules config: {e}, using defaults")
             return self._get_default_rules()
     
     def _get_default_rules(self) -> Dict[str, Any]:

@@ -32,7 +32,7 @@ from neo4j_direct_step_loader import generate_cypher
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -376,7 +376,7 @@ class InformationGraphBuilder:
         """Clear all nodes and relationships."""
         with self.driver.session(database=self.database) as session:
             session.run("MATCH (n) DETACH DELETE n")
-            print(f" Cleared database: {self.database}")
+            logger.info(f" Cleared database: {self.database}")
     
     def create_constraints(self):
         """Create uniqueness constraints and indexes."""
@@ -415,7 +415,7 @@ class InformationGraphBuilder:
                 except Exception as e:
                     pass
         
-        print(" Created constraints and indexes")
+        logger.info(" Created constraints and indexes")
     
     def _is_spring_xml(self, file_path: Path) -> bool:
         """Check if XML file contains Spring namespaces."""
@@ -546,9 +546,9 @@ class InformationGraphBuilder:
         if not root.exists():
             raise ValueError(f"Path does not exist: {root_path}")
         
-        print(f"\n SHOT 1: Creating tree structure")
-        print(f"Scanning: {root}")
-        print("=" * 80)
+        logger.info(f"  SHOT 1: Creating tree structure")
+        logger.info(f"Scanning: {root}")
+        logger.info("=" * 80)
         
         stats = {
             'directories': 1,
@@ -583,18 +583,18 @@ class InformationGraphBuilder:
         # Recursively scan everything
         self._scan_recursive_shot1(root, root_path_str, stats)
         
-        print("\n" + "=" * 80)
-        print(" Shot 1 completed!")
-        print("\nStatistics:")
-        print(f"  Directories: {stats['directories']}")
-        print(f"  Repositories: {stats['repositories']}")
-        print(f"  Folders: {stats['folders']}")
-        print(f"  Projects: {stats['projects']}")
-        print(f"  Files: {stats['files']}")
-        print(f"    Java Classes: {stats['java_classes']}")
-        print(f"    Test Classes: {stats['test_classes']}")
-        print(f"    Config Files: {stats['config_files']}")
-        print("=" * 60)
+        logger.info(" " + "=" * 80)
+        logger.info(" Shot 1 completed!")
+        logger.info(" Statistics:")
+        logger.info(f"  Directories: {stats['directories']}")
+        logger.info(f"  Repositories: {stats['repositories']}")
+        logger.info(f"  Folders: {stats['folders']}")
+        logger.info(f"  Projects: {stats['projects']}")
+        logger.info(f"  Files: {stats['files']}")
+        logger.info(f"    Java Classes: {stats['java_classes']}")
+        logger.info(f"    Test Classes: {stats['test_classes']}")
+        logger.info(f"    Config Files: {stats['config_files']}")
+        logger.info("=" * 60)
     
     def _scan_recursive_shot1(self, current_path: Path, parent_path_str: str, stats: Dict, depth: int = 0):
         """Recursively scan and create basic tree structure."""
@@ -828,7 +828,7 @@ class InformationGraphBuilder:
             # Check if the query succeeded
             record = result.single()
             if not record:
-                print(f"WARNING: Parent not found for {class_info.class_name} at {class_info.source_path}")
+                logger.info(f"WARNING: Parent not found for {class_info.class_name} at {class_info.source_path}")
                 return
             
             # Create JavaMethod nodes and HAS_METHOD relationships for all methods
@@ -896,8 +896,8 @@ class InformationGraphBuilder:
         """
         Shot 2: Find all Java files, extract packages, mark folders as Package.
         """
-        print(f"\n SHOT 2: Marking package folders")
-        print("=" * 60)
+        logger.info(f"  SHOT 2: Marking package folders")
+        logger.info("=" * 60)
         
         # Find all JavaClass nodes with packages
         query = """
@@ -910,7 +910,7 @@ class InformationGraphBuilder:
             result = session.run(query)
             java_files = [(record['path'], record['package']) for record in result]
         
-        print(f"Found {len(java_files)} Java files with packages")
+        logger.info(f"Found {len(java_files)} Java files with packages")
         
         # Process each Java file
         packages_marked = set()
@@ -919,8 +919,8 @@ class InformationGraphBuilder:
             # Mark folders based on this Java file's package
             self._mark_package_folders(Path(java_path), package_name, packages_marked)
         
-        print(f"\n Marked {len(packages_marked)} unique package folders")
-        print("=" * 60)
+        logger.info(f"  Marked {len(packages_marked)} unique package folders")
+        logger.info("=" * 60)
     
     def _mark_package_folders(self, java_file_path: Path, package_name: str, packages_marked: Set[str]):
         """Mark folders as Package based on Java file's package declaration."""
@@ -986,8 +986,8 @@ class InformationGraphBuilder:
         Returns:
             List of absolute file paths to Spring XML configuration files
         """
-        print(f"\n Loading Spring XML files from graph")
-        print("=" * 60)
+        logger.info(f"  Loading Spring XML files from graph")
+        logger.info("=" * 60)
         
         query = """
         MATCH (f:SpringConfig)
@@ -1004,18 +1004,18 @@ class InformationGraphBuilder:
                 file_path = record['path']
                 spring_xml_files.append(file_path)
         
-        print(f"  Found {len(spring_xml_files)} Spring XML files in graph")
+        logger.info(f"  Found {len(spring_xml_files)} Spring XML files in graph")
         
         # Show sample files
         if spring_xml_files:
-            print(f"\n  Sample files:")
+            logger.info(f"   Sample files:")
             for i, xml_file in enumerate(spring_xml_files[:5]):
                 file_name = Path(xml_file).name
-                print(f"    {i+1}. {file_name}")
+                logger.info(f"    {i+1}. {file_name}")
             if len(spring_xml_files) > 5:
-                print(f"    ... and {len(spring_xml_files) - 5} more")
+                logger.info(f"    ... and {len(spring_xml_files) - 5} more")
         
-        print("=" * 60)
+        logger.info("=" * 60)
         return spring_xml_files
     
     def _find_java_source_from_graph(self, class_name: str) -> str:
@@ -1064,8 +1064,8 @@ class InformationGraphBuilder:
         Returns:
             Dictionary mapping bean ID to tuple of (class_name, source_path)
         """
-        print(f"\n Building Global Bean Map from Graph")
-        print("=" * 60)
+        logger.info(f"  Building Global Bean Map from Graph")
+        logger.info("=" * 60)
         
         global_bean_map: Dict[str, Tuple[str, str]] = {}
         beans_without_source = []
@@ -1092,32 +1092,25 @@ class InformationGraphBuilder:
                         
                         # Add to global map
                         if bean_id in global_bean_map and global_bean_map[bean_id][0] != bean_class:
-                            print(f"  Warning: Bean ID '{bean_id}' redefined. "
+                            logger.info(f"  Warning: Bean ID '{bean_id}' redefined. "
                                   f"Previous: {global_bean_map[bean_id][0]}, New: {bean_class}")
                         
                         global_bean_map[bean_id] = (bean_class, source_path)
                 
             except Exception as e:
-                print(f"  Warning: Failed to process {Path(xml_file).name}: {e}")
+                logger.info(f"  Warning: Failed to process {Path(xml_file).name}: {e}")
         
         # Statistics
         total_with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
-        print(f"\n  Bean Map Statistics:")
-        print(f"    Total Beans: {len(global_bean_map)}")
-        print(f"    With Source Path: {total_with_source}")
-        print(f"    Without Source Path: {len(beans_without_source)}")
+        logger.info(f"   Bean Map Statistics:")
+        logger.info(f"    Total Beans: {len(global_bean_map)}")
+        logger.info(f"    With Source Path: {total_with_source}")
+        logger.info(f"    Without Source Path: {len(beans_without_source)}")
+        logger.info(f"   Beans without source path:")
+        for bean_id, bean_class in beans_without_source:
+            logger.info(f"    - Bean '{bean_id}' -> Class '{bean_class}'")
         
-        if beans_without_source and len(beans_without_source) <= 10:
-            print(f"\n  Beans without source path:")
-            for bean_id, bean_class in beans_without_source:
-                print(f"    - Bean '{bean_id}' -> Class '{bean_class}'")
-        elif len(beans_without_source) > 10:
-            print(f"\n  First 10 beans without source path:")
-            for bean_id, bean_class in beans_without_source[:10]:
-                print(f"    - Bean '{bean_id}' -> Class '{bean_class}'")
-            print(f"    ... and {len(beans_without_source) - 10} more")
-        
-        print("=" * 60)
+        logger.info("=" * 60)
         return global_bean_map
     
     def build_global_bean_registry(self, spring_xml_files: List[str], original_bean_map: Dict[str, Tuple[str, str]]) -> SpringBeanRegistry:
@@ -1132,9 +1125,9 @@ class InformationGraphBuilder:
         Returns:
             SpringBeanRegistry with all beans indexed
         """
-        print("\n" + "=" * 80)
-        print("Step 2: Building Global Bean Registry")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info("Step 2: Building Global Bean Registry")
+        logger.info("=" * 80)
         
         registry = SpringBeanRegistry()
         
@@ -1210,15 +1203,15 @@ class InformationGraphBuilder:
                     registry.add_bean(bean_def)
                     
             except Exception as e:
-                print(f"  Warning: Failed to process {xml_file}: {e}")
+                logger.info(f"  Warning: Failed to process {xml_file}: {e}")
         
         # Print statistics
         stats = registry.get_stats()
-        print(f"\n  Registry Statistics:")
-        print(f"    Total Beans: {stats['total_beans']}")
-        print(f"    Unique Classes: {stats['unique_classes']}")
-        print(f"    With Source Path: {stats['with_source_path']}")
-        print(f"    Pending Processing: {stats['pending_processing']}")
+        logger.info(f"   Registry Statistics:")
+        logger.info(f"    Total Beans: {stats['total_beans']}")
+        logger.info(f"    Unique Classes: {stats['unique_classes']}")
+        logger.info(f"    With Source Path: {stats['with_source_path']}")
+        logger.info(f"    Pending Processing: {stats['pending_processing']}")
         
         return registry
 
@@ -1252,8 +1245,8 @@ class InformationGraphBuilder:
             bean_map: Dictionary mapping bean ID to tuple of (class_name, source_path)
             spring_xml_files: List of Spring XML files where beans are defined
         """
-        print(f"\n Storing Bean Map in Information Graph")
-        print("=" * 60)
+        logger.info(f"  Storing Bean Map in Information Graph")
+        logger.info("=" * 60)
         
         # Build reverse map: xml_file -> list of bean_ids
         xml_to_beans: Dict[str, List[str]] = {}
@@ -1344,11 +1337,74 @@ class InformationGraphBuilder:
                     except Exception as e:
                         logger.debug(f"Could not link bean '{bean_id}' to JavaClass: {e}")
         
-        print(f"\n  Bean Node Statistics:")
-        print(f"    Total Beans Created: {beans_created}")
-        print(f"    With Source Path: {beans_with_source}")
-        print(f"    Without Source Path: {beans_without_source}")
-        print("=" * 60)
+        logger.info(f"   Bean Node Statistics:")
+        logger.info(f"    Total Beans Created: {beans_created}")
+        logger.info(f"    With Source Path: {beans_with_source}")
+        logger.info(f"    Without Source Path: {beans_without_source}")
+        logger.info("=" * 60)
+    
+    def _create_step_bean_relationships(self, job_defs: List[JobDef]):
+        """
+        Create USES_BEAN relationships between Step nodes and Bean nodes.
+        Links steps to the beans they reference (impl_bean, reader_bean, writer_bean, processor_bean).
+        """
+        logger.info(" " + "=" * 80)
+        logger.info(" Creating Step -> Bean Relationships")
+        logger.info("=" * 80)
+        
+        relationships_created = 0
+        steps_with_beans = 0
+        
+        with self.driver.session(database=self.database) as session:
+            for job in job_defs:
+                for step_name, step_def in job.steps.items():
+                    step_has_beans = False
+                    
+                    # For TASKLET steps, link to impl_bean
+                    if step_def.step_kind == "TASKLET" and step_def.impl_bean:
+                        query = """
+                        MATCH (s:Step {name: $step_name})
+                        MATCH (b:Bean {beanId: $bean_id})
+                        MERGE (s)-[:USES_BEAN {role: 'tasklet'}]->(b)
+                        """
+                        try:
+                            session.run(query, step_name=step_name, bean_id=step_def.impl_bean)
+                            relationships_created += 1
+                            step_has_beans = True
+                            logger.debug(f"Linked Step '{step_name}' to Bean '{step_def.impl_bean}' (tasklet)")
+                        except Exception as e:
+                            logger.debug(f"Could not link Step '{step_name}' to Bean '{step_def.impl_bean}': {e}")
+                    
+                    # For CHUNK steps, link to reader, processor, writer beans
+                    elif step_def.step_kind == "CHUNK":
+                        bean_roles = [
+                            (step_def.reader_bean, 'reader'),
+                            (step_def.processor_bean, 'processor'),
+                            (step_def.writer_bean, 'writer')
+                        ]
+                        
+                        for bean_id, role in bean_roles:
+                            if bean_id:
+                                query = """
+                                MATCH (s:Step {name: $step_name})
+                                MATCH (b:Bean {beanId: $bean_id})
+                                MERGE (s)-[:USES_BEAN {role: $role}]->(b)
+                                """
+                                try:
+                                    session.run(query, step_name=step_name, bean_id=bean_id, role=role)
+                                    relationships_created += 1
+                                    step_has_beans = True
+                                    logger.debug(f"Linked Step '{step_name}' to Bean '{bean_id}' ({role})")
+                                except Exception as e:
+                                    logger.debug(f"Could not link Step '{step_name}' to Bean '{bean_id}': {e}")
+                    
+                    if step_has_beans:
+                        steps_with_beans += 1
+        
+        logger.info(f"   Step-Bean Relationship Statistics:")
+        logger.info(f"    Steps with Bean references: {steps_with_beans}")
+        logger.info(f"    Total relationships created: {relationships_created}")
+        logger.info("=" * 60)
     
     def _load_classes(self):
 
@@ -1371,12 +1427,12 @@ class InformationGraphBuilder:
         # Note: DB operation analysis moved to separate script (db_operation_enricher.py)
         enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, original_bean_map)
         
-        print("\n" + "=" * 80)
-        print(" CALL HIERARCHY BUILD COMPLETE")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info(" CALL HIERARCHY BUILD COMPLETE")
+        logger.info("=" * 80)
     
         # Step 6: Load Steps and create relationships to Jobs
-        print("\n" + "=" * 80)
+        logger.info(" " + "=" * 80)
         """Load Steps and create relationships to Jobs"""
         for job_def in enriched_jobs:
             # Load basic step information
@@ -1404,16 +1460,19 @@ class InformationGraphBuilder:
                 
                 logger.info(f" Loaded {len(hierarchy_statements)} hierarchy statements for job '{job_def.name}'")
         
+        # Step 7: Create Step -> Bean relationships
+        self._create_step_bean_relationships(enriched_jobs)
+        
         # Note: All analysis (DB, procedures, shell scripts) moved to separate scripts
         # Run enrichment scripts after this script completes
-        print("\n" + "=" * 80)
-        print(" INFORMATION GRAPH BUILD COMPLETE")
-        print("=" * 80)
-        print("\nNext Steps: Run enrichment scripts to analyze operations")
-        print("  1. python db_operation_enricher.py          # Analyze DB operations")
-        print("  2. python procedure_call_enricher.py        # Analyze stored procedures")
-        print("  3. python shell_execution_enricher.py       # Analyze shell scripts")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info(" INFORMATION GRAPH BUILD COMPLETE")
+        logger.info("=" * 80)
+        logger.info(" Next Steps: Run enrichment scripts to analyze operations")
+        logger.info("  1. python db_operation_enricher.py          # Analyze DB operations")
+        logger.info("  2. python procedure_call_enricher.py        # Analyze stored procedures")
+        logger.info("  3. python shell_execution_enricher.py       # Analyze shell scripts")
+        logger.info("=" * 80)
 
     def _convert_folder_to_package(self, folder_path: str, package_parts: List[str]):
         """Convert a Folder node to a Package node."""
@@ -1450,37 +1509,37 @@ def main():
     load_dotenv()
     config_file = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
     
-    print("=" * 60)
-    print("Information Graph Builder V3 (Two-Shot Approach)")
-    print("=" * 60)
-    print(f"Config: {config_file}")
+    logger.info("=" * 60)
+    logger.info("Information Graph Builder V3 (Two-Shot Approach)")
+    logger.info("=" * 60)
+    logger.info(f"Config: {config_file}")
     
     builder = InformationGraphBuilder(config_path=config_file)
     
     try:
         # Clear existing data
-        print("\n1. Clearing existing database...")
+        logger.info(" 1. Clearing existing database...")
         builder.clear_database()
         
         # Create constraints
-        print("\n2. Creating constraints and indexes...")
+        logger.info(" 2. Creating constraints and indexes...")
         #builder.create_constraints()
         
         # SHOT 1: Create basic tree
-        print("\n3. SHOT 1: Building tree structure...")
+        logger.info(" 3. SHOT 1: Building tree structure...")
         root_dir = builder.config['root_directory']
         builder.shot1_create_tree(root_dir)
         
         # SHOT 2: Mark packages
-        print("\n4. SHOT 2: Marking package folders...")
+        logger.info(" 4. SHOT 2: Marking package folders...")
         builder.shot2_mark_packages()
 
         builder._load_classes()
         
-        print("\n Information Graph built successfully!")
+        logger.info("  Information Graph built successfully!")
         
     except Exception as e:
-        print(f"\n Error: {str(e)}")
+        logger.info(f"  Error: {str(e)}")
         import traceback
         traceback.print_exc()
     finally:

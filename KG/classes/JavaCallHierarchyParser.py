@@ -13,6 +13,15 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 
 class JavaCallHierarchyParser:
     """Parses Java source files to extract call hierarchy"""
@@ -25,7 +34,7 @@ class JavaCallHierarchyParser:
                 JAVA_LANGUAGE = Language(tsjava.language())
                 self.ts_parser = Parser(JAVA_LANGUAGE)
             except Exception as e:
-                print(f"  Warning: Could not initialize tree-sitter: {e}")
+                logger.info(f"  Warning: Could not initialize tree-sitter: {e}")
                 self.ts_parser = None
         else:
             self.ts_parser = None
@@ -33,7 +42,7 @@ class JavaCallHierarchyParser:
     def parse_java_file(self, file_path: str) -> Optional[ClassInfo]:
         """Parse a single Java file and extract class info with call hierarchy"""
         if not Path(file_path).exists():
-            print(f"  Warning: Source file not found: {file_path}")
+            logger.info(f"  Warning: Source file not found: {file_path}")
             return None
 
         try:
@@ -44,23 +53,23 @@ class JavaCallHierarchyParser:
         except Exception as e:
             # Javalang failed - try tree-sitter for modern Java syntax
             error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
-            print(f"  Warning: javalang failed to parse {file_path}")
-            print(f"           Reason: {error_msg[:150]}")
+            logger.info(f"  Warning: javalang failed to parse {file_path}")
+            logger.info(f"           Reason: {error_msg[:150]}")
             
             if self.ts_parser:
-                print(f"           Attempting tree-sitter fallback parser...")
+                logger.info(f"           Attempting tree-sitter fallback parser...")
                 try:
                     result = self._parse_with_tree_sitter(file_path, source)
                     if result:
-                        print(f"            Successfully parsed with tree-sitter")
+                        logger.info(f"            Successfully parsed with tree-sitter")
                         return result
                 except Exception as ts_error:
-                    print(f"           ✗ tree-sitter also failed: {type(ts_error).__name__}: {str(ts_error)[:100]}")
+                    logger.info(f"           ✗ tree-sitter also failed: {type(ts_error).__name__}: {str(ts_error)[:100]}")
             else:
-                print(f"           Note: Install tree-sitter-java for modern Java syntax support")
-                print(f"                 pip install tree-sitter tree-sitter-java")
+                logger.info(f"           Note: Install tree-sitter-java for modern Java syntax support")
+                logger.info(f"                 pip install tree-sitter tree-sitter-java")
             
-            print(f"           File will be created as a regular file node, not a JavaClass")
+            logger.info(f"           File will be created as a regular file node, not a JavaClass")
             return None
 
         # Extract package

@@ -2,6 +2,15 @@ from classes.DataClasses import BeanDef
 
 
 from typing import Dict, List, Set, Optional
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 
 class SpringBeanRegistry:
     """
@@ -18,7 +27,10 @@ class SpringBeanRegistry:
         """Add a bean to both indexes"""
         # Add to ID index
         if bean_def.bean_id in self.beans_by_id:
-            print(f"  Warning: Bean ID '{bean_def.bean_id}' already exists. Overwriting.")
+            existing_bean = self.beans_by_id[bean_def.bean_id]
+            logger.info(f"  Warning: Bean ID '{bean_def.bean_id}' already exists. Overwriting.")
+            logger.info(f"    OLD Bean: {existing_bean}")
+            logger.info(f"    NEW Bean: {bean_def}")
         self.beans_by_id[bean_def.bean_id] = bean_def
 
         # Add to class index

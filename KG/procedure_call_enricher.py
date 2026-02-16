@@ -22,7 +22,6 @@ Requirements:
 
 import os
 import sys
-import logging
 import uuid
 import re
 from typing import Dict, List, Set
@@ -35,10 +34,12 @@ from classes.ProcedureAnalyzer import ProcedureAnalyzer
 from classes.DataClasses import ClassInfo, MethodDef
 
 
+import logging
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -299,32 +300,32 @@ class ProcedureCallEnricher:
         """
         Main enrichment process.
         """
-        print("\n" + "=" * 80)
-        print("STORED PROCEDURE CALL ENRICHMENT")
-        print("=" * 80)
+        logger.info("\n" + "=" * 80)
+        logger.info("STORED PROCEDURE CALL ENRICHMENT")
+        logger.info("=" * 80)
         
         # Get all DAO classes
         dao_classes = self._get_dao_classes()
         
         if not dao_classes:
-            print("\n    No DAO classes found (isDAOClass=true).")
-            print("     Run information_graph_builder_v4.py first.")
+            logger.info("\n    No DAO classes found (isDAOClass=true).")
+            logger.info("     Run information_graph_builder_v4.py first.")
             return
         
-        print(f"\n  Analyzing {len(dao_classes)} DAO classes...\n")
+        logger.info(f"\n  Analyzing {len(dao_classes)} DAO classes...\n")
         
         # Analyze each DAO class
         for idx, class_data in enumerate(dao_classes, 1):
             class_fqn = class_data['fqn']
             class_name = class_data['className']
             
-            print(f"[{idx}/{len(dao_classes)}] {class_name}")
+            logger.info(f"[{idx}/{len(dao_classes)}] {class_name}")
             
             # Get methods for this class
             methods = self._get_class_methods(class_fqn)
             
             if not methods:
-                print(f"  No methods found for {class_fqn}")
+                logger.info(f"  No methods found for {class_fqn}")
                 continue
             
             self.stats['classes_processed'] += 1
@@ -347,7 +348,7 @@ class ProcedureCallEnricher:
                     proc_type = "Function" if procedure_call.is_function else "Procedure"
                     requires_review = 'DYNAMIC' in procedure_call.procedure_name.upper() or procedure_call.procedure_name == 'UNKNOWN'
                     review_flag = "  [Further Analysis Required]" if requires_review else ""
-                    print(f"   {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
+                    logger.info(f"   {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
                     
                     # Update method in graph
                     if self._update_method_procedures(method_data['fqn'], procedure_call):
@@ -359,26 +360,26 @@ class ProcedureCallEnricher:
             if class_has_procedures:
                 self._update_class_flag(class_fqn)
                 self.stats['classes_with_procedures'] += 1
-                print(f"  → Class marked as is_procedure_invoked=true\n")
+                logger.info(f"  → Class marked as is_procedure_invoked=true\n")
             else:
-                print(f"  No procedure calls detected\n")
+                logger.info(f"  No procedure calls detected\n")
         
         # Print statistics
         self._print_statistics()
     
     def _print_statistics(self):
         """Print enrichment statistics."""
-        print("=" * 80)
-        print("ENRICHMENT STATISTICS")
-        print("=" * 80)
-        print(f"  DAO Classes Processed:        {self.stats['classes_processed']}")
-        print(f"  Classes with Procedures:      {self.stats['classes_with_procedures']}")
-        print(f"  Methods Analyzed:             {self.stats['methods_processed']}")
-        print(f"  Methods with Procedures:      {self.stats['methods_with_procedures']}")
-        print(f"  Total Procedures Found:       {self.stats['total_procedures']}")
-        print("=" * 80)
-        print(" STORED PROCEDURE CALL ENRICHMENT COMPLETE")
-        print("=" * 80 + "\n")
+        logger.info("=" * 80)
+        logger.info("ENRICHMENT STATISTICS")
+        logger.info("=" * 80)
+        logger.info(f"  DAO Classes Processed:        {self.stats['classes_processed']}")
+        logger.info(f"  Classes with Procedures:      {self.stats['classes_with_procedures']}")
+        logger.info(f"  Methods Analyzed:             {self.stats['methods_processed']}")
+        logger.info(f"  Methods with Procedures:      {self.stats['methods_with_procedures']}")
+        logger.info(f"  Total Procedures Found:       {self.stats['total_procedures']}")
+        logger.info("=" * 80)
+        logger.info(" STORED PROCEDURE CALL ENRICHMENT COMPLETE")
+        logger.info("=" * 80 + "\n")
 
 
 def main():

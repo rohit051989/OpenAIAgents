@@ -3,6 +3,14 @@ from classes.DataClasses import ClassInfo, MethodDef, ProcedureCall
 
 import re
 from typing import List, Tuple, Optional
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 class OracleProcedureAnalyzer:

@@ -3,6 +3,14 @@ import re
 import yaml
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Any
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 class DAOAnalyzer:
@@ -39,13 +47,13 @@ class DAOAnalyzer:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 rules = yaml.safe_load(f)
-            #print(f"[OK] Loaded DAO analysis rules from: {config_path}")
+            #logger.info(f"[OK] Loaded DAO analysis rules from: {config_path}")
             return rules
         except FileNotFoundError:
-            print(f"[WARN] DAO rules config not found: {config_path}, using defaults")
+            logger.info(f"[WARN] DAO rules config not found: {config_path}, using defaults")
             return self._get_default_rules()
         except yaml.YAMLError as e:
-            print(f"[WARN] Error parsing DAO rules config: {e}, using defaults")
+            logger.info(f"[WARN] Error parsing DAO rules config: {e}, using defaults")
             return self._get_default_rules()
     
     def _get_default_rules(self) -> Dict[str, Any]:
@@ -81,7 +89,7 @@ class DAOAnalyzer:
                     try:
                         compiled[operation].append(re.compile(pattern_str, re.IGNORECASE))
                     except re.error as e:
-                        print(f"[WARN] Invalid JPA pattern for {operation}: {pattern_str} - {e}")
+                        logger.info(f"[WARN] Invalid JPA pattern for {operation}: {pattern_str} - {e}")
         
         return compiled
 
@@ -229,13 +237,13 @@ class DAOAnalyzer:
                         # Remove schema prefix if present
                         if '.' in table_name:
                             table_name = table_name.split('.')[-1]
-                        print(f"          Extracted table from SQL: {table_name}")
+                        logger.info(f"          Extracted table from SQL: {table_name}")
                         break
                 except (re.error, IndexError):
                     continue
                     
         elif raw_query == "DYNAMIC_SQL":
-            print(f"          Dynamic SQL detected - table name cannot be determined statically")
+            logger.info(f"          Dynamic SQL detected - table name cannot be determined statically")
             table_name = "DYNAMIC_TABLE"
 
         # Priority 2: From return type with 'Entity' suffix
@@ -243,7 +251,7 @@ class DAOAnalyzer:
             entity_suffix = self.rules.get('entity_naming_rules', {}).get('entity_suffix', 'Entity')
             entity_type = method_def.return_type.replace(entity_suffix, '')
             table_name = self._entity_to_table(entity_type)
-            print(f"          Inferred table from Entity return type: {table_name}")
+            logger.info(f"          Inferred table from Entity return type: {table_name}")
 
         # Priority 3: From JPQL query in source
         if not table_name:
@@ -260,7 +268,7 @@ class DAOAnalyzer:
                     if match:
                         entity_type = match.group(1)
                         table_name = self._entity_to_table(entity_type)
-                        print(f"          Inferred table from JPQL query: {table_name}")
+                        logger.info(f"          Inferred table from JPQL query: {table_name}")
                         break
                 except (re.error, IndexError):
                     continue
@@ -275,11 +283,11 @@ class DAOAnalyzer:
             
             # Check if it's a Java type using configured list
             if return_type_simple in self.excluded_java_types:
-                print(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
+                logger.info(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
                 table_name = "UNKNOWN"
             elif return_type_simple and return_type_simple[0].isupper():
                 table_name = self._entity_to_table(return_type_simple)
-                print(f"          Inferred table from return type ({return_type_simple}): {table_name}")
+                logger.info(f"          Inferred table from return type ({return_type_simple}): {table_name}")
 
         return entity_type, table_name.upper() if table_name else None
 
@@ -317,7 +325,7 @@ class DAOAnalyzer:
                             desc = 'dynamic SQL'
                             
                         if re.search(dynamic_pattern, snippet):
-                            print(f"        Detected {desc}")
+                            logger.info(f"        Detected {desc}")
                             return "DYNAMIC_SQL"
                     
                     # Normal inline query
@@ -330,7 +338,7 @@ class DAOAnalyzer:
                     const_name_group = pattern_config.get('constant_name_group', 3)
                     constant_class = match.group(const_class_group)
                     constant_name = match.group(const_name_group)
-                    print(f"        Detected constant reference: {constant_class}.{constant_name}")
+                    logger.info(f"        Detected constant reference: {constant_class}.{constant_name}")
                     resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
                     if resolved_query:
                         return resolved_query
@@ -381,7 +389,7 @@ class DAOAnalyzer:
         # Find the source file
         constant_source_path = self._find_constant_source_file(constant_fqn, class_info.source_path)
         if not constant_source_path:
-            print(f"        Warning: Could not find source file for constant class {constant_fqn}")
+            logger.info(f"        Warning: Could not find source file for constant class {constant_fqn}")
             return None
 
         # Parse the constant file to find the SQL string
@@ -394,8 +402,8 @@ class DAOAnalyzer:
             match = re.search(pattern, constant_source)
             if match:
                 sql_query = match.group(2).strip()
-                print(f"         Resolved constant {constant_class}.{constant_name}")
-                print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+                logger.info(f"         Resolved constant {constant_class}.{constant_name}")
+                logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
             # Handle multi-line concatenation
@@ -406,14 +414,14 @@ class DAOAnalyzer:
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
-                    print(f"         Resolved concatenated constant {constant_class}.{constant_name}")
-                    print(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+                    logger.info(f"         Resolved concatenated constant {constant_class}.{constant_name}")
+                    logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                     return sql_query
 
-            print(f"        Warning: Could not match pattern for {constant_name} in {constant_source_path}")
+            logger.info(f"        Warning: Could not match pattern for {constant_name} in {constant_source_path}")
 
         except Exception as e:
-            print(f"        Warning: Failed to parse constant file {constant_source_path}: {e}")
+            logger.info(f"        Warning: Failed to parse constant file {constant_source_path}: {e}")
 
         return None
 

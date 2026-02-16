@@ -24,7 +24,6 @@ Architecture:
 import os
 from dotenv import load_dotenv
 import yaml
-import logging
 import uuid
 from neo4j import GraphDatabase
 from typing import Dict, List, Optional, Set, Tuple
@@ -35,8 +34,13 @@ import json
 from classes.DAOAnalyzer import DAOAnalyzer
 from classes.DataClasses import ClassInfo
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -367,15 +371,15 @@ class DBOperationEnricher:
     
     def enrich(self):
         """Main enrichment process"""
-        print("\n" + "=" * 80)
-        print("DB OPERATION ENRICHMENT")
-        print("=" * 80)
-        print(f"Strategy: {self.strategy.upper()}")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info("DB OPERATION ENRICHMENT")
+        logger.info("=" * 80)
+        logger.info(f"Strategy: {self.strategy.upper()}")
+        logger.info("=" * 80)
         
         # Step 1: Query all DAO classes from graph
         dao_classes = self._get_dao_classes()
-        logger.info(f"\nFound {len(dao_classes)} DAO classes to analyze")
+        logger.info(f" Found {len(dao_classes)} DAO classes to analyze")
         
         # Step 2: Initialize analyzer based on strategy
         if self.strategy == 'llm':
@@ -395,7 +399,7 @@ class DBOperationEnricher:
             class_name = dao_class['className']
             path = dao_class['path']
             
-            logger.info(f"\n  Processing DAO: {class_name}")
+            logger.info(f"   Processing DAO: {class_name}")
             
             # Get all methods for this class
             methods = self._get_class_methods(class_fqn)
@@ -436,15 +440,15 @@ class DBOperationEnricher:
                         table = op.get('table_name') if isinstance(op, dict) else op.table_name
                         logger.info(f"    {method_name}() -> {op_type} {table or '?'}")
         
-        print(f"\n   Analyzed {total_methods} methods")
-        print(f"   Found DB operations in {methods_with_ops} methods")
+        logger.info(f"    Analyzed {total_methods} methods")
+        logger.info(f"   Found DB operations in {methods_with_ops} methods")
         
         # Step 4: Consolidate at Step level
         self._consolidate_step_db_operations()
         
-        print("\n" + "=" * 80)
-        print(" DB OPERATION ENRICHMENT COMPLETE")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info(" DB OPERATION ENRICHMENT COMPLETE")
+        logger.info("=" * 80)
     
     def _get_dao_classes(self) -> List[Dict]:
         """Query Neo4j for all DAO classes"""
@@ -598,9 +602,9 @@ class DBOperationEnricher:
         """
         Consolidate database operations at Step level by traversing the call graph.
         """
-        print("\n" + "=" * 80)
-        print("Consolidating Database Operations at Step Level")
-        print("=" * 80)
+        logger.info(" " + "=" * 80)
+        logger.info("Consolidating Database Operations at Step Level")
+        logger.info("=" * 80)
         
         # Get all Steps
         query_steps = """
@@ -718,8 +722,8 @@ class DBOperationEnricher:
                 steps_updated += 1
                 logger.info(f"    Step '{step_name}': {len(step_ops_list)} unique DB operations")
         
-        print(f"\n   Updated {steps_updated} Steps with consolidated DB operations")
-        print("=" * 80)
+        logger.info(f"    Updated {steps_updated} Steps with consolidated DB operations")
+        logger.info("=" * 80)
     
     def close(self):
         """Close Neo4j driver"""
