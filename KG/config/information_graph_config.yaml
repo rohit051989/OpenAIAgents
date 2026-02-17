@@ -116,6 +116,7 @@ scan_options:
   parse_java_classes: true  # Parse Java files to extract ClassInfo
   extract_imports: true
   extract_methods: true
+  batch_size: 100  # Number of Cypher statements to execute per transaction (500-1000 recommended)
 
 # Class data configuration
 class_data:

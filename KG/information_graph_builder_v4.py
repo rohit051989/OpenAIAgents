@@ -1406,6 +1406,64 @@ class InformationGraphBuilder:
         logger.info(f"    Total relationships created: {relationships_created}")
         logger.info("=" * 60)
     
+    def _execute_cypher_statements_batched(self, statements: List[str], batch_size: int, description: str):
+        """
+        Execute Cypher statements in batches with proper transaction handling.
+        Each batch is executed in a single transaction and committed atomically.
+        
+        Args:
+            statements: List of Cypher statements to execute
+            batch_size: Number of statements per batch
+            description: Description for logging
+        """
+        if not statements:
+            logger.debug(f"  No statements to execute for {description}")
+            return
+        
+        total = len(statements)
+        num_batches = (total + batch_size - 1) // batch_size
+        success_count = 0
+        error_count = 0
+        
+        with self.driver.session(database=self.database) as session:
+            for i in range(0, total, batch_size):
+                batch = statements[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                
+                try:
+                    # Execute all statements in batch within a single transaction
+                    # Using explicit transaction to ensure commit
+                    tx = session.begin_transaction()
+                    try:
+                        for stmt in batch:
+                            tx.run(stmt)
+                        tx.commit()
+                        success_count += len(batch)
+                    except Exception as e:
+                        tx.rollback()
+                        # Log error and try executing statements individually to identify the problem
+                        logger.warning(f"  Batch {batch_num}/{num_batches} failed, retrying statements individually...")
+                        for stmt in batch:
+                            try:
+                                session.run(stmt)
+                                success_count += 1
+                            except Exception as stmt_err:
+                                error_count += 1
+                                logger.error(f"  Failed statement: {stmt[:100]}... Error: {str(stmt_err)[:150]}")
+                    
+                    # Log progress periodically
+                    if batch_num % 10 == 0 or i + batch_size >= total:
+                        logger.info(f"    Progress: {success_count}/{total} successful, {error_count} failed ({batch_num}/{num_batches} batches)")
+                        
+                except Exception as e:
+                    error_count += len(batch)
+                    logger.error(f"  Batch {batch_num} execution failed: {str(e)[:200]}")
+        
+        if error_count > 0:
+            logger.warning(f"  Completed {description}: {success_count} successful, {error_count} failed")
+        else:
+            logger.info(f"  Completed {description}: {success_count} statements executed successfully")
+    
     def _load_classes(self):
 
         # Step 1: Scan all Spring XML files
@@ -1431,34 +1489,30 @@ class InformationGraphBuilder:
         logger.info(" CALL HIERARCHY BUILD COMPLETE")
         logger.info("=" * 80)
     
-        # Step 6: Load Steps and create relationships to Jobs
+        # Step 6: Load Steps and create relationships to Jobs (with optimized batching)
         logger.info(" " + "=" * 80)
-        """Load Steps and create relationships to Jobs"""
+        logger.info(" Loading Steps and Java Call Hierarchy (Optimized Batching)")
+        logger.info("=" * 80)
+        
+        # Get batch size from config
+        batch_size = self.config.get('scan_options', {}).get('batch_size', 500)
+        logger.info(f"  Using batch size: {batch_size} statements per transaction")
+        
         for job_def in enriched_jobs:
-            # Load basic step information
+            # Load Step statements for this job
+            logger.info(f" Loading Steps for Job '{job_def.name}'")
             cypher = generate_cypher(job_def)
-            statements = [s.strip() for s in cypher.split(";") if s.strip()]    
-            with self.driver.session(database=self.database) as session:
-                for stmt in statements:
-                    #logger.info(f"Executing Cypher:: {stmt[:500]}...")
-                    session.run(stmt)
-
-            logger.info(f" Loaded {len(statements)} statements for Steps of job '{job_def.name}'")
+            statements = [s.strip() for s in cypher.split(";") if s.strip()]
             
-            # Load Java call hierarchy
+            logger.info(f"  Collected {len(statements)} statements for Steps. Executing in batches...")
+            self._execute_cypher_statements_batched(statements, batch_size, f"Steps for '{job_def.name}'")
+            
+            # Load hierarchy statements for this job
             hierarchy_cypher = generate_cypher_for_hierarchy(job_def)
             if hierarchy_cypher:
-                logger.info(f"Loading Java call hierarchy for job '{job_def.name}'...")
                 hierarchy_statements = [s.strip() for s in hierarchy_cypher.split(";") if s.strip()]
-                with self.driver.session(database=self.database) as session:
-                    for stmt in hierarchy_statements:
-                        try:
-                            session.run(stmt)
-                        except Exception as e:
-                            logger.error(f"Error executing hierarchy statement: {str(e)[:200]}")
-                            logger.debug(f"Failed statement: {stmt[:500]}")
-                
-                logger.info(f" Loaded {len(hierarchy_statements)} hierarchy statements for job '{job_def.name}'")
+                logger.info(f"  Collected {len(hierarchy_statements)} statements for hierarchy. Executing in batches...")
+                self._execute_cypher_statements_batched(hierarchy_statements, batch_size, f"Hierarchy for '{job_def.name}'")
         
         # Step 7: Create Step -> Bean relationships
         self._create_step_bean_relationships(enriched_jobs)
