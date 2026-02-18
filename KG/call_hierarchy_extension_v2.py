@@ -44,125 +44,10 @@ from classes.DataClasses import (
 )
 
 
-def build_global_bean_registry(spring_xml_files: List[str], original_bean_map: Dict[str, Tuple[str, str]]) -> SpringBeanRegistry:
-    """
-    Step 2: Build comprehensive bean registry with dual indexes.
-    Creates BeanDef objects for all beans with proper dependency tracking.
-    
-    Args:
-        spring_xml_files: List of Spring XML files to process
-        original_bean_map: Original bean map for source path reference
-        
-    Returns:
-        SpringBeanRegistry with all beans indexed
-    """
-    logger.info(" " + "=" * 80)
-    logger.info("Step 2: Building Global Bean Registry")
-    logger.info("=" * 80)
-    
-    registry = SpringBeanRegistry()
-    
-    
-    # Process each XML file
-    for xml_file in spring_xml_files:
-        try:
-            tree = ET.parse(xml_file)
-            root = tree.getroot()
-            
-            ns = {'beans': 'http://www.springframework.org/schema/beans'}
-            
-            for bean_elem in root.findall('.//beans:bean', ns):
-                bean_id = bean_elem.get('id')
-                bean_class = bean_elem.get('class')
-                
-                if not bean_id or not bean_class:
-                    continue
-                
-                # Extract simple class name
-                bean_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
-                
-                # Get source path from original map
-                source_path = None
-                if bean_id in original_bean_map:
-                    source_path = original_bean_map[bean_id][1]
-                
-                # Create BeanDef
-                bean_def = BeanDef(
-                    bean_id=bean_id,
-                    bean_class=bean_class,
-                    bean_class_name=bean_class_name,
-                    class_source_path=source_path,
-                    source_xml_file=xml_file
-                )
-                
-                # Extract property dependencies
-                for prop in bean_elem.findall('beans:property', ns):
-                    prop_name = prop.get('name')
-                    ref_bean_id = prop.get('ref')
-                    prop_value = prop.get('value')
-                    
-                    if prop_name and ref_bean_id:
-                        # Get referenced bean class if available
-                        ref_bean_class = _resolve_dependency_class(ref_bean_id, registry, original_bean_map)
-                        bean_def.property_dependencies[prop_name] = (f"type:ref",f"ref_bean_id:{ref_bean_id}", f"ref_bean_class:{ref_bean_class}")
-                    elif prop_name and prop_value:
-                        # Literal value, no dependency
-                        bean_def.property_dependencies[prop_name] = (f"type:value",f"value:{prop_value}", "")
-                
-                # Extract constructor dependencies
-                for arg in bean_elem.findall('beans:constructor-arg', ns):
-                    ref_bean_id = arg.get('ref')
-                    arg_name = arg.get('name')
-                    arg_value = arg.get('value')
-
-                    if ref_bean_id and not arg_value:
-                        key = arg_name if arg_name else f"constructor_arg_{arg.get('index', '0')}"
-                        ref_bean_class = _resolve_dependency_class(ref_bean_id, registry, original_bean_map)
-                        bean_def.constructor_dependencies[key] = (f"type:ref",f"ref_bean_id:{ref_bean_id}", f"ref_bean_class:{ref_bean_class}")
-                    
-                    elif ref_bean_id and arg_value:
-                        key = arg_name if arg_name else f"constructor_arg_{arg.get('index', '0')}"
-                        bean_def.constructor_dependencies[key] = (f"type:value",f"value:{arg_value}", "")
-
-                # Add to registry
-                registry.add_bean(bean_def)
-                
-        except Exception as e:
-            logger.info(f"  Warning: Failed to process {xml_file}: {e}")
-    
-    # Print statistics
-    stats = registry.get_stats()
-    logger.info(f"   Registry Statistics:")
-    logger.info(f"    Total Beans: {stats['total_beans']}")
-    logger.info(f"    Unique Classes: {stats['unique_classes']}")
-    logger.info(f"    With Source Path: {stats['with_source_path']}")
-    logger.info(f"    Pending Processing: {stats['pending_processing']}")
-    
-    return registry
-
-
-def _resolve_dependency_class(ref_bean_id: str, registry: SpringBeanRegistry, 
-                               original_bean_map: Dict[str, Tuple[str, str]]) -> str:
-    """
-    Helper to resolve dependency bean class.
-    Returns the class name if available, otherwise empty string.
-    """
-    # Try registry first
-    existing_bean = registry.get_by_id(ref_bean_id)
-    if existing_bean:
-        return existing_bean.bean_class
-    
-    # Try original bean map
-    if ref_bean_id in original_bean_map:
-        return original_bean_map[ref_bean_id][0]
-    
-    return ""
-
-
 def enrich_with_call_hierarchy_v2(
     job_defs: List[JobDef],
     registry: SpringBeanRegistry,
-    global_bean_map: Dict[str, Tuple[str, str]]
+    global_bean_map: Dict[str, Tuple[str, str, str]]
 ) -> List[JobDef]:
     """
     Step 4-5: Build call hierarchy using the comprehensive bean registry.
@@ -222,7 +107,7 @@ def enrich_with_call_hierarchy_v2(
     # Recursive parsing of referenced classes
     logger.info("   Recursively Parsing Referenced Classes:")
     iteration = 1
-    max_iterations = 30  # Increased for complex projects
+    max_iterations = 20  # Increased for complex projects
     
     while iteration <= max_iterations:
         logger.info(f"     Iteration {iteration}:")
@@ -249,7 +134,7 @@ def enrich_with_call_hierarchy_v2(
             # Use registry for faster lookup
             source_path = _find_source_from_registry(class_fqn, registry)
             
-            # Fallback to global_bean_map
+            # Fallback to original_bean_map
             if not source_path:
                 source_path = _find_source_from_bean_map_v2(class_fqn, global_bean_map)
             
@@ -352,9 +237,12 @@ def _parse_and_enrich_class(
     
     # Apply bean dependencies from registry
     if bean_id:
-        bean_def = registry.get_by_id(bean_id)
+        composite_key = registry.make_composite_key(bean_id, class_info.fqn)
+        bean_def = registry.get_by_composite_key(composite_key)
+        #bean_def = registry.get_by_id(bean_id)
         if bean_def:
             _apply_bean_dependencies_v2(class_info, bean_def)
+            bean_def.class_info = class_info
     else:
         # Try to find bean by class
         bean_defs = registry.get_by_class(class_info.fqn)
@@ -365,10 +253,12 @@ def _parse_and_enrich_class(
     all_classes[class_info.fqn] = class_info
     
     # Update registry with parsed class info
-    if bean_id:
-        bean_def = registry.get_by_id(bean_id)
-        if bean_def:
-            bean_def.class_info = class_info
+    #if bean_id:
+    #    composite_key = registry.make_composite_key(bean_id, class_info.fqn)
+    #    bean_def = registry.get_by_composite_key(composite_key)
+        #bean_def = registry.get_by_id(bean_id)
+    #    if bean_def:
+    #        bean_def.class_info = class_info
     
     return True
 
@@ -428,9 +318,9 @@ def _find_bean_id_from_registry(class_fqn: str, registry: SpringBeanRegistry) ->
     return None
 
 
-def _find_source_from_bean_map_v2(class_fqn: str, global_bean_map: Dict[str, Tuple[str, str]]) -> Optional[str]:
-    """Fallback: Find source path from original global_bean_map"""
-    for bean_id, (bean_class, source_path) in global_bean_map.items():
+def _find_source_from_bean_map_v2(class_fqn: str, global_bean_map: Dict[str, Tuple[str, str, str]]) -> Optional[str]:
+    """Fallback: Find source path from original global_bean_map with composite keys"""
+    for composite_key, (bean_class, source_path, _) in global_bean_map.items():  # Unpack 3-tuple
         if bean_class == class_fqn and source_path:
             return source_path
     return None

@@ -3,6 +3,7 @@ import os
 from typing import Dict, List, Literal, Tuple
 import xml.etree.ElementTree as ET
 import logging
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +21,49 @@ from classes.DataClasses import (
 ExecNodeKind = Literal["step", "block", "decision"]
 
 
+# ---------- Helper functions for bean lookup ----------
+
+def lookup_bean_by_id(global_bean_map: Dict[str, Tuple[str, str, str]], bean_id: str, current_xml_file: str = "") -> Tuple[str, str]:
+    """
+    Lookup bean in the bean_class_map using composite key format (bean_id___bean_class).
+    Context-aware: prefers beans from the same XML file when multiple beans have the same ID.
+    
+    Args:
+        global_bean_map: Dictionary mapping composite key to (bean_class, source_path, xml_file)
+        bean_id: Bean ID to search for
+        current_xml_file: Current XML file being parsed (for context-aware lookup)
+        
+    Returns:
+        Tuple of (bean_class, source_path) if found, otherwise ("", "")
+    """
+    if not bean_id or not global_bean_map:
+        return ("", "")
+    
+    # Find all beans with matching bean_id
+    matching_beans = []
+    for composite_key, (bean_class, source_path, xml_file) in global_bean_map.items():
+        if composite_key.startswith(f"{bean_id}___"):
+            matching_beans.append((composite_key, bean_class, source_path, xml_file))
+    
+    if not matching_beans:
+        return ("", "")
+    
+    # If only one match, return it
+    if len(matching_beans) == 1:
+        return (matching_beans[0][1], matching_beans[0][2])  # (bean_class, source_path)
+    
+    # Multiple matches - prefer bean from same XML file
+    if current_xml_file:
+        for composite_key, bean_class, source_path, xml_file in matching_beans:
+            if xml_file == current_xml_file:
+                logger.debug(f"Using bean '{composite_key}' from same XML file: {Path(xml_file).name}")
+                return (bean_class, source_path)
+    
+    # No match from same file, return first and log warning
+    logger.warning(f"Multiple beans found with ID '{bean_id}': {[m[0] for m in matching_beans]}. Using first match: {matching_beans[0][0]}")
+    return (matching_beans[0][1], matching_beans[0][2])  # (bean_class, source_path)
+
+
 # ---------- XML parsing ----------
 
 BATCH_NS = "http://www.springframework.org/schema/batch"
@@ -28,13 +72,13 @@ N_BATCH = f"{{{BATCH_NS}}}"
 N_BEANS = f"{{{BEANS_NS}}}"
 
 
-def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None) -> List[JobDef]:
+def parse_spring_batch_xml(xml_path: str, global_bean_map: Dict[str, Tuple[str, str, str]] = None) -> List[JobDef]:
     """
     Parse Spring Batch XML file and extract job definitions.
     
     Args:
         xml_path: Path to the XML file
-        bean_class_map: global bean map.
+        global_bean_map: global bean map with (bean_class, source_path, xml_file) tuples.
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -48,27 +92,27 @@ def parse_spring_batch_xml(xml_path: str, bean_class_map: Dict[str, str] = None)
     else:
         logger.info(f"Found {len(job_els)} <batch:job>(s) in XML: {xml_path}")
         for job_el in job_els:
-            job_defs.append(parse_job_defination(job_el, root, bean_class_map, xml_path))        
+            job_defs.append(parse_job_defination(job_el, root, global_bean_map, xml_path))        
 
         return job_defs
 
-def parse_job_defination(job_el, root, bean_class_map, xml_path: str = "") -> JobDef:
+def parse_job_defination(job_el, root, global_bean_map: Dict[str, Tuple[str, str]], xml_path: str = "") -> JobDef:
     # For now, just pick the first job
     job_id = job_el.get("id", "UNKNOWN_JOB")
     job = JobDef(name=job_id, source_file=xml_path)
 
     # 3) Parse global flows (top-level <batch:flow> directly under <beans>)
-    parse_global_flows(root, job, bean_class_map)
+    parse_global_flows(root, job, global_bean_map, xml_path)
 
     # 4) Parse job content (steps, split, flow refs, decisions, listeners)
-    parse_job_element(job_el, job, bean_class_map)
+    parse_job_element(job_el, job, global_bean_map, xml_path)
 
     # 5) Normalize flow aliases in PRECEDES edges (J1.f1 -> f1)
     normalize_flow_aliases(job)
 
     return job
 
-def parse_global_flows(root: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
+def parse_global_flows(root: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     """Parse top-level <batch:flow id="..."> elements as FLOW blocks."""
     for flow_el in root.findall(f"./{N_BATCH}flow"):
         flow_id = flow_el.get("id")
@@ -87,7 +131,7 @@ def parse_global_flows(root: ET.Element, job: JobDef, bean_class_map: Dict[str, 
                 sid = child.get("id")
                 if not sid:
                     continue
-                parse_step_element(child, job, bean_class_map)
+                parse_step_element(child, job, global_bean_map)
                 step_ids.append(sid)
                 if first_node_id is None:
                     first_node_id = sid
@@ -96,7 +140,7 @@ def parse_global_flows(root: ET.Element, job: JobDef, bean_class_map: Dict[str, 
                 did = child.get("id")
                 if not did:
                     continue
-                parse_decision_element(child, job, bean_class_map)
+                parse_decision_element(child, job, global_bean_map)
                 if first_node_id is None:
                     first_node_id = did
                     first_node_kind = "decision"
@@ -107,7 +151,7 @@ def parse_global_flows(root: ET.Element, job: JobDef, bean_class_map: Dict[str, 
         job.blocks[flow_id] = block
 
 
-def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
+def parse_job_element(job_el: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     """Parse <batch:job> children: steps, split, flow refs, decisions, listeners."""
 
     # Job listeners
@@ -117,8 +161,8 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             ref = l_el.get("ref")
             if not ref:
                 continue
-            # Extract class name and source path from tuple if bean_class_map contains tuples
-            bean_info = bean_class_map.get(ref, ("", ""))
+            # Extract class name and source path from tuple using composite key lookup
+            bean_info = lookup_bean_by_id(global_bean_map, ref, xml_path)
             impl_class = bean_info[0] if isinstance(bean_info, tuple) else bean_info
             source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
             
@@ -145,7 +189,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             sid = child.get("id")
             if not sid:
                 continue
-            parse_step_element(child, job, bean_class_map)
+            parse_step_element(child, job, global_bean_map, xml_path)
             job.job_contains_steps.append(sid)
             if job.job_entry_id is None:
                 job.job_entry_id = sid
@@ -155,7 +199,7 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             split_id = child.get("id")
             if not split_id:
                 continue
-            parse_split_element(child, job, bean_class_map)
+            parse_split_element(child, job, global_bean_map, xml_path)
             job.job_contains_blocks.append(split_id)
             if job.job_entry_id is None:
                 job.job_entry_id = split_id
@@ -190,11 +234,11 @@ def parse_job_element(job_el: ET.Element, job: JobDef, bean_class_map: Dict[str,
             did = child.get("id")
             if not did:
                 continue
-            parse_decision_element(child, job, bean_class_map)
+            parse_decision_element(child, job, global_bean_map, xml_path)
             # We do NOT add decision to CONTAINS; it's only in PRECEDES graph.
 
 
-def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
+def parse_step_element(step_el: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     sid = step_el.get("id")
     if not sid:
         return
@@ -216,10 +260,10 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         processor_bean = chunk_el.get("processor", "")
         writer_bean = chunk_el.get("writer", "")
         
-        # Resolve class names and source paths from bean map
-        reader_info = bean_class_map.get(reader_bean, ("", "")) if reader_bean else ("", "")
-        processor_info = bean_class_map.get(processor_bean, ("", "")) if processor_bean else ("", "")
-        writer_info = bean_class_map.get(writer_bean, ("", "")) if writer_bean else ("", "")
+        # Resolve class names and source paths from bean map using composite key lookup
+        reader_info = lookup_bean_by_id(global_bean_map, reader_bean, xml_path) if reader_bean else ("", "")
+        processor_info = lookup_bean_by_id(global_bean_map, processor_bean, xml_path) if processor_bean else ("", "")
+        writer_info = lookup_bean_by_id(global_bean_map, writer_bean, xml_path) if writer_bean else ("", "")
         
         reader_class = reader_info[0] if isinstance(reader_info, tuple) else (reader_info if reader_info else "")
         reader_source = reader_info[1] if isinstance(reader_info, tuple) else ""
@@ -257,8 +301,8 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
         step_kind = "TASKLET"
         impl_ref = tasklet_el.get("ref", "")
         
-        # Resolve class name and source path from bean map
-        bean_info = bean_class_map.get(impl_ref, ("", "")) if impl_ref else ("", "")
+        # Resolve class name and source path from bean map using composite key lookup
+        bean_info = lookup_bean_by_id(global_bean_map, impl_ref, xml_path) if impl_ref else ("", "")
         class_name = bean_info[0] if isinstance(bean_info, tuple) else (bean_info if bean_info else "")
         source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
         
@@ -302,14 +346,14 @@ def parse_step_element(step_el: ET.Element, job: JobDef, bean_class_map: Dict[st
             )
 
 
-def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
+def parse_decision_element(dec_el: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     did = dec_el.get("id")
     decider = dec_el.get("decider") or ""
     if not did:
         return
 
-    # Resolve decider class name and source path from bean map
-    bean_info = bean_class_map.get(decider, ("", "")) if decider else ("", "")
+    # Resolve decider class name and source path from bean map using composite key lookup
+    bean_info = lookup_bean_by_id(global_bean_map, decider, xml_path) if decider else ("", "")
     class_name = bean_info[0] if isinstance(bean_info, tuple) else (bean_info if bean_info else "")
     source_path = bean_info[1] if isinstance(bean_info, tuple) else ""
     
@@ -335,7 +379,7 @@ def parse_decision_element(dec_el: ET.Element, job: JobDef, bean_class_map: Dict
             )
 
 
-def parse_split_element(split_el: ET.Element, job: JobDef, bean_class_map: Dict[str, str]) -> None:
+def parse_split_element(split_el: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     split_id = split_el.get("id")
     if not split_id:
         return
@@ -379,7 +423,7 @@ def parse_split_element(split_el: ET.Element, job: JobDef, bean_class_map: Dict[
                 sid = child.get("id")
                 if not sid:
                     continue
-                parse_step_element(child, job, bean_class_map)
+                parse_step_element(child, job, global_bean_map)
                 step_ids.append(sid)
                 if first_node_id is None:
                     first_node_id = sid
@@ -388,7 +432,7 @@ def parse_split_element(split_el: ET.Element, job: JobDef, bean_class_map: Dict[
                 did = child.get("id")
                 if not did:
                     continue
-                parse_decision_element(child, job, bean_class_map)
+                parse_decision_element(child, job, global_bean_map)
                 if first_node_id is None:
                     first_node_id = did
                     first_node_kind = "decision"
@@ -587,7 +631,7 @@ if __name__ == "__main__":
     password = "Rohit@123"  # Change this to your Neo4j password
 
 
-def parse_directory(global_bean_map: Dict[str, Tuple[str, str]], xml_files: List[str]) -> List[JobDef]:
+def parse_directory(global_bean_map: Dict[str, Tuple[str, str, str]], xml_files: List[str]) -> List[JobDef]:
     """
     Parse all XML files in directory and subdirectories, returning a single merged JobDef.
     Uses a two-pass approach:

@@ -395,11 +395,14 @@ class InformationGraphBuilder:
         # Create our constraints
         constraints = [
             "CREATE CONSTRAINT node_path_unique IF NOT EXISTS FOR (n:Node) REQUIRE n.path IS UNIQUE",
+            "CREATE CONSTRAINT bean_composite_key_unique IF NOT EXISTS FOR (b:Bean) REQUIRE b.compositeKey IS UNIQUE",
         ]
         
         indexes = [
             "CREATE INDEX node_name_idx IF NOT EXISTS FOR (n:Node) ON (n.name)",
             "CREATE INDEX node_type_idx IF NOT EXISTS FOR (n:Node) ON (n.node_type)",
+            "CREATE INDEX bean_id_idx IF NOT EXISTS FOR (b:Bean) ON (b.beanId)",
+            "CREATE INDEX bean_class_idx IF NOT EXISTS FOR (b:Bean) ON (b.beanClass)",
         ]
         
         with self.driver.session(database=self.database) as session:
@@ -1050,7 +1053,7 @@ class InformationGraphBuilder:
         
         return ""
     
-    def _build_global_bean_map_from_graph(self, spring_xml_files: List[str]) -> Dict[str, Tuple[str, str]]:
+    def _build_global_bean_map_from_graph(self, spring_xml_files: List[str]) -> Dict[str, Tuple[str, str, str]]:
         """
         Build global bean map from Spring XML files using graph for Java source lookups.
         
@@ -1062,12 +1065,12 @@ class InformationGraphBuilder:
             spring_xml_files: List of Spring XML file paths (from graph)
             
         Returns:
-            Dictionary mapping bean ID to tuple of (class_name, source_path)
+            Dictionary mapping composite key (bean_id___bean_class) to tuple of (class_name, source_path, xml_file)
         """
         logger.info(f"  Building Global Bean Map from Graph")
         logger.info("=" * 60)
         
-        global_bean_map: Dict[str, Tuple[str, str]] = {}
+        global_bean_map: Dict[str, Tuple[str, str, str]] = {}
         beans_without_source = []
         
         for xml_file in spring_xml_files:
@@ -1090,18 +1093,20 @@ class InformationGraphBuilder:
                         if not source_path:
                             beans_without_source.append((bean_id, bean_class))
                         
-                        # Add to global map
-                        if bean_id in global_bean_map and global_bean_map[bean_id][0] != bean_class:
-                            logger.info(f"  Warning: Bean ID '{bean_id}' redefined. "
-                                  f"Previous: {global_bean_map[bean_id][0]}, New: {bean_class}")
+                        # Use composite key to avoid overwrites when same bean_id in different XML files
+                        composite_key = f"{bean_id}___{bean_class}"
                         
-                        global_bean_map[bean_id] = (bean_class, source_path)
+                        if composite_key in global_bean_map:
+                            logger.info(f"  Warning: Duplicate bean definition found. "
+                                  f"Bean ID: '{bean_id}', Class: '{bean_class}'")
+                        
+                        global_bean_map[composite_key] = (bean_class, source_path, xml_file)
                 
             except Exception as e:
                 logger.info(f"  Warning: Failed to process {Path(xml_file).name}: {e}")
         
         # Statistics
-        total_with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
+        total_with_source = sum(1 for _, source_path, _ in global_bean_map.values() if source_path)
         logger.info(f"   Bean Map Statistics:")
         logger.info(f"    Total Beans: {len(global_bean_map)}")
         logger.info(f"    With Source Path: {total_with_source}")
@@ -1113,14 +1118,14 @@ class InformationGraphBuilder:
         logger.info("=" * 60)
         return global_bean_map
     
-    def build_global_bean_registry(self, spring_xml_files: List[str], original_bean_map: Dict[str, Tuple[str, str]]) -> SpringBeanRegistry:
+    def build_global_bean_registry(self, spring_xml_files: List[str], global_bean_map: Dict[str, Tuple[str, str, str]]) -> SpringBeanRegistry:
         """
         Step 2: Build comprehensive bean registry with dual indexes.
         Creates BeanDef objects for all beans with proper dependency tracking.
         
         Args:
             spring_xml_files: List of Spring XML files to process
-            original_bean_map: Original bean map for source path reference
+            global_bean_map: Global bean map for source path reference
             
         Returns:
             SpringBeanRegistry with all beans indexed
@@ -1150,10 +1155,17 @@ class InformationGraphBuilder:
                     # Extract simple class name
                     bean_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
                     
-                    # Get source path from original map
+                    # Get source path from original map using composite key
                     source_path = None
-                    if bean_id in original_bean_map:
-                        source_path = original_bean_map[bean_id][1]
+                    composite_key = f"{bean_id}___{bean_class}"
+                    if composite_key in global_bean_map:
+                        source_path = global_bean_map[composite_key][1]  # Index 1 is source_path
+                    else:
+                        # Fallback: search for any entry with matching bean_id
+                        for key in global_bean_map:
+                            if key.startswith(f"{bean_id}___"):
+                                source_path = global_bean_map[key][1]  # Index 1 is source_path
+                                break
                     
                     # Create BeanDef
                     bean_def = BeanDef(
@@ -1172,7 +1184,7 @@ class InformationGraphBuilder:
                         
                         if prop_name and ref_bean_id:
                             # Get referenced bean class if available
-                            ref_bean_class = self._resolve_dependency_class(ref_bean_id, registry, original_bean_map)
+                            ref_bean_class = self._resolve_dependency_class(ref_bean_id, registry, global_bean_map)
                             bean_def.property_dependencies[prop_name] = (f"type:ref",f"ref_bean_id:{ref_bean_id}", f"ref_bean_class:{ref_bean_class}")
                         elif prop_name and prop_value:
                             # Literal value, no dependency
@@ -1192,7 +1204,7 @@ class InformationGraphBuilder:
 
                         if ref_bean_id and not arg_value:
                             key = arg_name if arg_name else f"constructor_arg_{arg.get('index', '0')}"
-                            ref_bean_class = self._resolve_dependency_class(ref_bean_id, registry, original_bean_map)
+                            ref_bean_class = self._resolve_dependency_class(ref_bean_id, registry, global_bean_map)
                             bean_def.constructor_dependencies[key] = (f"type:ref",f"ref_bean_id:{ref_bean_id}", f"ref_bean_class:{ref_bean_class}")
                         
                         elif arg_value and not ref_bean_id:
@@ -1216,7 +1228,7 @@ class InformationGraphBuilder:
         return registry
 
     def _resolve_dependency_class(self, ref_bean_id: str, registry: SpringBeanRegistry, 
-                                original_bean_map: Dict[str, Tuple[str, str]]) -> str:
+                                global_bean_map: Dict[str, Tuple[str, str, str]]) -> str:
         """
         Helper to resolve dependency bean class.
         Returns the class name if available, otherwise empty string.
@@ -1226,13 +1238,15 @@ class InformationGraphBuilder:
         if existing_bean:
             return existing_bean.bean_class
         
-        # Try original bean map
-        if ref_bean_id in original_bean_map:
-            return original_bean_map[ref_bean_id][0]
+        # Try original bean map - search for any entry with matching bean_id
+        # Since map now uses composite key (bean_id___bean_class), we need to search
+        for composite_key, (bean_class, _, _) in global_bean_map.items():  # Unpack 3-tuple
+            if composite_key.startswith(f"{ref_bean_id}___"):
+                return bean_class
         
         return ""
     
-    def _store_bean_map_in_graph(self, bean_map: Dict[str, Tuple[str, str]], spring_xml_files: List[str]):
+    def _store_bean_map_in_graph(self, global_bean_map: Dict[str, Tuple[str, str, str]], spring_xml_files: List[str]):
         """
         Store the global bean map in the information graph as Bean nodes.
         
@@ -1242,14 +1256,14 @@ class InformationGraphBuilder:
         - IMPLEMENTS relationship to JavaClass nodes (if source path exists)
         
         Args:
-            bean_map: Dictionary mapping bean ID to tuple of (class_name, source_path)
+            global_bean_map: Dictionary mapping composite key (bean_id___bean_class) to tuple of (class_name, source_path, xml_file)
             spring_xml_files: List of Spring XML files where beans are defined
         """
         logger.info(f"  Storing Bean Map in Information Graph")
         logger.info("=" * 60)
         
-        # Build reverse map: xml_file -> list of bean_ids
-        xml_to_beans: Dict[str, List[str]] = {}
+        # Build reverse map: xml_file -> list of (bean_id, bean_class) tuples
+        xml_to_beans: Dict[str, List[Tuple[str, str]]] = {}
         for xml_file in spring_xml_files:
             try:
                 tree = ET.parse(xml_file)
@@ -1259,8 +1273,9 @@ class InformationGraphBuilder:
                 beans_in_file = []
                 for bean_el in root.findall('.//beans:bean', ns):
                     bean_id = bean_el.get("id")
-                    if bean_id:
-                        beans_in_file.append(bean_id)
+                    bean_class = bean_el.get("class", "")
+                    if bean_id and bean_class:
+                        beans_in_file.append((bean_id, bean_class))
                 
                 xml_to_beans[xml_file] = beans_in_file
             except Exception as e:
@@ -1271,22 +1286,26 @@ class InformationGraphBuilder:
         beans_without_source = 0
         
         with self.driver.session(database=self.database) as session:
-            for bean_id, (bean_class, source_path) in bean_map.items():
+            for composite_key, (bean_class, source_path, xml_file) in global_bean_map.items():  # Unpack 3-tuple
+                # Extract bean_id from composite key (bean_id___bean_class)
+                bean_id = composite_key.split('___')[0] if '___' in composite_key else composite_key
                 has_source = bool(source_path)
                 
                 # Extract simple class name for easier querying
                 simple_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
                 
-                # Create Bean node
+                # Create Bean node using compositeKey as unique identifier
                 query_create_bean = """
-                MERGE (b:Bean {beanId: $beanId})
+                MERGE (b:Bean {compositeKey: $compositeKey})
                 ON CREATE SET 
+                    b.beanId = $beanId,
                     b.beanClass = $beanClass,
                     b.simpleClassName = $simpleClassName,
                     b.path = $path,
                     b.hasSource = $hasSource,
                     b.created_at = datetime()
                 ON MATCH SET
+                    b.beanId = $beanId,
                     b.beanClass = $beanClass,
                     b.simpleClassName = $simpleClassName,
                     b.path = $path,
@@ -1295,6 +1314,7 @@ class InformationGraphBuilder:
                 """
                 
                 session.run(query_create_bean,
+                    compositeKey=composite_key,
                     beanId=bean_id,
                     beanClass=bean_class,
                     simpleClassName=simple_class_name,
@@ -1310,14 +1330,15 @@ class InformationGraphBuilder:
                 
                 # Create relationship to SpringConfig file where bean is defined
                 for xml_file, beans_in_file in xml_to_beans.items():
-                    if bean_id in beans_in_file:
+                    # Check if this bean (id and class) is defined in this XML file
+                    if any(b_id == bean_id and b_class == bean_class for b_id, b_class in beans_in_file):
                         query_link_xml = """
-                        MATCH (b:Bean {beanId: $beanId})
+                        MATCH (b:Bean {compositeKey: $compositeKey})
                         MATCH (f:SpringConfig {path: $xmlPath})
                         MERGE (b)-[:DEFINED_IN]->(f)
                         """
                         session.run(query_link_xml,
-                            beanId=bean_id,
+                            compositeKey=composite_key,
                             xmlPath=xml_file
                         )
                         break
@@ -1325,17 +1346,17 @@ class InformationGraphBuilder:
                 # Create relationship to JavaClass if source path exists
                 if has_source:
                     query_link_class = """
-                    MATCH (b:Bean {beanId: $beanId})
+                    MATCH (b:Bean {compositeKey: $compositeKey})
                     MATCH (j:JavaClass {path: $path})
                     MERGE (b)-[:IMPLEMENTS]->(j)
                     """
                     try:
                         session.run(query_link_class,
-                            beanId=bean_id,
+                            compositeKey=composite_key,
                             path=source_path
                         )
                     except Exception as e:
-                        logger.debug(f"Could not link bean '{bean_id}' to JavaClass: {e}")
+                        logger.debug(f"Could not link bean '{bean_id}' (compositeKey: '{composite_key}') to JavaClass: {e}")
         
         logger.info(f"   Bean Node Statistics:")
         logger.info(f"    Total Beans Created: {beans_created}")
@@ -1346,7 +1367,8 @@ class InformationGraphBuilder:
     def _create_step_bean_relationships(self, job_defs: List[JobDef]):
         """
         Create USES_BEAN relationships between Step nodes and Bean nodes.
-        Links steps to the beans they reference (impl_bean, reader_bean, writer_bean, processor_bean).
+        Links steps to the beans they reference using composite keys (bean_id___bean_class).
+        This ensures precise matching to the correct bean even when duplicate bean IDs exist.
         """
         logger.info(" " + "=" * 80)
         logger.info(" Creating Step -> Bean Relationships")
@@ -1354,49 +1376,68 @@ class InformationGraphBuilder:
         
         relationships_created = 0
         steps_with_beans = 0
+        beans_not_found = 0
         
         with self.driver.session(database=self.database) as session:
             for job in job_defs:
                 for step_name, step_def in job.steps.items():
                     step_has_beans = False
                     
-                    # For TASKLET steps, link to impl_bean
-                    if step_def.step_kind == "TASKLET" and step_def.impl_bean:
+                    # For TASKLET steps, link to impl_bean using composite key
+                    if step_def.step_kind == "TASKLET" and step_def.impl_bean and step_def.class_name:
+                        # Create composite key: bean_id___bean_class
+                        composite_key = f"{step_def.impl_bean}___{step_def.class_name}"
+                        
                         query = """
                         MATCH (s:Step {name: $step_name})
-                        MATCH (b:Bean {beanId: $bean_id})
+                        MATCH (b:Bean {compositeKey: $composite_key})
                         MERGE (s)-[:USES_BEAN {role: 'tasklet'}]->(b)
+                        RETURN b.compositeKey as compositeKey
                         """
                         try:
-                            session.run(query, step_name=step_name, bean_id=step_def.impl_bean)
-                            relationships_created += 1
-                            step_has_beans = True
-                            logger.debug(f"Linked Step '{step_name}' to Bean '{step_def.impl_bean}' (tasklet)")
+                            result = session.run(query, step_name=step_name, composite_key=composite_key)
+                            bean_found = result.single()
+                            if bean_found:
+                                relationships_created += 1
+                                step_has_beans = True
+                                logger.debug(f"Linked Step '{step_name}' to Bean '{composite_key}' (tasklet)")
+                            else:
+                                beans_not_found += 1
+                                logger.warning(f"Bean not found for Step '{step_name}' with compositeKey '{composite_key}'")
                         except Exception as e:
-                            logger.debug(f"Could not link Step '{step_name}' to Bean '{step_def.impl_bean}': {e}")
+                            logger.debug(f"Could not link Step '{step_name}' to Bean '{composite_key}': {e}")
                     
-                    # For CHUNK steps, link to reader, processor, writer beans
+                    # For CHUNK steps, link to reader, processor, writer beans using composite keys
                     elif step_def.step_kind == "CHUNK":
-                        bean_roles = [
-                            (step_def.reader_bean, 'reader'),
-                            (step_def.processor_bean, 'processor'),
-                            (step_def.writer_bean, 'writer')
+                        bean_configs = [
+                            (step_def.reader_bean, step_def.reader_class, 'reader'),
+                            (step_def.processor_bean, step_def.processor_class, 'processor'),
+                            (step_def.writer_bean, step_def.writer_class, 'writer')
                         ]
                         
-                        for bean_id, role in bean_roles:
-                            if bean_id:
+                        for bean_id, bean_class, role in bean_configs:
+                            if bean_id and bean_class:
+                                # Create composite key: bean_id___bean_class
+                                composite_key = f"{bean_id}___{bean_class}"
+                                
                                 query = """
                                 MATCH (s:Step {name: $step_name})
-                                MATCH (b:Bean {beanId: $bean_id})
+                                MATCH (b:Bean {compositeKey: $composite_key})
                                 MERGE (s)-[:USES_BEAN {role: $role}]->(b)
+                                RETURN b.compositeKey as compositeKey
                                 """
                                 try:
-                                    session.run(query, step_name=step_name, bean_id=bean_id, role=role)
-                                    relationships_created += 1
-                                    step_has_beans = True
-                                    logger.debug(f"Linked Step '{step_name}' to Bean '{bean_id}' ({role})")
+                                    result = session.run(query, step_name=step_name, composite_key=composite_key, role=role)
+                                    bean_found = result.single()
+                                    if bean_found:
+                                        relationships_created += 1
+                                        step_has_beans = True
+                                        logger.debug(f"Linked Step '{step_name}' to Bean '{composite_key}' ({role})")
+                                    else:
+                                        beans_not_found += 1
+                                        logger.warning(f"Bean not found for Step '{step_name}' {role} with compositeKey '{composite_key}'")
                                 except Exception as e:
-                                    logger.debug(f"Could not link Step '{step_name}' to Bean '{bean_id}': {e}")
+                                    logger.debug(f"Could not link Step '{step_name}' to Bean '{composite_key}': {e}")
                     
                     if step_has_beans:
                         steps_with_beans += 1
@@ -1404,12 +1445,15 @@ class InformationGraphBuilder:
         logger.info(f"   Step-Bean Relationship Statistics:")
         logger.info(f"    Steps with Bean references: {steps_with_beans}")
         logger.info(f"    Total relationships created: {relationships_created}")
+        if beans_not_found > 0:
+            logger.warning(f"    Beans not found (warnings logged above): {beans_not_found}")
         logger.info("=" * 60)
     
     def _execute_cypher_statements_batched(self, statements: List[str], batch_size: int, description: str):
         """
         Execute Cypher statements in batches with proper transaction handling.
         Each batch is executed in a single transaction and committed atomically.
+        Optimized for large-scale bulk operations.
         
         Args:
             statements: List of Cypher statements to execute
@@ -1425,6 +1469,8 @@ class InformationGraphBuilder:
         success_count = 0
         error_count = 0
         
+        logger.info(f"  Executing {total} statements in {num_batches} batches of {batch_size}...")
+        
         with self.driver.session(database=self.database) as session:
             for i in range(0, total, batch_size):
                 batch = statements[i:i + batch_size]
@@ -1432,35 +1478,39 @@ class InformationGraphBuilder:
                 
                 try:
                     # Execute all statements in batch within a single transaction
-                    # Using explicit transaction to ensure commit
                     tx = session.begin_transaction()
                     try:
+                        # Execute all statements in the batch
                         for stmt in batch:
                             tx.run(stmt)
                         tx.commit()
                         success_count += len(batch)
                     except Exception as e:
                         tx.rollback()
-                        # Log error and try executing statements individually to identify the problem
-                        logger.warning(f"  Batch {batch_num}/{num_batches} failed, retrying statements individually...")
-                        for stmt in batch:
+                        # On batch failure, retry statements individually to identify problematic ones
+                        logger.warning(f"  Batch {batch_num}/{num_batches} failed: {str(e)[:150]}, retrying individually...")
+                        for j, stmt in enumerate(batch):
                             try:
                                 session.run(stmt)
                                 success_count += 1
                             except Exception as stmt_err:
                                 error_count += 1
-                                logger.error(f"  Failed statement: {stmt[:100]}... Error: {str(stmt_err)[:150]}")
+                                if error_count <= 5:  # Only log first 5 errors to avoid log spam
+                                    logger.error(f"  Statement {i+j+1} failed: {stmt}... Error: {str(stmt_err)[:200]}")
                     
-                    # Log progress periodically
-                    if batch_num % 10 == 0 or i + batch_size >= total:
-                        logger.info(f"    Progress: {success_count}/{total} successful, {error_count} failed ({batch_num}/{num_batches} batches)")
+                    # Log progress less frequently for large batches
+                    log_interval = max(10, num_batches // 10)  # Log every 10% or every 10 batches
+                    if batch_num % log_interval == 0 or i + batch_size >= total:
+                        progress_pct = (success_count * 100) // total
+                        logger.info(f"    Progress: {success_count}/{total} ({progress_pct}%) - {batch_num}/{num_batches} batches, {error_count} errors")
                         
                 except Exception as e:
                     error_count += len(batch)
-                    logger.error(f"  Batch {batch_num} execution failed: {str(e)[:200]}")
+                    logger.error(f"  Batch {batch_num} failed completely: {str(e)[:200]}")
         
+        # Final summary
         if error_count > 0:
-            logger.warning(f"  Completed {description}: {success_count} successful, {error_count} failed")
+            logger.warning(f"  Completed {description}: {success_count} successful, {error_count} failed ({(success_count*100)//(success_count+error_count)}% success rate)")
         else:
             logger.info(f"  Completed {description}: {success_count} statements executed successfully")
     
@@ -1470,20 +1520,20 @@ class InformationGraphBuilder:
         spring_xml_files = self._load_spring_xml_files_from_graph()       
 
         # Step 2: Build original bean map for source paths
-        original_bean_map = self._build_global_bean_map_from_graph(spring_xml_files)
+        global_bean_map = self._build_global_bean_map_from_graph(spring_xml_files)
         
         # Step 2.5: Store bean map in information graph
-        self._store_bean_map_in_graph(original_bean_map, spring_xml_files)
+        self._store_bean_map_in_graph(global_bean_map, spring_xml_files)
         
         # Step 3: Build comprehensive bean registry
-        registry = self.build_global_bean_registry(spring_xml_files, original_bean_map)
+        registry = self.build_global_bean_registry(spring_xml_files, global_bean_map)
         
         # Step 4: Parse batch job definitions
-        job_defs = parse_directory(original_bean_map, spring_xml_files)
+        job_defs = parse_directory(global_bean_map, spring_xml_files)
 
         # Step 5: Enrich with call hierarchy
         # Note: DB operation analysis moved to separate script (db_operation_enricher.py)
-        enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, original_bean_map)
+        enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, global_bean_map)
         
         logger.info(" " + "=" * 80)
         logger.info(" CALL HIERARCHY BUILD COMPLETE")
@@ -1491,28 +1541,42 @@ class InformationGraphBuilder:
     
         # Step 6: Load Steps and create relationships to Jobs (with optimized batching)
         logger.info(" " + "=" * 80)
-        logger.info(" Loading Steps and Java Call Hierarchy (Optimized Batching)")
+        logger.info(" Loading Steps and Java Call Hierarchy (Bulk Collection + Batching)")
         logger.info("=" * 80)
         
         # Get batch size from config
         batch_size = self.config.get('scan_options', {}).get('batch_size', 500)
         logger.info(f"  Using batch size: {batch_size} statements per transaction")
         
+        # OPTIMIZATION: Collect ALL statements from ALL jobs first
+        logger.info(f"  Collecting statements from {len(enriched_jobs)} jobs...")
+        all_step_statements = []
+        all_hierarchy_statements = []
+        
         for job_def in enriched_jobs:
-            # Load Step statements for this job
-            logger.info(f" Loading Steps for Job '{job_def.name}'")
+            # Collect Step statements
             cypher = generate_cypher(job_def)
             statements = [s.strip() for s in cypher.split(";") if s.strip()]
+            all_step_statements.extend(statements)
             
-            logger.info(f"  Collected {len(statements)} statements for Steps. Executing in batches...")
-            self._execute_cypher_statements_batched(statements, batch_size, f"Steps for '{job_def.name}'")
-            
-            # Load hierarchy statements for this job
+            # Collect hierarchy statements
             hierarchy_cypher = generate_cypher_for_hierarchy(job_def)
             if hierarchy_cypher:
                 hierarchy_statements = [s.strip() for s in hierarchy_cypher.split(";") if s.strip()]
-                logger.info(f"  Collected {len(hierarchy_statements)} statements for hierarchy. Executing in batches...")
-                self._execute_cypher_statements_batched(hierarchy_statements, batch_size, f"Hierarchy for '{job_def.name}'")
+                all_hierarchy_statements.extend(hierarchy_statements)
+        
+        logger.info(f"  Collected {len(all_step_statements)} Step statements from all jobs")
+        logger.info(f"  Collected {len(all_hierarchy_statements)} Hierarchy statements from all jobs")
+        
+        # Execute all Step statements in bulk
+        if all_step_statements:
+            logger.info(f"  Executing ALL Step statements in batches...")
+            self._execute_cypher_statements_batched(all_step_statements, batch_size, "All Steps")
+        
+        # Execute all Hierarchy statements in bulk
+        if all_hierarchy_statements:
+            logger.info(f"  Executing ALL Hierarchy statements in batches...")
+            self._execute_cypher_statements_batched(all_hierarchy_statements, batch_size, "All Hierarchies")
         
         # Step 7: Create Step -> Bean relationships
         self._create_step_bean_relationships(enriched_jobs)
