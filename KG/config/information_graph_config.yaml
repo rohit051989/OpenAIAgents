@@ -116,7 +116,7 @@ scan_options:
   parse_java_classes: true  # Parse Java files to extract ClassInfo
   extract_imports: true
   extract_methods: true
-  batch_size: 2000  # Number of Cypher statements to execute per transaction (1000-3000 recommended for large datasets)
+  batch_size: 10000  # Number of Cypher statements to execute per transaction (10000-25000 recommended for VDI/large datasets)
 
 # Class data configuration
 class_data:

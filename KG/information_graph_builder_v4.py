@@ -28,6 +28,7 @@ from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from neo4j_direct_step_loader import parse_directory
 from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -1452,8 +1453,10 @@ class InformationGraphBuilder:
     def _execute_cypher_statements_batched(self, statements: List[str], batch_size: int, description: str):
         """
         Execute Cypher statements in batches with proper transaction handling.
-        Each batch is executed in a single transaction and committed atomically.
-        Optimized for large-scale bulk operations.
+        HIGHLY OPTIMIZED for VDI/low-resource environments:
+        - Large batch sizes (10K-25K) to minimize transaction overhead
+        - Minimal logging to reduce I/O wait time
+        - Fast-fail on batch errors (no individual retry to save time)
         
         Args:
             statements: List of Cypher statements to execute
@@ -1461,7 +1464,6 @@ class InformationGraphBuilder:
             description: Description for logging
         """
         if not statements:
-            logger.debug(f"  No statements to execute for {description}")
             return
         
         total = len(statements)
@@ -1469,7 +1471,8 @@ class InformationGraphBuilder:
         success_count = 0
         error_count = 0
         
-        logger.info(f"  Executing {total} statements in {num_batches} batches of {batch_size}...")
+        logger.info(f"  Executing {total:,} statements in {num_batches} batches of {batch_size:,} for {description}")
+        start_time = time.time()
         
         with self.driver.session(database=self.database) as session:
             for i in range(0, total, batch_size):
@@ -1477,42 +1480,38 @@ class InformationGraphBuilder:
                 batch_num = i // batch_size + 1
                 
                 try:
-                    # Execute all statements in batch within a single transaction
+                    # Execute entire batch in single transaction (fast path)
                     tx = session.begin_transaction()
                     try:
-                        # Execute all statements in the batch
                         for stmt in batch:
                             tx.run(stmt)
                         tx.commit()
                         success_count += len(batch)
                     except Exception as e:
                         tx.rollback()
-                        # On batch failure, retry statements individually to identify problematic ones
-                        logger.warning(f"  Batch {batch_num}/{num_batches} failed: {str(e)[:150]}, retrying individually...")
-                        for j, stmt in enumerate(batch):
-                            try:
-                                session.run(stmt)
-                                success_count += 1
-                            except Exception as stmt_err:
-                                error_count += 1
-                                if error_count <= 5:  # Only log first 5 errors to avoid log spam
-                                    logger.error(f"  Statement {i+j+1} failed: {stmt}... Error: {str(stmt_err)[:200]}")
+                        error_count += len(batch)
+                        # Log first failure only to avoid log spam
+                        if error_count == len(batch):  # First batch failure
+                            logger.error(f"  Batch {batch_num} failed: {str(e)[:200]}. Subsequent batch errors will be counted but not logged.")
                     
-                    # Log progress less frequently for large batches
-                    log_interval = max(10, num_batches // 10)  # Log every 10% or every 10 batches
-                    if batch_num % log_interval == 0 or i + batch_size >= total:
-                        progress_pct = (success_count * 100) // total
-                        logger.info(f"    Progress: {success_count}/{total} ({progress_pct}%) - {batch_num}/{num_batches} batches, {error_count} errors")
+                    # Log progress only every 20 batches or 5% to minimize I/O
+                    if batch_num % max(20, num_batches // 20) == 0 or i + batch_size >= total:
+                        elapsed = time.time() - start_time
+                        rate = success_count / elapsed if elapsed > 0 else 0
+                        eta = (total - success_count) / rate if rate > 0 else 0
+                        logger.info(f"    [{batch_num}/{num_batches}] {success_count:,}/{total:,} ({success_count*100//total}%) | {rate:.0f} stmt/s | ETA: {eta/60:.1f}m")
                         
                 except Exception as e:
                     error_count += len(batch)
-                    logger.error(f"  Batch {batch_num} failed completely: {str(e)[:200]}")
         
-        # Final summary
+        # Final summary with timing
+        elapsed = time.time() - start_time
+        rate = success_count / elapsed if elapsed > 0 else 0
+        
         if error_count > 0:
-            logger.warning(f"  Completed {description}: {success_count} successful, {error_count} failed ({(success_count*100)//(success_count+error_count)}% success rate)")
+            logger.warning(f"  Completed {description}: {success_count:,} successful, {error_count:,} failed ({success_count*100//(success_count+error_count)}%) | {elapsed/60:.1f}m | {rate:.0f} stmt/s")
         else:
-            logger.info(f"  Completed {description}: {success_count} statements executed successfully")
+            logger.info(f"  Completed {description}: {success_count:,} statements in {elapsed/60:.1f} minutes ({rate:.0f} statements/second)")
     
     def _load_classes(self):
 
