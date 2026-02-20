@@ -103,9 +103,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         
         lines.append(
             f"MERGE (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-            f"SET c.className = '{escaped_class_name}', "
+            f"ON CREATE SET c.className = '{escaped_class_name}', "
             f"c.package = '{escaped_package}', "
             f"c.isDAOClass = {is_dao_class_value}, "
+            f"c.isShellExecutorClass = {is_shell_executor_value} "
+            f"ON MATCH SET c.isDAOClass = {is_dao_class_value}, "
             f"c.isShellExecutorClass = {is_shell_executor_value};"
         )
         
@@ -236,9 +238,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                     
                     lines.append(
                         f"MERGE (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
-                        f"SET cc.className = '{escaped_called_class_name}', "
+                        f"ON CREATE SET cc.className = '{escaped_called_class_name}', "
                         f"cc.package = '{escaped_called_package}', "
                         f"cc.isDAOClass = {is_dao_class_called_value}, "
+                        f"cc.isShellExecutorClass = {is_shell_executor_called_value} "
+                        f"ON MATCH SET cc.isDAOClass = {is_dao_class_called_value}, "
                         f"cc.isShellExecutorClass = {is_shell_executor_called_value};"
                     )
                     
@@ -843,7 +847,7 @@ class InformationGraphBuilder:
             stats['config_files'] += 1
     
     def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str):
-        """Create a JavaClass node with package property, isDAOClass flag, isShellExecutorClass flag, and all its methods."""
+        """Create a Java class node with class metadata."""
         # Determine if this is a DAO class
         dao_analyzer = DAOAnalyzer()
         is_dao_class = dao_analyzer._is_dao_class(class_info)
@@ -852,13 +856,15 @@ class InformationGraphBuilder:
         shell_analyzer = ShellScriptAnalyzer()
         is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
         
+        # MERGE on fqn (unique identifier) to avoid duplicates
+        # This respects the unique constraint on JavaClass.fqn
         query = """
-        MERGE (n:Node:File:JavaClass {path: $path})
+        MERGE (n:Node:File:JavaClass {fqn: $fqn})
         ON CREATE SET 
+            n.path = $path,
             n.name = $name,
             n.node_type = 'File',
             n.className = $className,
-            n.fqn = $fqn,
             n.package = $package,
             n.extends = $extends,
             n.implements = $implements,
@@ -875,30 +881,33 @@ class InformationGraphBuilder:
         """
         
         with self.driver.session(database=self.database) as session:
-            result = session.run(query,
-                path=class_info.source_path,
-                name=Path(class_info.source_path).name,
-                className=class_info.class_name,
-                fqn=class_info.fqn,
-                package=class_info.package,
-                extends=class_info.extends or "",
-                implements=class_info.implements,
-                imports=class_info.imports,
-                fields=json.dumps(class_info.fields),
-                method_count=len(class_info.methods),
-                isDAOClass=is_dao_class,
-                isShellExecutorClass=is_shell_executor,
-                parent_path=parent_path
-            )
-            
-            # Check if the query succeeded
-            record = result.single()
-            if not record:
-                logger.info(f"WARNING: Parent not found for {class_info.class_name} at {class_info.source_path}")
-                return
-            
-            # Create JavaMethod nodes and HAS_METHOD relationships for all methods
-            self._create_methods_for_class(class_info, session)
+            try:
+                result = session.run(query,
+                    path=class_info.source_path,
+                    name=Path(class_info.source_path).name,
+                    className=class_info.class_name,
+                    fqn=class_info.fqn,
+                    package=class_info.package,
+                    extends=class_info.extends or "",
+                    implements=class_info.implements,
+                    imports=class_info.imports,
+                    fields=json.dumps(class_info.fields),
+                    method_count=len(class_info.methods),
+                    isDAOClass=is_dao_class,
+                    isShellExecutorClass=is_shell_executor,
+                    parent_path=parent_path
+                )
+                
+                # Verify successful creation
+                record = result.single()
+                if not record:
+                    logger.warning(f"Failed to create/link JavaClass node for {class_info.fqn}")
+                    return
+                
+                # Create JavaMethod nodes and HAS_METHOD relationships for all methods
+                self._create_methods_for_class(class_info, session)
+            except Exception as e:
+                logger.warning(f"Failed to create JavaClass node for {class_info.fqn}: {str(e)[:200]}")
     
     def _create_methods_for_class(self, class_info: ClassInfo, session):
         """Create JavaMethod nodes and HAS_METHOD relationships for all methods in a class."""
@@ -965,10 +974,11 @@ class InformationGraphBuilder:
         logger.info(f"  SHOT 2: Marking package folders")
         logger.info("=" * 60)
         
-        # Find all JavaClass nodes with packages
+        # Find all JavaClass nodes with packages and paths
         query = """
         MATCH (java:JavaClass)
         WHERE java.package IS NOT NULL AND java.package <> ''
+          AND java.path IS NOT NULL
         RETURN java.path as path, java.package as package
         """
         
