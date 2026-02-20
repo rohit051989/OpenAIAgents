@@ -18,7 +18,7 @@ Date: 2025-01-03
 
 import pandas as pd
 from neo4j import GraphDatabase
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import logging
 import yaml
 import os
@@ -391,23 +391,24 @@ class Neo4jLoader:
         
         return ""
     
-    def _build_global_bean_map_from_graph(self, spring_xml_files: List[str]) -> Dict[str, tuple]:
+    def _build_global_bean_map_from_graph(self, spring_xml_files: List[str]) -> Dict[str, Tuple[str, str, str]]:
         """
         Build a global bean map from Spring XML files using information graph for source paths.
         
         This method parses Spring XML files but queries the information graph
         to resolve Java source file paths instead of scanning the file system.
+        Uses composite keys to prevent overwrites when same bean_id appears in different XML files.
         
         Args:
             spring_xml_files: List of Spring XML file paths
             
         Returns:
-            Dictionary mapping bean ID to tuple of (class_name, source_path)
+            Dictionary mapping composite key (bean_id___bean_class) to tuple of (class_name, source_path, xml_file)
         """
         import xml.etree.ElementTree as ET
         
         logger.info("Building global bean map using information graph...")
-        global_bean_map = {}
+        global_bean_map: Dict[str, Tuple[str, str, str]] = {}
         
         BEANS_NS = "http://www.springframework.org/schema/beans"
         N_BEANS = f"{{{BEANS_NS}}}"
@@ -423,15 +424,22 @@ class Neo4jLoader:
                     bean_class = bean_el.get("class", "")
                     
                     if bean_id and bean_class:
+                        # Use composite key to avoid overwrites when same bean_id in different XML files
+                        composite_key = f"{bean_id}___{bean_class}"
+                        
+                        if composite_key in global_bean_map:
+                            logger.info(f"  Warning: Duplicate bean definition found. "
+                                  f"Bean ID: '{bean_id}', Class: '{bean_class}'")
+                        
                         # Query information graph for source path
                         source_path = self._find_java_source_from_graph(bean_class)
-                        global_bean_map[bean_id] = (bean_class, source_path)
+                        global_bean_map[composite_key] = (bean_class, source_path, xml_file)
                         
             except Exception as e:
                 logger.warning(f"Failed to process {xml_file}: {e}")
         
         # Count beans with source paths
-        with_source = sum(1 for _, source_path in global_bean_map.values() if source_path)
+        with_source = sum(1 for _, source_path, _ in global_bean_map.values() if source_path)
         logger.info(f"  Built bean map: {len(global_bean_map)} beans, {with_source} with source paths")
         
         return global_bean_map

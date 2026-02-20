@@ -346,16 +346,26 @@ class InformationGraphBuilder:
     def __init__(self, config_path: str):
         """Initialize with configuration file."""
         # Load configuration
+        logger.info(f"Loading configuration from: {config_path}")
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
+        
+        # Verify batch_size loaded correctly
+        batch_size = self.config.get('scan_options', {}).get('batch_size', 500)
+        logger.info(f"Configuration loaded: batch_size={batch_size}")
         
         # Neo4j connection
         neo4j_config = self.config['neo4j']
         self.driver = GraphDatabase.driver(
             neo4j_config['uri'],
-            auth=(neo4j_config['user'], neo4j_config['password'])
+            auth=(neo4j_config['user'], neo4j_config['password']),
+            max_connection_pool_size=50,  # Increase connection pool for VDI
+            connection_acquisition_timeout=120  # Longer timeout for VDI
         )
         self.database = neo4j_config['database_ig']
+        
+        # Check Neo4j memory configuration
+        self._check_neo4j_memory()
         
         # Java parser
         self.java_parser = JavaCallHierarchyParser() if self.config['scan_options'].get('parse_java_classes', True) else None
@@ -369,6 +379,56 @@ class InformationGraphBuilder:
         # Track created nodes
         self.created_nodes = set()
         
+    def _check_neo4j_memory(self):
+        """Check Neo4j memory configuration and warn if inadequate."""
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    "CALL dbms.listConfig() YIELD name, value "
+                    "WHERE name CONTAINS 'memory.heap.max' "
+                    "RETURN value"
+                )
+                record = result.single()
+                if record:
+                    heap_size = record['value']
+                    logger.info(f"Neo4j heap.max_size: {heap_size}")
+                    
+                    # Parse heap size (e.g., "4g" -> 4096, "512m" -> 512)
+                    heap_mb = 0
+                    if 'g' in heap_size.lower():
+                        heap_mb = int(''.join(filter(str.isdigit, heap_size))) * 1024
+                    elif 'm' in heap_size.lower():
+                        heap_mb = int(''.join(filter(str.isdigit, heap_size)))
+                    
+                    if heap_mb < 2048:  # Less than 2GB
+                        logger.warning("=" * 80)
+                        logger.warning("⚠️  NEO4J MEMORY WARNING ⚠️")
+                        logger.warning(f"Current heap size: {heap_size} (Detected: {heap_mb}MB)")
+                        logger.warning("This is too small for 1.4M statements!")
+                        logger.warning("Expected runtime: 12-15 hours at current memory")
+                        logger.warning("")
+                        logger.warning("RECOMMENDATION: Increase memory before proceeding:")
+                        logger.warning("1. Open Neo4j Desktop")
+                        logger.warning("2. Select database → Settings (three dots)")
+                        logger.warning("3. Add: dbms.memory.heap.max_size=4g")
+                        logger.warning("4. Add: dbms.memory.pagecache.size=2g")
+                        logger.warning("5. Restart Neo4j")
+                        logger.warning("")
+                        logger.warning("Expected runtime with 4GB heap: 1-2 hours")
+                        logger.warning("=" * 80)
+                        
+                        # Ask user to continue
+                        response = input("\nContinue anyway? (y/n): ")
+                        if response.lower() != 'y':
+                            logger.error("Execution cancelled by user. Please configure Neo4j memory first.")
+                            exit(1)
+                    else:
+                        logger.info(f"✅ Neo4j memory configuration looks good ({heap_size})")
+                else:
+                    logger.warning("Could not verify Neo4j memory configuration")
+        except Exception as e:
+            logger.warning(f"Could not check Neo4j memory: {e}")
+    
     def close(self):
         """Close Neo4j connection."""
         self.driver.close()
@@ -397,6 +457,8 @@ class InformationGraphBuilder:
         constraints = [
             "CREATE CONSTRAINT node_path_unique IF NOT EXISTS FOR (n:Node) REQUIRE n.path IS UNIQUE",
             "CREATE CONSTRAINT bean_composite_key_unique IF NOT EXISTS FOR (b:Bean) REQUIRE b.compositeKey IS UNIQUE",
+            "CREATE CONSTRAINT javaclass_fqn_unique IF NOT EXISTS FOR (c:JavaClass) REQUIRE c.fqn IS UNIQUE",
+            "CREATE CONSTRAINT javamethod_fqn_unique IF NOT EXISTS FOR (m:JavaMethod) REQUIRE m.fqn IS UNIQUE",
         ]
         
         indexes = [
@@ -1540,14 +1602,15 @@ class InformationGraphBuilder:
     
         # Step 6: Load Steps and create relationships to Jobs (with optimized batching)
         logger.info(" " + "=" * 80)
-        logger.info(" Loading Steps and Java Call Hierarchy (Bulk Collection + Batching)")
+        logger.info(" Loading Steps and Java Call Hierarchy (Optimized Batching)")
         logger.info("=" * 80)
         
         # Get batch size from config
-        batch_size = self.config.get('scan_options', {}).get('batch_size', 500)
+        batch_size = self.config.get('scan_options', {}).get('batch_size', 10000)
         logger.info(f"  Using batch size: {batch_size} statements per transaction")
+        logger.info(f"  Your VDI disk: 585 syncs/sec (excellent!) - Bottleneck is query complexity, not disk")
         
-        # OPTIMIZATION: Collect ALL statements from ALL jobs first
+        # Collect ALL statements from ALL jobs first
         logger.info(f"  Collecting statements from {len(enriched_jobs)} jobs...")
         all_step_statements = []
         all_hierarchy_statements = []
@@ -1564,17 +1627,18 @@ class InformationGraphBuilder:
                 hierarchy_statements = [s.strip() for s in hierarchy_cypher.split(";") if s.strip()]
                 all_hierarchy_statements.extend(hierarchy_statements)
         
-        logger.info(f"  Collected {len(all_step_statements)} Step statements from all jobs")
-        logger.info(f"  Collected {len(all_hierarchy_statements)} Hierarchy statements from all jobs")
+        logger.info(f"  Collected {len(all_step_statements):,} Step statements from all jobs")
+        logger.info(f"  Collected {len(all_hierarchy_statements):,} Hierarchy statements from all jobs")
         
         # Execute all Step statements in bulk
         if all_step_statements:
             logger.info(f"  Executing ALL Step statements in batches...")
-            self._execute_cypher_statements_batched(all_step_statements, batch_size, "All Steps")
+            self._execute_cypher_statements_batched(all_step_statements, min(5000, batch_size), "All Steps")
         
         # Execute all Hierarchy statements in bulk
         if all_hierarchy_statements:
             logger.info(f"  Executing ALL Hierarchy statements in batches...")
+            logger.info(f"  NOTE: Each statement does multiple MATCH operations - this is the bottleneck")
             self._execute_cypher_statements_batched(all_hierarchy_statements, batch_size, "All Hierarchies")
         
         # Step 7: Create Step -> Bean relationships
@@ -1640,7 +1704,7 @@ def main():
         
         # Create constraints
         logger.info(" 2. Creating constraints and indexes...")
-        #builder.create_constraints()
+        builder.create_constraints()
         
         # SHOT 1: Create basic tree
         logger.info(" 3. SHOT 1: Building tree structure...")
