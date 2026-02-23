@@ -16,17 +16,21 @@ logger = logging.getLogger(__name__)
 class DAOAnalyzer:
     """Analyzes DAO methods to extract database operations"""
 
-    def __init__(self, rules_config_path: str = None):
+    def __init__(self, rules_config_path: str = None, neo4j_driver=None, neo4j_database: str = None):
         """
-        Initialize DAOAnalyzer with externalized rules.
+        Initialize DAOAnalyzer with externalized rules and optional Neo4j access.
         
         Args:
             rules_config_path: Path to DAO analysis rules YAML file
+            neo4j_driver: Optional Neo4j driver for querying information graph
+            neo4j_database: Optional Neo4j database name for queries
         """
         if rules_config_path is None:
             rules_config_path = Path(__file__).parent.parent / 'config' / 'dao_analysis_rules.yaml'
         
         self.rules = self._load_rules(rules_config_path)
+        self.neo4j_driver = neo4j_driver
+        self.neo4j_database = neo4j_database
         
         # Extract frequently used rules for performance
         self.db_import_patterns = self.rules.get('db_import_patterns', [])
@@ -426,7 +430,44 @@ class DAOAnalyzer:
         return None
 
     def _find_constant_source_file(self, constant_fqn: str, current_source_path: str) -> Optional[str]:
-        """Find the source file for a constant class"""
+        """Find the source file for a constant class.
+        
+        First tries to query the information graph (if available), then falls back to hardcoded path resolution.
+        
+        Args:
+            constant_fqn: Fully qualified name of the constant class
+            current_source_path: Path to the current source file (for fallback)
+            
+        Returns:
+            Path to the constant source file, or None if not found
+        """
+        # Try querying information graph first (OPTIMIZED)
+        if self.neo4j_driver and self.neo4j_database:
+            try:
+                query = """
+                MATCH (n:JavaClass {fqn: $fqn})
+                RETURN n.path as path
+                LIMIT 1
+                """
+                
+                with self.neo4j_driver.session(database=self.neo4j_database) as session:
+                    result = session.run(query, fqn=constant_fqn)
+                    record = result.single()
+                    
+                    if record and record['path']:
+                        path = record['path']
+                        if Path(path).exists():
+                            logger.info(f"        ✅ Found constant source via graph: {constant_fqn}")
+                            return path
+                        else:
+                            logger.info(f"        ⚠️  Graph returned path but file doesn't exist: {path}")
+            except Exception as e:
+                logger.debug(f"Failed to query graph for constant {constant_fqn}: {e}")
+            # If graph query failed or didn't find the file, fall through to hardcoded logic
+        
+        # Fallback: Original hardcoded path resolution logic
+        logger.info(f"        🔍 Using fallback path resolution for {constant_fqn}")
+        
         # Convert FQN to relative path
         relative_path = constant_fqn.replace('.', '/') + '.java'
 

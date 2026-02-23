@@ -388,7 +388,10 @@ class DBOperationEnricher:
                 self.driver
             )
         else:
-            analyzer = DAOAnalyzer()
+            analyzer = DAOAnalyzer(
+                neo4j_driver=self.driver,
+                neo4j_database=self.database
+            )
         
         # Step 3: Process each DAO class
         total_methods = 0
@@ -485,7 +488,10 @@ class DBOperationEnricher:
                 content = f.read()
             
             # Use DAOAnalyzer's method extraction
-            analyzer = DAOAnalyzer()
+            analyzer = DAOAnalyzer(
+                neo4j_driver=self.driver,
+                neo4j_database=self.database
+            )
             return analyzer._extract_method_source(content, method_name)
         except Exception as e:
             logger.warning(f"Failed to read method source: {e}")
