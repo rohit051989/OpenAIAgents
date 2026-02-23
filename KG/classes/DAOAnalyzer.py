@@ -347,6 +347,16 @@ class DAOAnalyzer:
                     resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
                     if resolved_query:
                         return resolved_query
+                
+                elif pattern_type == 'PREPARED_STATEMENT_CONSTANT' and class_info:
+                    const_class_group = pattern_config.get('constant_class_group', 2)
+                    const_name_group = pattern_config.get('constant_name_group', 3)
+                    constant_class = match.group(const_class_group)
+                    constant_name = match.group(const_name_group)
+                    logger.info(f"        Detected PreparedStatement constant reference: {constant_class}.{constant_name}")
+                    resolved_query = self._resolve_sql_constant(constant_class, constant_name, class_info)
+                    if resolved_query:
+                        return resolved_query
             
             except (re.error, IndexError) as e:
                 continue
