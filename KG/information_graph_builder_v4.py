@@ -650,8 +650,10 @@ class InformationGraphBuilder:
         
         self.created_nodes.add(root_path_str)
         
-        # Recursively scan everything
-        self._scan_recursive_shot1(root, root_path_str, stats)
+        # Use single session for entire tree scan (much faster!)
+        with self.driver.session(database=self.database) as session:
+            # Recursively scan everything
+            self._scan_recursive_shot1(root, root_path_str, stats, session)
         
         logger.info(" " + "=" * 80)
         logger.info(" Shot 1 completed!")
@@ -666,8 +668,9 @@ class InformationGraphBuilder:
         logger.info(f"    Config Files: {stats['config_files']}")
         logger.info("=" * 60)
     
-    def _scan_recursive_shot1(self, current_path: Path, parent_path_str: str, stats: Dict, depth: int = 0):
-        """Recursively scan and create basic tree structure."""
+    def _scan_recursive_shot1(self, current_path: Path, parent_path_str: str, stats: Dict, session, depth: int = 0):
+        """Recursively scan and create basic tree structure. 
+        OPTIMIZED: Reuses single session instead of opening new sessions for each node."""
         max_depth = self.config['scan_options'].get('max_depth', 20)
         
         if depth > max_depth:
@@ -697,18 +700,19 @@ class InformationGraphBuilder:
             
             if item.is_file():
                 # Create file node
-                self._create_file_shot1(item, parent_path_str, stats)
+                self._create_file_shot1(item, parent_path_str, stats, session)
             else:
                 # Create folder node
-                self._create_folder_shot1(item, parent_path_str, stats)
+                self._create_folder_shot1(item, parent_path_str, stats, session)
                 # Recurse into folder
-                self._scan_recursive_shot1(item, item_path_str, stats, depth + 1)
+                self._scan_recursive_shot1(item, item_path_str, stats, session, depth + 1)
             
             # Mark as created after successful creation
             self.created_nodes.add(item_path_str)
     
-    def _create_folder_shot1(self, folder_path: Path, parent_path: str, stats: Dict):
-        """Create a folder node - mark as Repository or Project if applicable."""
+    def _create_folder_shot1(self, folder_path: Path, parent_path: str, stats: Dict, session):
+        """Create a folder node - mark as Repository or Project if applicable.
+        OPTIMIZED: Reuses provided session instead of opening new one."""
         # Use absolute path consistently
         path_str = str(folder_path.absolute())
         
@@ -738,16 +742,16 @@ class InformationGraphBuilder:
         RETURN n
         """
         
-        with self.driver.session(database=self.database) as session:
-            session.run(query,
-                path=path_str,
-                name=folder_path.name,
-                node_type=folder_type,
-                parent_path=parent_path
-            )
+        session.run(query,
+            path=path_str,
+            name=folder_path.name,
+            node_type=folder_type,
+            parent_path=parent_path
+        )
     
-    def _create_file_shot1(self, file_path: Path, parent_path: str, stats: Dict):
-        """Create a file node."""
+    def _create_file_shot1(self, file_path: Path, parent_path: str, stats: Dict, session):
+        """Create a file node.
+        OPTIMIZED: Reuses provided session instead of opening new one."""
         file_types = self.identify_file_type(file_path)
         
         # Check if it's a Java class
@@ -759,19 +763,20 @@ class InformationGraphBuilder:
             class_info = self.java_parser.parse_java_file(absolute_path)
             
             if class_info:
-                self._create_java_class_shot1(class_info, parent_path)
+                self._create_java_class_shot1(class_info, parent_path, session)
                 stats['java_classes'] += 1
                 if 'JavaTestClass' in file_types:
                     stats['test_classes'] += 1
             else:
                 # Failed to parse, create regular file
-                self._create_regular_file_shot1(file_path, parent_path, file_types, stats)
+                self._create_regular_file_shot1(file_path, parent_path, file_types, stats, session)
         else:
             # Regular file
-            self._create_regular_file_shot1(file_path, parent_path, file_types, stats)
+            self._create_regular_file_shot1(file_path, parent_path, file_types, stats, session)
     
-    def _create_regular_file_shot1(self, file_path: Path, parent_path: str, file_types: List[str], stats: Dict):
-        """Create a regular file node."""
+    def _create_regular_file_shot1(self, file_path: Path, parent_path: str, file_types: List[str], stats: Dict, session):
+        """Create a regular file node.
+        OPTIMIZED: Reuses provided session instead of opening new one."""
         safe_types = [ft.replace(' ', '').replace('-', '') for ft in file_types if ft]
         labels = 'Node:File:' + ':'.join(safe_types) if safe_types else 'Node:File'
         
@@ -805,16 +810,15 @@ class InformationGraphBuilder:
             RETURN n
             """
             
-            with self.driver.session(database=self.database) as session:
-                session.run(query,
-                    path=path_str,
-                    name=file_path.name,
-                    extension=file_path.suffix,
-                    size=file_size,
-                    file_types=','.join(file_types),
-                    isMainConfig=is_main_config,
-                    parent_path=parent_path
-                )
+            session.run(query,
+                path=path_str,
+                name=file_path.name,
+                extension=file_path.suffix,
+                size=file_size,
+                file_types=','.join(file_types),
+                isMainConfig=is_main_config,
+                parent_path=parent_path
+            )
         else:
             query = f"""
             MERGE (n:{labels} {{path: $path}})
@@ -831,23 +835,23 @@ class InformationGraphBuilder:
             RETURN n
             """
             
-            with self.driver.session(database=self.database) as session:
-                session.run(query,
-                    path=path_str,
-                    name=file_path.name,
-                    extension=file_path.suffix,
-                    size=file_size,
-                    file_types=','.join(file_types),
-                    parent_path=parent_path
-                )
+            session.run(query,
+                path=path_str,
+                name=file_path.name,
+                extension=file_path.suffix,
+                size=file_size,
+                file_types=','.join(file_types),
+                parent_path=parent_path
+            )
         
         stats['files'] += 1
         
         if any(ft in ['SpringConfig', 'XmlConfig'] for ft in file_types):
             stats['config_files'] += 1
     
-    def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str):
-        """Create a Java class node with class metadata."""
+    def _create_java_class_shot1(self, class_info: ClassInfo, parent_path: str, session):
+        """Create a Java class node with class metadata.
+        OPTIMIZED: Reuses provided session instead of opening new one."""
         # Determine if this is a DAO class
         dao_analyzer = DAOAnalyzer()
         is_dao_class = dao_analyzer._is_dao_class(class_info)
@@ -880,34 +884,33 @@ class InformationGraphBuilder:
         RETURN n, parent
         """
         
-        with self.driver.session(database=self.database) as session:
-            try:
-                result = session.run(query,
-                    path=class_info.source_path,
-                    name=Path(class_info.source_path).name,
-                    className=class_info.class_name,
-                    fqn=class_info.fqn,
-                    package=class_info.package,
-                    extends=class_info.extends or "",
-                    implements=class_info.implements,
-                    imports=class_info.imports,
-                    fields=json.dumps(class_info.fields),
-                    method_count=len(class_info.methods),
-                    isDAOClass=is_dao_class,
-                    isShellExecutorClass=is_shell_executor,
-                    parent_path=parent_path
-                )
-                
-                # Verify successful creation
-                record = result.single()
-                if not record:
-                    logger.warning(f"Failed to create/link JavaClass node for {class_info.fqn}")
-                    return
-                
-                # Create JavaMethod nodes and HAS_METHOD relationships for all methods
-                self._create_methods_for_class(class_info, session)
-            except Exception as e:
-                logger.warning(f"Failed to create JavaClass node for {class_info.fqn}: {str(e)[:200]}")
+        try:
+            result = session.run(query,
+                path=class_info.source_path,
+                name=Path(class_info.source_path).name,
+                className=class_info.class_name,
+                fqn=class_info.fqn,
+                package=class_info.package,
+                extends=class_info.extends or "",
+                implements=class_info.implements,
+                imports=class_info.imports,
+                fields=json.dumps(class_info.fields),
+                method_count=len(class_info.methods),
+                isDAOClass=is_dao_class,
+                isShellExecutorClass=is_shell_executor,
+                parent_path=parent_path
+            )
+            
+            # Verify successful creation
+            record = result.single()
+            if not record:
+                logger.warning(f"Failed to create/link JavaClass node for {class_info.fqn}")
+                return
+            
+            # Create JavaMethod nodes and HAS_METHOD relationships for all methods
+            self._create_methods_for_class(class_info, session)
+        except Exception as e:
+            logger.warning(f"Failed to create JavaClass node for {class_info.fqn}: {str(e)[:200]}")
     
     def _create_methods_for_class(self, class_info: ClassInfo, session):
         """Create JavaMethod nodes and HAS_METHOD relationships for all methods in a class."""
@@ -1322,6 +1325,7 @@ class InformationGraphBuilder:
     def _store_bean_map_in_graph(self, global_bean_map: Dict[str, Tuple[str, str, str]], spring_xml_files: List[str]):
         """
         Store the global bean map in the information graph as Bean nodes.
+        OPTIMIZED: Uses UNWIND for bulk bean creation instead of individual queries.
         
         Creates:
         - Bean nodes with properties: beanId, beanClass, path, hasSource
@@ -1332,7 +1336,7 @@ class InformationGraphBuilder:
             global_bean_map: Dictionary mapping composite key (bean_id___bean_class) to tuple of (class_name, source_path, xml_file)
             spring_xml_files: List of Spring XML files where beans are defined
         """
-        logger.info(f"  Storing Bean Map in Information Graph")
+        logger.info(f"  Storing Bean Map in Information Graph (OPTIMIZED)")
         logger.info("=" * 60)
         
         # Build reverse map: xml_file -> list of (bean_id, bean_class) tuples
@@ -1354,86 +1358,75 @@ class InformationGraphBuilder:
             except Exception as e:
                 logger.warning(f"Failed to parse {Path(xml_file).name}: {e}")
         
-        beans_created = 0
-        beans_with_source = 0
-        beans_without_source = 0
+        # Prepare bulk data for UNWIND
+        bean_data = []
+        for composite_key, (bean_class, source_path, xml_file) in global_bean_map.items():
+            bean_id = composite_key.split('___')[0] if '___' in composite_key else composite_key
+            simple_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
+            
+            bean_data.append({
+                'compositeKey': composite_key,
+                'beanId': bean_id,
+                'beanClass': bean_class,
+                'simpleClassName': simple_class_name,
+                'path': source_path or "",
+                'hasSource': bool(source_path),
+                'xmlPath': xml_file
+            })
         
         with self.driver.session(database=self.database) as session:
-            for composite_key, (bean_class, source_path, xml_file) in global_bean_map.items():  # Unpack 3-tuple
-                # Extract bean_id from composite key (bean_id___bean_class)
-                bean_id = composite_key.split('___')[0] if '___' in composite_key else composite_key
-                has_source = bool(source_path)
-                
-                # Extract simple class name for easier querying
-                simple_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
-                
-                # Create Bean node using compositeKey as unique identifier
-                query_create_bean = """
-                MERGE (b:Bean {compositeKey: $compositeKey})
-                ON CREATE SET 
-                    b.beanId = $beanId,
-                    b.beanClass = $beanClass,
-                    b.simpleClassName = $simpleClassName,
-                    b.path = $path,
-                    b.hasSource = $hasSource,
-                    b.created_at = datetime()
-                ON MATCH SET
-                    b.beanId = $beanId,
-                    b.beanClass = $beanClass,
-                    b.simpleClassName = $simpleClassName,
-                    b.path = $path,
-                    b.hasSource = $hasSource
-                RETURN b
+            # Bulk create Bean nodes using UNWIND
+            query_create_beans = """
+            UNWIND $beans AS bean
+            MERGE (b:Bean {compositeKey: bean.compositeKey})
+            ON CREATE SET 
+                b.beanId = bean.beanId,
+                b.beanClass = bean.beanClass,
+                b.simpleClassName = bean.simpleClassName,
+                b.path = bean.path,
+                b.hasSource = bean.hasSource,
+                b.created_at = datetime()
+            ON MATCH SET
+                b.beanId = bean.beanId,
+                b.beanClass = bean.beanClass,
+                b.simpleClassName = bean.simpleClassName,
+                b.path = bean.path,
+                b.hasSource = bean.hasSource
+            """
+            session.run(query_create_beans, beans=bean_data)
+            logger.info(f"    Created {len(bean_data)} Bean nodes (bulk)")
+            
+            # Bulk create Bean -> SpringConfig relationships
+            query_link_xml = """
+            UNWIND $beans AS bean
+            MATCH (b:Bean {compositeKey: bean.compositeKey})
+            MATCH (f:SpringConfig {path: bean.xmlPath})
+            MERGE (b)-[:DEFINED_IN]->(f)
+            """
+            session.run(query_link_xml, beans=bean_data)
+            logger.info(f"    Created Bean -> SpringConfig relationships (bulk)")
+            
+            # Bulk create Bean -> JavaClass relationships (only for beans with source)
+            beans_with_source = [b for b in bean_data if b['hasSource']]
+            if beans_with_source:
+                query_link_class = """
+                UNWIND $beans AS bean
+                MATCH (b:Bean {compositeKey: bean.compositeKey})
+                MATCH (j:JavaClass {path: bean.path})
+                MERGE (b)-[:IMPLEMENTS]->(j)
                 """
-                
-                session.run(query_create_bean,
-                    compositeKey=composite_key,
-                    beanId=bean_id,
-                    beanClass=bean_class,
-                    simpleClassName=simple_class_name,
-                    path=source_path or "",
-                    hasSource=has_source
-                )
-                
-                beans_created += 1
-                if has_source:
-                    beans_with_source += 1
-                else:
-                    beans_without_source += 1
-                
-                # Create relationship to SpringConfig file where bean is defined
-                for xml_file, beans_in_file in xml_to_beans.items():
-                    # Check if this bean (id and class) is defined in this XML file
-                    if any(b_id == bean_id and b_class == bean_class for b_id, b_class in beans_in_file):
-                        query_link_xml = """
-                        MATCH (b:Bean {compositeKey: $compositeKey})
-                        MATCH (f:SpringConfig {path: $xmlPath})
-                        MERGE (b)-[:DEFINED_IN]->(f)
-                        """
-                        session.run(query_link_xml,
-                            compositeKey=composite_key,
-                            xmlPath=xml_file
-                        )
-                        break
-                
-                # Create relationship to JavaClass if source path exists
-                if has_source:
-                    query_link_class = """
-                    MATCH (b:Bean {compositeKey: $compositeKey})
-                    MATCH (j:JavaClass {path: $path})
-                    MERGE (b)-[:IMPLEMENTS]->(j)
-                    """
-                    try:
-                        session.run(query_link_class,
-                            compositeKey=composite_key,
-                            path=source_path
-                        )
-                    except Exception as e:
-                        logger.debug(f"Could not link bean '{bean_id}' (compositeKey: '{composite_key}') to JavaClass: {e}")
+                try:
+                    session.run(query_link_class, beans=beans_with_source)
+                    logger.info(f"    Created Bean -> JavaClass relationships (bulk)")
+                except Exception as e:
+                    logger.warning(f"Some Bean -> JavaClass links failed: {str(e)[:100]}")
+        
+        beans_with_source_count = len([b for b in bean_data if b['hasSource']])
+        beans_without_source = len(bean_data) - beans_with_source_count
         
         logger.info(f"   Bean Node Statistics:")
-        logger.info(f"    Total Beans Created: {beans_created}")
-        logger.info(f"    With Source Path: {beans_with_source}")
+        logger.info(f"    Total Beans Created: {len(bean_data)}")
+        logger.info(f"    With Source Path: {beans_with_source_count}")
         logger.info(f"    Without Source Path: {beans_without_source}")
         logger.info("=" * 60)
     
