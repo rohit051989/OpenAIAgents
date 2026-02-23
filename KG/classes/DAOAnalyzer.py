@@ -45,6 +45,7 @@ class DAOAnalyzer:
         self.skip_resource_keywords = self.rules.get('skip_resource_keywords', 
                                                      ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_TABLE', 
                                                       'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA'])
+        self.sql_constant_patterns = self.rules.get('sql_constant_patterns', {})
     
     def _load_rules(self, config_path: Path) -> Dict[str, Any]:
         """Load analysis rules from YAML configuration file"""
@@ -401,24 +402,34 @@ class DAOAnalyzer:
             with open(constant_source_path, 'r', encoding='utf-8') as f:
                 constant_source = f.read()
 
-            # Pattern: public static final String CONSTANT_NAME = "SQL...";
-            pattern = rf'(public\s+)?static\s+final\s+String\s+{re.escape(constant_name)}\s*=\s*\n?\s*"([\s\S]*?)";?'
+            # Try single-line pattern from config (supports both static and non-static)
+            single_line_config = self.sql_constant_patterns.get('single_line', {})
+            pattern_template = single_line_config.get('pattern', 
+                r'(public\s+)?(static\s+)?final\s+String\s+{constant_name}\s*=\s*\n?\s*"([\s\S]*?)";?')
+            capture_group = single_line_config.get('capture_group', 3)
+            
+            pattern = pattern_template.replace('{constant_name}', re.escape(constant_name))
             match = re.search(pattern, constant_source)
-            if match:
-                sql_query = match.group(2).strip()
-                logger.info(f"         Resolved constant {constant_class}.{constant_name}")
-                logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+            if match and match.lastindex >= capture_group:
+                sql_query = match.group(capture_group).strip()
+                logger.info(f"        Resolved constant {constant_class}.{constant_name}")
+                logger.info(f"         SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
-            # Handle multi-line concatenation
-            concat_pattern = rf'(public\s+)?static\s+final\s+String\s+{re.escape(constant_name)}\s*=\s*([\s\S]+?);'
+            # Try multi-line concatenation pattern from config
+            multi_line_config = self.sql_constant_patterns.get('multi_line', {})
+            concat_pattern_template = multi_line_config.get('pattern',
+                r'(public\s+)?(static\s+)?final\s+String\s+{constant_name}\s*=\s*([\s\S]+?);')
+            concat_capture_group = multi_line_config.get('capture_group', 3)
+            
+            concat_pattern = concat_pattern_template.replace('{constant_name}', re.escape(constant_name))
             concat_match = re.search(concat_pattern, constant_source)
-            if concat_match:
-                sql_expr = concat_match.group(2)
+            if concat_match and concat_match.lastindex >= concat_capture_group:
+                sql_expr = concat_match.group(concat_capture_group)
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
-                    logger.info(f"         Resolved concatenated constant {constant_class}.{constant_name}")
+                    logger.info(f"        Resolved concatenated constant {constant_class}.{constant_name}")
                     logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                     return sql_query
 

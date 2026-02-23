@@ -170,3 +170,19 @@ skip_resource_keywords:
   - DYNAMIC_TABLE
   - DYNAMIC_CATALOG
   - DYNAMIC_SCHEMA
+
+# SQL Constant extraction patterns
+# Patterns to extract SQL constants from Java files
+# Supports both "static final" and "final" (non-static) constants
+sql_constant_patterns:
+  # Single-line constant: public [static] final String CONSTANT = "SQL...";
+  single_line:
+    pattern: '(public\s+)?(static\s+)?final\s+String\s+{constant_name}\s*=\s*\n?\s*"([\s\S]*?)";?'
+    capture_group: 3
+    description: "Single-line SQL constant declaration"
+  
+  # Multi-line concatenation: public [static] final String CONSTANT = "part1" + "part2";
+  multi_line:
+    pattern: '(public\s+)?(static\s+)?final\s+String\s+{constant_name}\s*=\s*([\s\S]+?);'
+    capture_group: 3
+    description: "Multi-line concatenated SQL constant"
