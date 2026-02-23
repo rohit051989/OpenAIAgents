@@ -102,12 +102,12 @@ sql_extraction_patterns:
     pattern: createQuery\s*\(\s*["']([^"']+)["']
     capture_group: 1
   JDBC_INLINE:
-    pattern: jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*["']([^"']+)["']
-    capture_group: 2
+    pattern: (namedParameterJdbcTemplate|jdbcTemplate)\.(query|queryForObject|queryForList|update)\s*\(\s*["']([^"']+)["']
+    capture_group: 3
   JDBC_CONSTANT:
-    pattern: jdbcTemplate\.(query|queryForObject|queryForList|update)\s*\(\s*([A-Z][\w.]*)\.([A-Z_][A-Z_0-9]*)\s*[,)]
-    constant_class_group: 2
-    constant_name_group: 3
+    pattern: (namedParameterJdbcTemplate|jdbcTemplate)\.(query|queryForObject|queryForList|update)\s*\(\s*([A-Z][\w.]*)\.([A-Z_][A-Z_0-9]*)\s*[,)]
+    constant_class_group: 3
+    constant_name_group: 4
 
 # Patterns for detecting dynamic SQL
 dynamic_sql_patterns:
