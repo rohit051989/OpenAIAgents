@@ -81,6 +81,7 @@ class DBOperation:
     method_fqn: str
     confidence: str = "HIGH"  # HIGH, MEDIUM, LOW
     raw_query: Optional[str] = None
+    schema_name: Optional[str] = None  # Database schema (e.g., APMDATA from APMDATA.TABLE_NAME)
 
 
 @dataclass

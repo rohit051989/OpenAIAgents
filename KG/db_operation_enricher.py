@@ -428,8 +428,7 @@ class DBOperationEnricher:
                     class_info = self._build_class_info(path, class_fqn)
                     if class_info and method_name in class_info.methods:
                         method_def = class_info.methods[method_name]
-                        db_op = analyzer.analyze_method(method_def, class_info)
-                        operations = [db_op] if db_op else []
+                        operations = analyzer.analyze_method(method_def, class_info)  # Now returns List[DBOperation]
                     else:
                         operations = []
                 
@@ -554,14 +553,17 @@ class DBOperationEnricher:
                     operation_type = op.get('operation_type', 'UNKNOWN')
                     confidence = op.get('confidence', 'MEDIUM')
                     entity_type = op.get('entity_type', 'UNKNOWN')
+                    schema_name = op.get('schema_name', 'UNKNOWN')
                 else:
                     table_name = op.table_name if hasattr(op, 'table_name') else 'UNKNOWN'
                     operation_type = op.operation_type if hasattr(op, 'operation_type') else 'UNKNOWN'
                     confidence = op.confidence if hasattr(op, 'confidence') else 'MEDIUM'
                     entity_type = op.entity_type if hasattr(op, 'entity_type') else 'UNKNOWN'
+                    schema_name = op.schema_name if hasattr(op, 'schema_name') else 'UNKNOWN'
                 
                 # Normalize and escape values
                 table_name = table_name.upper() if table_name else "UNKNOWN"
+                schema_name = schema_name.upper() if schema_name else "UNKNOWN"
                 
                 # Skip Resource creation for DYNAMIC/UNKNOWN table names
                 # These need manual resolution before Resource association
@@ -571,6 +573,7 @@ class DBOperationEnricher:
                     continue
                 
                 escaped_table_name = escape_cypher_string(table_name)
+                escaped_schema_name = escape_cypher_string(schema_name)
                 escaped_entity_type = escape_cypher_string(entity_type if entity_type else "UNKNOWN")
                 escaped_operation_type = escape_cypher_string(operation_type)
                 escaped_confidence = escape_cypher_string(confidence)
@@ -585,8 +588,8 @@ class DBOperationEnricher:
                     MERGE (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
                     ON CREATE SET r.id = '{escaped_resource_id}',
                                   r.enabled = true,
-                                  r.schemaName = '{escaped_entity_type}'
-                    ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_entity_type}')
+                                  r.schemaName = '{escaped_schema_name}'
+                    ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}')
                     """
                     session.run(resource_query)
                     

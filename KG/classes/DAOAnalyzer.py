@@ -4,6 +4,7 @@ import yaml
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Any
 import logging
+import javalang
 
 # Configure logging
 logging.basicConfig(
@@ -98,11 +99,11 @@ class DAOAnalyzer:
         
         return compiled
 
-    def analyze_method(self, method_def: MethodDef, class_info: ClassInfo) -> Optional[DBOperation]:
-        """Analyze a DAO method to detect database operations"""
+    def analyze_method(self, method_def: MethodDef, class_info: ClassInfo) -> List[DBOperation]:
+        """Analyze a DAO method to detect database operations (returns list to handle multiple tables)"""
         # Only analyze if it looks like a DAO
         if not self._is_dao_class(class_info):
-            return None
+            return []
 
         # Read method source
         try:
@@ -115,19 +116,25 @@ class DAOAnalyzer:
         # Detect operation type
         operation_type = self._detect_operation_type(method_def, method_source)
         if not operation_type:
-            return None
+            return []
 
-        # Extract entity/table info
+        # Extract entity/table info (now returns list of tables)
         raw_query = self._extract_query(method_source, class_info)
-        entity_type, table_name = self._extract_entity_info(method_def, method_source, raw_query)
-
-        return DBOperation(
-            operation_type=operation_type,
-            table_name=table_name,
-            entity_type=entity_type,
-            method_fqn=method_def.fqn,
-            raw_query=raw_query
-        )
+        tables_info = self._extract_entity_info(method_def, method_source, raw_query)
+        
+        # Create one DBOperation per table
+        operations = []
+        for entity_type, table_name, schema_name in tables_info:
+            operations.append(DBOperation(
+                operation_type=operation_type,
+                table_name=table_name,
+                entity_type=entity_type,
+                method_fqn=method_def.fqn,
+                raw_query=raw_query,
+                schema_name=schema_name
+            ))
+        
+        return operations
 
     def _is_dao_class(self, class_info: ClassInfo) -> bool:
         """
@@ -220,14 +227,16 @@ class DAOAnalyzer:
         
         return False
 
-    def _extract_entity_info(self, method_def: MethodDef, source: str, raw_query: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
-        """Extract entity type and table name using configured rules"""
+    def _extract_entity_info(self, method_def: MethodDef, source: str, raw_query: Optional[str] = None) -> List[Tuple[Optional[str], Optional[str], Optional[str]]]:
+        """Extract entity type, table names, and schema names using configured rules (supports multiple tables)"""
+        results = []
         entity_type = None
-        table_name = None
 
-        # Priority 1: Extract from SQL query if available
+        # Priority 1: Extract ALL tables from SQL query if available
         if raw_query and raw_query != "DYNAMIC_SQL":
-            # Parse table name from SQL using configured patterns
+            # Parse ALL table names from SQL using configured patterns
+            tables_found = set()  # Use set to avoid duplicates
+            
             for pattern_item in self.table_extraction_patterns:
                 # Handle both simple string patterns and dict-based patterns
                 if isinstance(pattern_item, dict):
@@ -236,30 +245,56 @@ class DAOAnalyzer:
                     pattern_str = pattern_item
                     
                 try:
-                    match = re.search(pattern_str, raw_query, re.IGNORECASE)
-                    if match:
-                        table_name = match.group(1).strip()
-                        # Remove schema prefix if present
-                        if '.' in table_name:
-                            table_name = table_name.split('.')[-1]
-                        logger.info(f"          Extracted table from SQL: {table_name}")
-                        break
-                except (re.error, IndexError):
+                    # Use findall instead of search to get ALL table matches
+                    matches = re.findall(pattern_str, raw_query, re.IGNORECASE)
+                    for table_ref in matches:
+                        if isinstance(table_ref, tuple):
+                            table_ref = table_ref[0]  # Extract from group
+                        
+                        full_table_ref = table_ref.strip()
+                        
+                        # Extract schema and table if present (e.g., SCHEMA.TABLE)
+                        if '.' in full_table_ref:
+                            parts = full_table_ref.split('.')
+                            if len(parts) == 2:
+                                schema_name = parts[0].strip()
+                                table_name = parts[1].strip()
+                                tables_found.add((table_name, schema_name))
+                            else:
+                                # Handle cases like CATALOG.SCHEMA.TABLE - take last two parts
+                                schema_name = parts[-2].strip()
+                                table_name = parts[-1].strip()
+                                tables_found.add((table_name, schema_name))
+                        else:
+                            tables_found.add((full_table_ref, None))
+                            
+                except (re.error, IndexError) as e:
                     continue
+            
+            # Convert to results format
+            if tables_found:
+                for table_name, schema_name in tables_found:
+                    results.append((entity_type, table_name, schema_name))
+                    if schema_name:
+                        logger.info(f"          Extracted schema.table from SQL: {schema_name}.{table_name}")
+                    else:
+                        logger.info(f"          Extracted table from SQL: {table_name}")
+                return results
                     
         elif raw_query == "DYNAMIC_SQL":
             logger.info(f"          Dynamic SQL detected - table name cannot be determined statically")
-            table_name = "DYNAMIC_TABLE"
+            return [(None, "DYNAMIC_TABLE", None)]
 
         # Priority 2: From return type with 'Entity' suffix
-        if not table_name and 'Entity' in method_def.return_type:
+        if not results and 'Entity' in method_def.return_type:
             entity_suffix = self.rules.get('entity_naming_rules', {}).get('entity_suffix', 'Entity')
             entity_type = method_def.return_type.replace(entity_suffix, '')
             table_name = self._entity_to_table(entity_type)
             logger.info(f"          Inferred table from Entity return type: {table_name}")
+            return [(entity_type, table_name, None)]
 
         # Priority 3: From JPQL query in source
-        if not table_name:
+        if not results:
             jpql_patterns = self.rules.get('jpql_entity_patterns', [])
             for pattern_item in jpql_patterns:
                 # Handle both simple string patterns and dict-based patterns
@@ -274,12 +309,12 @@ class DAOAnalyzer:
                         entity_type = match.group(1)
                         table_name = self._entity_to_table(entity_type)
                         logger.info(f"          Inferred table from JPQL query: {table_name}")
-                        break
+                        return [(entity_type, table_name, None)]
                 except (re.error, IndexError):
                     continue
 
         # Priority 4: Infer from return type (even non-Entity classes)
-        if not table_name and method_def.return_type:
+        if not results and method_def.return_type:
             # Extract simple class name from return type
             return_type_simple = method_def.return_type.split('.')[-1]
             
@@ -289,12 +324,17 @@ class DAOAnalyzer:
             # Check if it's a Java type using configured list
             if return_type_simple in self.excluded_java_types:
                 logger.info(f"          Return type {return_type_simple} is a Java type, not a table - marking as UNKNOWN")
-                table_name = "UNKNOWN"
+                return [(None, "UNKNOWN", None)]
             elif return_type_simple and return_type_simple[0].isupper():
                 table_name = self._entity_to_table(return_type_simple)
                 logger.info(f"          Inferred table from return type ({return_type_simple}): {table_name}")
-
-        return entity_type, table_name.upper() if table_name else None
+                return [(None, table_name, None)]
+        
+        # Normalize to uppercase before returning
+        if results:
+            return [(et, tn.upper() if tn else None, sn.upper() if sn else None) for et, tn, sn in results]
+        
+        return []
 
     def _extract_query(self, source: str, class_info: ClassInfo = None) -> Optional[str]:
         """Extract SQL/JPQL query using configured patterns"""
@@ -412,6 +452,16 @@ class DAOAnalyzer:
             with open(constant_source_path, 'r', encoding='utf-8') as f:
                 constant_source = f.read()
 
+            # Try AST-based parsing first (proper Java parsing, ignores comments)
+            sql_query = self._extract_constant_value_with_ast(constant_source, constant_name)
+            if sql_query:
+                logger.info(f"        Resolved constant {constant_class}.{constant_name} (via AST)")
+                logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
+                return sql_query
+
+            # Fallback to regex if AST fails
+            logger.info(f"        Warning: AST parsing failed for {constant_name}, trying regex fallback...")
+            
             # Try single-line pattern from config (supports both static and non-static)
             single_line_config = self.sql_constant_patterns.get('single_line', {})
             pattern_template = single_line_config.get('pattern', 
@@ -422,7 +472,7 @@ class DAOAnalyzer:
             match = re.search(pattern, constant_source)
             if match and match.lastindex >= capture_group:
                 sql_query = match.group(capture_group).strip()
-                logger.info(f"        Resolved constant {constant_class}.{constant_name}")
+                logger.info(f"        Resolved constant {constant_class}.{constant_name} (via regex)")
                 logger.info(f"         SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                 return sql_query
 
@@ -439,7 +489,7 @@ class DAOAnalyzer:
                 string_parts = re.findall(r'"([\s\S]*?)"', sql_expr)
                 if string_parts:
                     sql_query = ' '.join(part.strip() for part in string_parts)
-                    logger.info(f"        Resolved concatenated constant {constant_class}.{constant_name}")
+                    logger.info(f"        Resolved concatenated constant {constant_class}.{constant_name} (via regex)")
                     logger.info(f"          SQL: {sql_query[:80]}..." if len(sql_query) > 80 else f"          SQL: {sql_query}")
                     return sql_query
 
@@ -514,6 +564,81 @@ class DAOAnalyzer:
                 return str(potential_path)
 
         return None
+
+    def _extract_constant_value_with_ast(self, source_code: str, constant_name: str) -> Optional[str]:
+        """
+        Extract SQL constant value using AST parsing with javalang.
+        This properly ignores commented code unlike regex.
+        
+        Args:
+            source_code: Java source code content
+            constant_name: Name of the constant to find
+            
+        Returns:
+            SQL string value or None if not found
+        """
+        try:
+            # Parse Java source with javalang
+            tree = javalang.parse.parse(source_code)
+            
+            # Find field declarations in the AST
+            for path, node in tree.filter(javalang.tree.FieldDeclaration):
+                # Check if this is a final String field
+                if 'final' in node.modifiers and self._get_type_name_simple(node.type) == 'String':
+                    # Check each declarator (variable) in this field declaration
+                    for declarator in node.declarators:
+                        if declarator.name == constant_name:
+                            # Found the constant! Extract its value
+                            if declarator.initializer:
+                                return self._extract_string_literal(declarator.initializer)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"AST parsing failed for constant {constant_name}: {e}")
+            return None
+    
+    def _get_type_name_simple(self, type_node) -> str:
+        """Extract simple type name from javalang type node"""
+        if hasattr(type_node, 'name'):
+            return type_node.name
+        return str(type_node)
+    
+    def _extract_string_literal(self, initializer_node) -> Optional[str]:
+        """
+        Extract string value from javalang initializer node.
+        Handles both simple string literals and concatenations.
+        
+        Args:
+            initializer_node: javalang initializer AST node
+            
+        Returns:
+            Extracted string value or None
+        """
+        try:
+            # Case 1: Simple string literal: "SELECT ..."
+            if isinstance(initializer_node, javalang.tree.Literal):
+                if initializer_node.value.startswith('"') and initializer_node.value.endswith('"'):
+                    # Remove quotes and return
+                    return initializer_node.value[1:-1]
+            
+            # Case 2: String concatenation: "SELECT" + " FROM"
+            elif isinstance(initializer_node, javalang.tree.BinaryOperation):
+                if initializer_node.operator == '+':
+                    left_val = self._extract_string_literal(initializer_node.operandl)
+                    right_val = self._extract_string_literal(initializer_node.operandr)
+                    if left_val and right_val:
+                        return left_val + ' ' + right_val
+                    elif left_val:
+                        return left_val
+                    elif right_val:
+                        return right_val
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to extract string literal: {e}")
+            return None
 
     def _entity_to_table(self, entity_name: str) -> str:
         """Convert entity name to table name using configured rules"""
