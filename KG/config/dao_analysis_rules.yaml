@@ -121,11 +121,13 @@ dynamic_sql_patterns:
   - StringBuffer
 
 # SQL patterns for extracting table names
+# These patterns are tried in order and ALL matches are collected
 table_extraction_patterns:
-  - FROM\s+([\w.]+)
-  - INTO\s+([\w.]+)
-  - UPDATE\s+([\w.]+)
-  - JOIN\s+([\w.]+)
+  - FROM\s+([\w.]+)        # First table after FROM
+  - JOIN\s+([\w.]+)        # Tables in JOIN clauses
+  - INTO\s+([\w.]+)        # Table in INSERT INTO
+  - UPDATE\s+([\w.]+)      # Table in UPDATE
+  - ',\s+([\w.]+)'         # Comma-separated tables in FROM clause
 
 # JPQL patterns for extracting entity names
 jpql_entity_patterns:

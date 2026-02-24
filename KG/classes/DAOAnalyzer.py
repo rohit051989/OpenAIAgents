@@ -237,6 +237,16 @@ class DAOAnalyzer:
             # Parse ALL table names from SQL using configured patterns
             tables_found = set()  # Use set to avoid duplicates
             
+            # First, try to extract just the FROM clause to avoid matching column names
+            from_clause = self._extract_from_clause(raw_query)
+            
+            if from_clause:
+                # Extract all table names from FROM clause using smart parsing
+                tables_found = self._parse_tables_from_clause(from_clause)
+            
+            # Also apply configured patterns as fallback/supplement
+            search_text = from_clause if from_clause else raw_query
+            
             for pattern_item in self.table_extraction_patterns:
                 # Handle both simple string patterns and dict-based patterns
                 if isinstance(pattern_item, dict):
@@ -246,12 +256,17 @@ class DAOAnalyzer:
                     
                 try:
                     # Use findall instead of search to get ALL table matches
-                    matches = re.findall(pattern_str, raw_query, re.IGNORECASE)
+                    matches = re.findall(pattern_str, search_text, re.IGNORECASE)
                     for table_ref in matches:
                         if isinstance(table_ref, tuple):
                             table_ref = table_ref[0]  # Extract from group
                         
                         full_table_ref = table_ref.strip()
+                        
+                        # Filter out single-letter aliases and obvious non-table patterns
+                        # Skip if it's just a single letter (likely an alias like 'j', 't')
+                        if len(full_table_ref) <= 2 and '.' not in full_table_ref:
+                            continue
                         
                         # Extract schema and table if present (e.g., SCHEMA.TABLE)
                         if '.' in full_table_ref:
@@ -528,10 +543,10 @@ class DAOAnalyzer:
                     if record and record['path']:
                         path = record['path']
                         if Path(path).exists():
-                            logger.info(f"        ✅ Found constant source via graph: {constant_fqn}")
+                            logger.info(f"        Found constant source via graph: {constant_fqn}")
                             return path
                         else:
-                            logger.info(f"        ⚠️  Graph returned path but file doesn't exist: {path}")
+                            logger.info(f"        Warning: Graph returned path but file doesn't exist: {path}")
             except Exception as e:
                 logger.debug(f"Failed to query graph for constant {constant_fqn}: {e}")
             # If graph query failed or didn't find the file, fall through to hardcoded logic
@@ -639,6 +654,93 @@ class DAOAnalyzer:
         except Exception as e:
             logger.debug(f"Failed to extract string literal: {e}")
             return None
+    
+    def _extract_from_clause(self, query: str) -> Optional[str]:
+        """
+        Extract just the FROM clause portion from a SQL query.
+        This helps avoid matching column names in SELECT clause.
+        
+        Args:
+            query: SQL query string
+            
+        Returns:
+            FROM clause text or None if not found
+        """
+        try:
+            # Match FROM ... until WHERE/GROUP/ORDER/HAVING/LIMIT/UNION/EXCEPT/INTERSECT/;/end
+            pattern = r'FROM\s+(.*?)(?:\s+WHERE|\s+GROUP\s+BY|\s+ORDER\s+BY|\s+HAVING|\s+LIMIT|\s+UNION|\s+EXCEPT|\s+INTERSECT|;|$)'
+            match = re.search(pattern, query, re.IGNORECASE | re.DOTALL)
+            if match:
+                return 'FROM ' + match.group(1)
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to extract FROM clause: {e}")
+            return None
+    
+    def _parse_tables_from_clause(self, from_clause: str) -> set:
+        """
+        Parse all table names from a FROM clause, handling comma-separated tables and JOINs.
+        
+        Examples:
+            FROM table1, table2 -> ['table1', 'table2']
+            FROM schema.table1 t1, schema.table2 t2 -> ['schema.table1', 'schema.table2']
+            FROM table1 JOIN table2 -> ['table1', 'table2']
+        
+        Args:
+            from_clause: FROM clause text
+            
+        Returns:
+            Set of (table_name, schema_name) tuples
+        """
+        tables = set()
+        
+        try:
+            # Remove the FROM keyword
+            text = re.sub(r'^\s*FROM\s+', '', from_clause, flags=re.IGNORECASE)
+            
+            # Split by JOIN keywords to handle JOIN clauses
+            # This splits on: INNER JOIN, LEFT JOIN, RIGHT JOIN, OUTER JOIN, CROSS JOIN, JOIN
+            parts = re.split(r'\s+(?:INNER\s+|LEFT\s+(?:OUTER\s+)?|RIGHT\s+(?:OUTER\s+)?|FULL\s+(?:OUTER\s+)?|CROSS\s+)?JOIN\s+', 
+                           text, flags=re.IGNORECASE)
+            
+            for part in parts:
+                # Split by comma to handle comma-separated tables
+                comma_parts = part.split(',')
+                
+                for item in comma_parts:
+                    # Remove ON clause if present (for JOINs)
+                    item = re.sub(r'\s+ON\s+.*$', '', item, flags=re.IGNORECASE)
+                    
+                    # Extract just the table name (strip aliases)
+                    # Pattern: schema.table alias or just table alias
+                    # Table name is word characters with optional dot, followed by optional alias
+                    match = re.match(r'^\s*([\w.]+)', item.strip())
+                    if match:
+                        table_ref = match.group(1)
+                        
+                        # Filter out single-letter aliases
+                        if len(table_ref) <= 2 and '.' not in table_ref:
+                            continue
+                        
+                        # Parse schema.table
+                        if '.' in table_ref:
+                            parts = table_ref.split('.')
+                            if len(parts) == 2:
+                                schema_name = parts[0].strip()
+                                table_name = parts[1].strip()
+                                tables.add((table_name, schema_name))
+                            else:
+                                # CATALOG.SCHEMA.TABLE - take last two
+                                schema_name = parts[-2].strip()
+                                table_name = parts[-1].strip()
+                                tables.add((table_name, schema_name))
+                        else:
+                            tables.add((table_ref, None))
+        
+        except Exception as e:
+            logger.debug(f"Failed to parse tables from FROM clause: {e}")
+        
+        return tables
 
     def _entity_to_table(self, entity_name: str) -> str:
         """Convert entity name to table name using configured rules"""
