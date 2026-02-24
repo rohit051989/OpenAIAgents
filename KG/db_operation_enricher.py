@@ -455,7 +455,7 @@ class DBOperationEnricher:
     def _get_dao_classes(self) -> List[Dict]:
         """Query Neo4j for all DAO classes"""
         query = """
-        MATCH (jc:JavaClass {isDAOClass: true})
+        MATCH (jc:JavaClass {isDAOClass: true, isTestClass: false})
         RETURN jc.fqn as fqn, 
                jc.className as className, 
                jc.path as path

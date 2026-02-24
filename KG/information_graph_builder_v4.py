@@ -379,6 +379,10 @@ class InformationGraphBuilder:
         self.file_type_rules = self.config.get('file_type_rules', {})
         self.skip_dirs = set(self.config.get('skip_directories', []))
         self.skip_files = self.config.get('skip_files', [])
+        self.test_patterns = self.config.get('test_patterns', [
+            '/src/test/', '/test/', '/src/main/test/',
+            '\\src\\test\\', '\\test\\', '\\src\\main\\test\\'
+        ])
         
         # Track created nodes
         self.created_nodes = set()
@@ -539,17 +543,8 @@ class InformationGraphBuilder:
         """Check if file path is in test directories."""
         path_str = str(file_path).replace('\\', '/')
         
-        # Common test directory patterns
-        test_patterns = [
-            '/src/test/',
-            '/test/',
-            '/src/main/test/',
-            '\\src\\test\\',
-            '\\test\\',
-            '\\src\\main\\test\\'
-        ]
-        
-        return any(pattern in path_str for pattern in test_patterns)
+        # Use test patterns from configuration
+        return any(pattern in path_str for pattern in self.test_patterns)
     
     def identify_file_type(self, file_path: Path) -> List[str]:
         """Identify file type based on config rules."""
@@ -860,6 +855,9 @@ class InformationGraphBuilder:
         shell_analyzer = ShellScriptAnalyzer()
         is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
         
+        # Determine if this is a test class (check if path is in test directories)
+        is_test_class = self._is_test_path(Path(class_info.source_path))
+        
         # MERGE on fqn (unique identifier) to avoid duplicates
         # This respects the unique constraint on JavaClass.fqn
         query = """
@@ -877,6 +875,7 @@ class InformationGraphBuilder:
             n.method_count = $method_count,
             n.isDAOClass = $isDAOClass,
             n.isShellExecutorClass = $isShellExecutorClass,
+            n.isTestClass = $isTestClass,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -898,6 +897,7 @@ class InformationGraphBuilder:
                 method_count=len(class_info.methods),
                 isDAOClass=is_dao_class,
                 isShellExecutorClass=is_shell_executor,
+                isTestClass=is_test_class,
                 parent_path=parent_path
             )
             

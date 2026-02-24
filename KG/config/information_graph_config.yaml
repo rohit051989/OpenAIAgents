@@ -101,6 +101,15 @@ skip_files:
   - ".classpath"
   - ".project"
 
+# Test directory patterns (used to identify test classes vs regular classes)
+test_patterns:
+  - "/src/test/"
+  - "/test/"
+  - "/src/main/test/"
+  - "\\src\\test\\"
+  - "\\test\\"
+  - "\\src\\main\\test\\"
+
 # Neo4j connection settings
 neo4j:
   uri: "bolt://localhost:7687"
