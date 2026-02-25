@@ -109,7 +109,7 @@ class ProcedureCallEnricher:
         """
         query = """
         MATCH (jc:JavaClass)
-        WHERE jc.isDAOClass = true
+        WHERE jc.isDAOClass = true AND jc.isTestClass = false
         RETURN jc.fqn as fqn, 
                jc.path as path,
                jc.className as className
