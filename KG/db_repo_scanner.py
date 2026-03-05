@@ -316,6 +316,40 @@ class DBRepoScanner:
             logger.warning(f"      Failed to create file node {file_path.name}: {e}")
             self.stats['errors'] += 1
     
+    def _split_create_statements(self, sql_content: str) -> List[str]:
+        """
+        Split SQL content into individual CREATE statements to avoid sqlparse token limits.
+        Uses regex to find CREATE statement boundaries.
+        
+        Args:
+            sql_content: Full SQL file content
+        
+        Returns:
+            List of individual CREATE statements
+        """
+        # Pattern to match CREATE statements (including OR REPLACE)
+        # Matches: CREATE, CREATE OR REPLACE, CREATE PUBLIC, etc.
+        create_pattern = r'(CREATE\s+(?:OR\s+REPLACE\s+)?(?:PUBLIC\s+)?(?:PACKAGE\s+BODY|DATABASE\s+LINK|TABLE|VIEW|PROCEDURE|FUNCTION|PACKAGE|TRIGGER|SYNONYM|SEQUENCE|INDEX|TYPE)\s+)'
+        
+        # Find all CREATE statement positions
+        matches = list(re.finditer(create_pattern, sql_content, re.IGNORECASE))
+        
+        if not matches:
+            # No CREATE statements found, return original content
+            return [sql_content]
+        
+        statements = []
+        for i, match in enumerate(matches):
+            start_pos = match.start()
+            # End position is either the start of next CREATE or end of file
+            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(sql_content)
+            
+            statement = sql_content[start_pos:end_pos].strip()
+            if statement:
+                statements.append(statement)
+        
+        return statements
+    
     def _parse_and_create_resources(self, sql_file: Path, repo_name: str, session):
         """
         Parse SQL file content and create Resource nodes for each CREATE statement found.
@@ -340,8 +374,20 @@ class DBRepoScanner:
         if not sql_content.strip():
             return
         
-        # Parse SQL statements
-        statements = sqlparse.parse(sql_content)
+        logger.debug(f"        Parsing SQL file: {file_name}")
+        # Split large SQL files into individual CREATE statements to avoid sqlparse token limits
+        # Use regex to find CREATE statement boundaries
+        create_statements = self._split_create_statements(sql_content)
+        
+        # Parse each CREATE statement individually
+        statements = []
+        for create_stmt in create_statements:
+            try:
+                parsed = sqlparse.parse(create_stmt)
+                statements.extend(parsed)
+            except Exception as e:
+                logger.debug(f"        Failed to parse statement in {file_name}: {e}")
+                continue
         
         resources_created = 0
         for statement in statements:
@@ -353,7 +399,7 @@ class DBRepoScanner:
                 object_name = resource_info['name']
                 resource_type = resource_info['type']
                 package_name = resource_info.get('package')
-                ddl_snippet = str(statement)[:5000]  # First 5000 chars of this statement
+                ddl_snippet = str(statement)[:1000]  # First 1000 chars to avoid token limits
                 
                 # Check if Resource already exists
                 existing = self._check_existing_resource(
@@ -475,6 +521,7 @@ class DBRepoScanner:
                                   session) -> bool:
         """
         Check if a Resource with same name, type, schema, and package already exists.
+        Uses parameterized queries to avoid token limit issues.
         
         Args:
             name: Resource name
@@ -486,25 +533,31 @@ class DBRepoScanner:
         Returns:
             True if resource exists, False otherwise
         """
-        escaped_name = escape_cypher_string(name.upper())
-        escaped_type = escape_cypher_string(resource_type)
-        escaped_schema = escape_cypher_string(schema_name.upper() if schema_name else 'UNKNOWN')
-        
         if package_name:
-            escaped_package = escape_cypher_string(package_name.upper())
-            query = f"""
-            MATCH (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}', packageName: '{escaped_package}'}})
+            query = """
+            MATCH (r:Resource {name: $name, type: $type, schemaName: $schema, packageName: $package})
             RETURN count(r) as cnt
             """
+            params = {
+                'name': name.upper(),
+                'type': resource_type,
+                'schema': schema_name.upper() if schema_name else 'UNKNOWN',
+                'package': package_name.upper()
+            }
         else:
-            query = f"""
-            MATCH (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}'}})
+            query = """
+            MATCH (r:Resource {name: $name, type: $type, schemaName: $schema})
             WHERE r.packageName IS NULL
             RETURN count(r) as cnt
             """
+            params = {
+                'name': name.upper(),
+                'type': resource_type,
+                'schema': schema_name.upper() if schema_name else 'UNKNOWN'
+            }
         
         try:
-            result = session.run(query)
+            result = session.run(query, **params)
             record = result.single()
             return record and record['cnt'] > 0
         except Exception as e:
@@ -518,6 +571,7 @@ class DBRepoScanner:
                                    session):
         """
         Create Resource node (or use existing) and link to SQL file via DB_OPERATION.
+        Uses parameterized queries to avoid token limit issues with large DDL content.
         
         Args:
             name: Resource name
@@ -526,68 +580,80 @@ class DBRepoScanner:
             package_name: Package name
             file_path: SQL file path
             repo_name: Repository name
-            ddl_content: DDL snippet
+            ddl_content: DDL snippet (limited to 1000 chars)
             already_exists: Whether resource already exists
             session: Neo4j session
         """
         unique_id = f"RES_{resource_type}_{uuid.uuid4().hex[:8].upper()}"
         
-        escaped_name = escape_cypher_string(name)
-        escaped_type = escape_cypher_string(resource_type)
-        escaped_schema = escape_cypher_string(schema_name)
-        escaped_id = escape_cypher_string(unique_id)
-        escaped_path = escape_cypher_string(file_path)
-        escaped_repo = escape_cypher_string(repo_name)
-        escaped_ddl = escape_cypher_string(ddl_content) if ddl_content else ""
-        
         try:
             if package_name:
-                escaped_package = escape_cypher_string(package_name)
-                # Resource with package
-                query = f"""
-                MERGE (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}', packageName: '{escaped_package}'}})
-                ON CREATE SET r.id = '{escaped_id}',
+                # Resource with package - use parameterized query
+                query = """
+                MERGE (r:Resource {name: $name, type: $type, schemaName: $schema, packageName: $package})
+                ON CREATE SET r.id = $id,
                               r.enabled = true,
                               r.foundInRepo = true,
-                              r.repoName = '{escaped_repo}',
-                              r.repoFilePath = '{escaped_path}',
-                              r.ddlSnippet = '{escaped_ddl}',
-                              r.alreadyExisted = {str(already_exists).lower()},
+                              r.repoName = $repo,
+                              r.repoFilePath = $path,
+                              r.ddlSnippet = $ddl,
+                              r.alreadyExisted = $alreadyExists,
                               r.created_at = datetime()
                 ON MATCH SET r.foundInRepo = true,
-                             r.repoName = COALESCE(r.repoName, '{escaped_repo}'),
-                             r.repoFilePath = COALESCE(r.repoFilePath, '{escaped_path}')
+                             r.repoName = COALESCE(r.repoName, $repo),
+                             r.repoFilePath = COALESCE(r.repoFilePath, $path)
                 WITH r
-                MATCH (f:File {{path: '{escaped_path}'}})
+                MATCH (f:File {path: $path})
                 MERGE (f)-[rel:DB_OPERATION]->(r)
                 ON CREATE SET rel.operationType = 'CREATE',
-                              rel.statementType = '{escaped_type}'
+                              rel.statementType = $type
                 RETURN r.id as resourceId
                 """
+                params = {
+                    'name': name,
+                    'type': resource_type,
+                    'schema': schema_name,
+                    'package': package_name,
+                    'id': unique_id,
+                    'repo': repo_name,
+                    'path': file_path,
+                    'ddl': ddl_content or '',
+                    'alreadyExists': already_exists
+                }
             else:
-                # Resource without package
-                query = f"""
-                MERGE (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}'}})
-                ON CREATE SET r.id = '{escaped_id}',
+                # Resource without package - use parameterized query
+                query = """
+                MERGE (r:Resource {name: $name, type: $type, schemaName: $schema})
+                ON CREATE SET r.id = $id,
                               r.enabled = true,
                               r.foundInRepo = true,
-                              r.repoName = '{escaped_repo}',
-                              r.repoFilePath = '{escaped_path}',
-                              r.ddlSnippet = '{escaped_ddl}',
-                              r.alreadyExisted = {str(already_exists).lower()},
+                              r.repoName = $repo,
+                              r.repoFilePath = $path,
+                              r.ddlSnippet = $ddl,
+                              r.alreadyExisted = $alreadyExists,
                               r.created_at = datetime()
                 ON MATCH SET r.foundInRepo = true,
-                             r.repoName = COALESCE(r.repoName, '{escaped_repo}'),
-                             r.repoFilePath = COALESCE(r.repoFilePath, '{escaped_path}')
+                             r.repoName = COALESCE(r.repoName, $repo),
+                             r.repoFilePath = COALESCE(r.repoFilePath, $path)
                 WITH r
-                MATCH (f:File {{path: '{escaped_path}'}})
+                MATCH (f:File {path: $path})
                 MERGE (f)-[rel:DB_OPERATION]->(r)
                 ON CREATE SET rel.operationType = 'CREATE',
-                              rel.statementType = '{escaped_type}'
+                              rel.statementType = $type
                 RETURN r.id as resourceId
                 """
+                params = {
+                    'name': name,
+                    'type': resource_type,
+                    'schema': schema_name,
+                    'id': unique_id,
+                    'repo': repo_name,
+                    'path': file_path,
+                    'ddl': ddl_content or '',
+                    'alreadyExists': already_exists
+                }
             
-            result = session.run(query)
+            result = session.run(query, **params)
             if result.single():
                 self.stats['resources_created'] += 1
                 if already_exists:
@@ -602,6 +668,7 @@ class DBRepoScanner:
     def _mark_duplicate_resources(self):
         """
         Mark resources that have duplicates (same name/type but different schema/package).
+        Uses parameterized queries to avoid token limit issues.
         """
         logger.info("\n  Checking for duplicate resources...")
         
@@ -624,26 +691,32 @@ class DBRepoScanner:
                 for (schema, package), file_paths in schema_package_groups.items():
                     if len(file_paths) > 1:
                         # True duplicate - same name, type, schema, and package
-                        escaped_name = escape_cypher_string(name)
-                        escaped_type = escape_cypher_string(resource_type)
-                        escaped_schema = escape_cypher_string(schema)
-                        
                         if package:
-                            escaped_package = escape_cypher_string(package)
-                            query = f"""
-                            MATCH (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}', packageName: '{escaped_package}'}})
+                            query = """
+                            MATCH (r:Resource {name: $name, type: $type, schemaName: $schema, packageName: $package})
                             SET r.duplicateFound = true
                             RETURN count(r) as cnt
                             """
+                            params = {
+                                'name': name,
+                                'type': resource_type,
+                                'schema': schema,
+                                'package': package
+                            }
                         else:
-                            query = f"""
-                            MATCH (r:Resource {{name: '{escaped_name}', type: '{escaped_type}', schemaName: '{escaped_schema}'}})
+                            query = """
+                            MATCH (r:Resource {name: $name, type: $type, schemaName: $schema})
                             WHERE r.packageName IS NULL
                             SET r.duplicateFound = true
                             RETURN count(r) as cnt
                             """
+                            params = {
+                                'name': name,
+                                'type': resource_type,
+                                'schema': schema
+                            }
                         
-                        result = session.run(query)
+                        result = session.run(query, **params)
                         record = result.single()
                         if record:
                             count = record['cnt']
