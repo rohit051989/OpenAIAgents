@@ -114,17 +114,21 @@ class ProcedureAnalyzer:
             proc_result = self._extract_procedure_info(method_source, call_type, patterns)
 
             if proc_result:
-                procedure_name, schema_name, catalog_name, is_function, parameters = proc_result
+                procedure_name, schema_name, catalog_name, package_name, is_function, parameters = proc_result
 
                 # Build full procedure name
                 full_name = procedure_name
+                if package_name:
+                    full_name = f"{package_name}.{procedure_name}"
                 if schema_name:
-                    full_name = f"{schema_name}.{procedure_name}"
+                    full_name = f"{schema_name}.{full_name}"
                 if catalog_name:
                     full_name = f"{catalog_name}.{full_name}"
 
                 return ProcedureCall(
                     procedure_name=full_name,
+                    schema_name=schema_name,
+                    package_name=package_name,
                     database_type=self._infer_database_type(method_source),
                     method_fqn=method_def.fqn,
                     parameters=parameters,
@@ -134,15 +138,16 @@ class ProcedureAnalyzer:
 
         return None
 
-    def _extract_procedure_info(self, source: str, call_type: str, patterns: dict) -> Optional[Tuple[str, Optional[str], Optional[str], bool, List[str]]]:
+    def _extract_procedure_info(self, source: str, call_type: str, patterns: dict) -> Optional[Tuple[str, Optional[str], Optional[str], Optional[str], bool, List[str]]]:
         """
         Extract procedure information from source code using configured patterns.
 
-        Returns: (procedure_name, schema_name, catalog_name, is_function, parameters)
+        Returns: (procedure_name, schema_name, catalog_name, package_name, is_function, parameters)
         """
         procedure_name = None
         schema_name = None
         catalog_name = None
+        package_name = None
         is_function = False
         parameters = []
 
@@ -231,12 +236,19 @@ class ProcedureAnalyzer:
                     capture_group = proc_config.get('capture_group', 1)
                     full_name = match.group(capture_group)
 
-                    # Parse schema.procedure_name
+                    # Parse Oracle hierarchy: schema.package.procedure or schema.procedure
                     parts = full_name.split('.')
-                    if len(parts) > 1:
-                        schema_name = '.'.join(parts[:-1])
-                        procedure_name = parts[-1]
+                    if len(parts) >= 3:
+                        # schema.package.procedure
+                        schema_name = parts[0]
+                        package_name = parts[1]
+                        procedure_name = '.'.join(parts[2:])  # Handle nested packages
+                    elif len(parts) == 2:
+                        # schema.procedure (no package)
+                        schema_name = parts[0]
+                        procedure_name = parts[1]
                     else:
+                        # Just procedure name
                         procedure_name = full_name
             
             # Check function_call pattern
@@ -270,7 +282,22 @@ class ProcedureAnalyzer:
                 proc_match = re.search(proc_pattern, source)
                 if proc_match:
                     capture_group = proc_config.get('capture_group', 1)
-                    procedure_name = proc_match.group(capture_group)
+                    full_name = proc_match.group(capture_group)
+                    
+                    # Parse Oracle hierarchy: schema.package.procedure or schema.procedure
+                    parts = full_name.split('.')
+                    if len(parts) >= 3:
+                        # schema.package.procedure
+                        schema_name = parts[0]
+                        package_name = parts[1]
+                        procedure_name = '.'.join(parts[2:])  # Handle nested packages
+                    elif len(parts) == 2:
+                        # schema.procedure (no package)
+                        schema_name = parts[0]
+                        procedure_name = parts[1]
+                    else:
+                        # Just procedure name
+                        procedure_name = full_name
             
             # Check named_procedure pattern if not found
             if not procedure_name:
@@ -292,7 +319,7 @@ class ProcedureAnalyzer:
                         break
 
         if procedure_name:
-            return (procedure_name, schema_name, catalog_name, is_function, parameters)
+            return (procedure_name, schema_name, catalog_name, package_name, is_function, parameters)
 
         return None
 

@@ -584,11 +584,14 @@ class DBOperationEnricher:
                 
                 try:
                     # Create or update Resource node
+                    # If creating new Resource (not from db_repo), mark as notFoundInRepo
                     resource_query = f"""
                     MERGE (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
                     ON CREATE SET r.id = '{escaped_resource_id}',
                                   r.enabled = true,
-                                  r.schemaName = '{escaped_schema_name}'
+                                  r.schemaName = '{escaped_schema_name}',
+                                  r.foundInRepo = false,
+                                  r.notFoundInRepo = true
                     ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}')
                     """
                     session.run(resource_query)

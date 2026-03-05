@@ -678,19 +678,93 @@ class Neo4jLoader:
             """
         tx.run(query, **data)
     
+    def _load_resources_from_graph(self):
+        """Load Resource nodes from information graph"""
+        logger.info("Loading Resource nodes from information graph...")
+        
+        query = """
+        MATCH (r:Resource)
+        WHERE r.id IS NOT NULL AND r.name IS NOT NULL
+        RETURN r.id as id,
+               r.name as name,
+               r.type as type,
+               r.enabled as enabled,
+               r.schemaName as schemaName,
+               r.packageName as packageName,
+               r.foundInRepo as foundInRepo,
+               r.repoName as repoName,
+               r.repoFilePath as repoFilePath,
+               r.ddlSnippet as ddlSnippet,
+               r.description as description
+        ORDER BY r.name
+        """
+        
+        resources = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(query)
+            for record in result:
+                resources.append({
+                    'id': record['id'],
+                    'name': record['name'],
+                    'type': record.get('type', ''),
+                    'enabled': record.get('enabled', True),
+                    'schemaName': record.get('schemaName', ''),
+                    'packageName': record.get('packageName', ''),
+                    'foundInRepo': record.get('foundInRepo', True),
+                    'repoName': record.get('repoName', ''),
+                    'repoFilePath': record.get('repoFilePath', ''),
+                    'ddlSnippet': record.get('ddlSnippet', ''),
+                    'description': record.get('description', '')
+                })
+        
+        logger.info(f"  Found {len(resources)} Resource nodes in information graph")
+        return resources
+    
     def _load_resources(self, excel_file):
-        """Load Resources"""
+        """
+        Load Resources - first from information graph, then from Excel.
+        Skip Excel records if resource name already exists from information graph.
+        """
+        # Step 1: Load resources from information graph
+        loaded_resource_names = set()
+        resources_from_graph = self._load_resources_from_graph()
+        
+        if resources_from_graph:
+            logger.info(f"Loading {len(resources_from_graph)} Resources from information graph into knowledge graph...")
+            
+            with self.driver.session(database=self.database) as session:
+                for resource_data in resources_from_graph:
+                    session.execute_write(self._create_resource, resource_data)
+                    loaded_resource_names.add(resource_data['name'])
+            
+            logger.info(f" Loaded {len(resources_from_graph)} Resources from information graph")
+        else:
+            logger.info("No Resources found in information graph")
+        
+        # Step 2: Load resources from Excel (skip if already loaded from info graph)
         df = pd.read_excel(excel_file, 'Resources')
-        logger.info(f"Loading {len(df)} Resources...")
+        logger.info(f"Processing {len(df)} Resources from Excel...")
+        
+        skipped_count = 0
+        loaded_count = 0
         
         with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
                 data = row.to_dict()
                 # Handle NaN values
                 data = {k: v for k, v in data.items() if pd.notna(v)}
+                
+                # Skip if resource already loaded from info graph (matching by name)
+                resource_name = data.get('name', '')
+                if resource_name in loaded_resource_names:
+                    logger.debug(f"  Skipping resource '{resource_name}' - already loaded from information graph")
+                    skipped_count += 1
+                    continue
+                
                 session.execute_write(self._create_resource, data)
+                loaded_count += 1
         
-        logger.info(f" Loaded {len(df)} Resources")
+        logger.info(f" Loaded {loaded_count} Resources from Excel, skipped {skipped_count} (already in info graph)")
         
     @staticmethod
     def _create_resource(tx, data: Dict):
@@ -707,8 +781,16 @@ class Neo4jLoader:
             query += ", r.resourceLocation = $filePath"
         if 'schemaName' in data:
             query += ", r.schemaName = $schemaName"
+        if 'packageName' in data:
+            query += ", r.packageName = $packageName"
         if 'description' in data:
             query += ", r.description = $description"
+        if 'foundInRepo' in data:
+            query += ", r.foundInRepo = $foundInRepo"
+        if 'repoName' in data:
+            query += ", r.repoName = $repoName"
+        if 'repoFilePath' in data:
+            query += ", r.repoFilePath = $repoFilePath"
         if 'tagId' in data:
             tagIds = data.get('tagId', None)
             for tagId in tagIds.strip('[]').split(","):

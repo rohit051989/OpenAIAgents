@@ -193,13 +193,18 @@ class ProcedureCallEnricher:
         Returns:
             True if update successful
         """
-        # Format procedure call as string for Neo4j
-        proc_str = f"{procedure_call.procedure_name}:{procedure_call.database_type}:{'FUNCTION' if procedure_call.is_function else 'PROCEDURE'}:{procedure_call.confidence}"
+        # Format procedure call with full hierarchy: schema:package:procedure:db_type:type:confidence
+        schema = procedure_call.schema_name or 'UNKNOWN'
+        package = procedure_call.package_name or 'NONE'
+        proc_type = 'FUNCTION' if procedure_call.is_function else 'PROCEDURE'
+        proc_str = f"{schema}:{package}:{procedure_call.procedure_name}:{procedure_call.database_type}:{proc_type}:{procedure_call.confidence}"
         
-        # Check if procedure name/schema/catalog is dynamic and requires manual review
+        # Check if procedure name/schema/package is dynamic and requires manual review
         requires_further_analysis = (
             'DYNAMIC' in procedure_call.procedure_name.upper() or
-            procedure_call.procedure_name == 'UNKNOWN'
+            procedure_call.procedure_name == 'UNKNOWN' or
+            (procedure_call.schema_name and 'DYNAMIC' in procedure_call.schema_name.upper()) or
+            (procedure_call.package_name and 'DYNAMIC' in procedure_call.package_name.upper())
         )
         
         query = """
@@ -234,6 +239,7 @@ class ProcedureCallEnricher:
         """
         Create PROCEDURE Resource node and INVOKES relationship.
         Skip creation for DYNAMIC/UNKNOWN procedure names - these require manual resolution.
+        Similar to db_operation_enricher's Resource creation for tables.
         
         Args:
             method_fqn: Method fully qualified name
@@ -241,13 +247,27 @@ class ProcedureCallEnricher:
         """
         # Skip Resource creation for DYNAMIC/UNKNOWN procedure names
         # These need manual resolution before Resource association
-        skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_PROCEDURE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']
-        if any(keyword in procedure_call.procedure_name.upper() for keyword in skip_keywords):
-            logger.info(f"  Skipping Resource creation for {procedure_call.procedure_name} (requires manual resolution)")
+        skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_PROCEDURE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA', 'DYNAMIC_PACKAGE']
+        
+        proc_name = procedure_call.procedure_name.upper() if procedure_call.procedure_name else 'UNKNOWN'
+        schema_name = procedure_call.schema_name.upper() if procedure_call.schema_name else 'UNKNOWN'
+        package_name = procedure_call.package_name.upper() if procedure_call.package_name else None
+        
+        if any(keyword in proc_name for keyword in skip_keywords):
+            logger.info(f"  Skipping Resource creation for {proc_name} (requires manual resolution)")
+            return
+        
+        if any(keyword in schema_name for keyword in skip_keywords):
+            logger.info(f"  Skipping Resource creation for {schema_name}.{proc_name} (dynamic schema requires manual resolution)")
+            return
+        
+        if package_name and any(keyword in package_name for keyword in skip_keywords):
+            logger.info(f"  Skipping Resource creation for {schema_name}.{package_name}.{proc_name} (dynamic package requires manual resolution)")
             return
         
         escaped_method_fqn = escape_cypher_string(method_fqn)
-        escaped_proc_name = escape_cypher_string(procedure_call.procedure_name)
+        escaped_proc_name = escape_cypher_string(proc_name)
+        escaped_schema_name = escape_cypher_string(schema_name)
         escaped_db_type = escape_cypher_string(procedure_call.database_type)
         
         resource_type = 'FUNCTION' if procedure_call.is_function else 'PROCEDURE'
@@ -256,14 +276,35 @@ class ProcedureCallEnricher:
         
         try:
             with self.driver.session(database=self.database) as session:
-                # Create or update Resource node
-                resource_query = f"""
-                MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                ON CREATE SET r.id = '{escaped_resource_id}',
-                              r.enabled = true,
-                              r.databaseType = '{escaped_db_type}'
-                ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}')
-                """
+                # Create or update Resource node with schema and package information
+                # If creating new Resource (not from db_repo), mark as notFoundInRepo
+                if package_name:
+                    escaped_package_name = escape_cypher_string(package_name)
+                    resource_query = f"""
+                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                    ON CREATE SET r.id = '{escaped_resource_id}',
+                                  r.enabled = true,
+                                  r.databaseType = '{escaped_db_type}',
+                                  r.schemaName = '{escaped_schema_name}',
+                                  r.packageName = '{escaped_package_name}',
+                                  r.foundInRepo = false,
+                                  r.notFoundInRepo = true
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
+                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
+                                 r.packageName = COALESCE(r.packageName, '{escaped_package_name}')
+                    """
+                else:
+                    resource_query = f"""
+                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                    ON CREATE SET r.id = '{escaped_resource_id}',
+                                  r.enabled = true,
+                                  r.databaseType = '{escaped_db_type}',
+                                  r.schemaName = '{escaped_schema_name}',
+                                  r.foundInRepo = false,
+                                  r.notFoundInRepo = true
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
+                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}')
+                    """
                 session.run(resource_query)
                 
                 # Create INVOKES relationship
@@ -272,13 +313,13 @@ class ProcedureCallEnricher:
                 MATCH (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
                 MERGE (m)-[:INVOKES {{
                     databaseType: '{escaped_db_type}',
-                    confidence: 'HIGH'
+                    confidence: '{procedure_call.confidence}'
                 }}]->(r)
                 """
                 session.run(relationship_query)
                 
         except Exception as e:
-            logger.warning(f"  Failed to create Resource relationship for {procedure_call.procedure_name}: {e}")
+            logger.warning(f"  Failed to create Resource relationship for {proc_name}: {e}")
     
     def _update_class_flag(self, class_fqn: str):
         """
@@ -346,9 +387,22 @@ class ProcedureCallEnricher:
                 
                 if procedure_call:
                     proc_type = "Function" if procedure_call.is_function else "Procedure"
-                    requires_review = 'DYNAMIC' in procedure_call.procedure_name.upper() or procedure_call.procedure_name == 'UNKNOWN'
+                    
+                    # Build display name with hierarchy
+                    display_name = procedure_call.procedure_name
+                    if procedure_call.package_name and procedure_call.package_name != 'NONE':
+                        display_name = f"{procedure_call.package_name}.{display_name}"
+                    if procedure_call.schema_name:
+                        display_name = f"{procedure_call.schema_name}.{display_name}"
+                    
+                    requires_review = (
+                        'DYNAMIC' in procedure_call.procedure_name.upper() or 
+                        procedure_call.procedure_name == 'UNKNOWN' or
+                        (procedure_call.schema_name and 'DYNAMIC' in procedure_call.schema_name.upper()) or
+                        (procedure_call.package_name and 'DYNAMIC' in procedure_call.package_name.upper())
+                    )
                     review_flag = "  [Further Analysis Required]" if requires_review else ""
-                    logger.info(f"   {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {procedure_call.procedure_name}{review_flag}")
+                    logger.info(f"   {method_data['methodName']}() -> {procedure_call.database_type} {proc_type}: {display_name}{review_flag}")
                     
                     # Update method in graph
                     if self._update_method_procedures(method_data['fqn'], procedure_call):

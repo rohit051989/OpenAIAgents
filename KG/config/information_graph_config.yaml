@@ -8,11 +8,11 @@ root_directory: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code"
 repositories:
   - name: "repo1"
     path: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code\\repo1"
-    type: "repository"
+    type: "code_repo"
     
-  - name: "repo2"
-    path: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code\\repo2"
-    type: "repository"
+  - name: "db_repo"
+    path: "D:\\Iris\\practice\\GenAI\\code\\Batch_KG\\sample_code\\db_repo"
+    type: "db_repo"
 
 # Projects, Folders, and Packages are AUTO-DETECTED:
 # - Project: Any directory containing pom.xml or build.gradle

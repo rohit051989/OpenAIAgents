@@ -27,6 +27,8 @@ Config File Format (manual_mappings.yaml):
     procedure_calls:
       - method_fqn: "com.companyname.dao.CustomerDAOImpl.uploadLoadStatus"
         procedure_name: "UPLOAD_LOAD_STATUS"
+        schema_name: "APMDATA"
+        package_name: "PKG_BATCH"
         database_type: "ORACLE"
         is_function: false
 """
@@ -133,11 +135,14 @@ class ManualResourceAssociator:
                 escaped_resource_id = escape_cypher_string(unique_id)
                 
                 # Create or update Resource node
+                # If creating new Resource (not from db_repo), mark as notFoundInRepo
                 resource_query = f"""
                 MERGE (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
                 ON CREATE SET r.id = '{escaped_resource_id}',
                               r.enabled = true,
                               r.schemaName = '{escaped_schema_name}',
+                              r.foundInRepo = false,
+                              r.notFoundInRepo = true,
                               r.manuallyResolved = true
                 ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
                              r.manuallyResolved = true
@@ -186,6 +191,7 @@ class ManualResourceAssociator:
             return False
     
     def associate_procedure_call(self, method_fqn: str, procedure_name: str, 
+                                  schema_name: str = None, package_name: str = None,
                                   database_type: str = "UNKNOWN", is_function: bool = False) -> bool:
         """
         Create PROCEDURE/FUNCTION Resource and INVOKES relationship for a method.
@@ -193,6 +199,8 @@ class ManualResourceAssociator:
         Args:
             method_fqn: Method fully qualified name
             procedure_name: Actual procedure/function name
+            schema_name: Database schema (e.g., APMDATA)
+            package_name: Oracle package name (e.g., PKG_BATCH)
             database_type: ORACLE, DB2, POSTGRESQL, etc.
             is_function: True if function, False if procedure
         
@@ -212,22 +220,47 @@ class ManualResourceAssociator:
                 escaped_method_fqn = escape_cypher_string(method_fqn)
                 escaped_proc_name = escape_cypher_string(procedure_name)
                 escaped_db_type = escape_cypher_string(database_type)
+                escaped_schema_name = escape_cypher_string(schema_name if schema_name else 'UNKNOWN')
                 
                 resource_type = 'FUNCTION' if is_function else 'PROCEDURE'
                 unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
                 escaped_resource_id = escape_cypher_string(unique_id)
                 
-                # Create or update Resource node
-                resource_query = f"""
-                MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                ON CREATE SET r.id = '{escaped_resource_id}',
-                              r.enabled = true,
-                              r.databaseType = '{escaped_db_type}',
-                              r.manuallyResolved = true
-                ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
-                             r.manuallyResolved = true
-                RETURN r.id as resourceId
-                """
+                # Create or update Resource node with schema and package information
+                # If creating new Resource (not from db_repo), mark as notFoundInRepo
+                if package_name:
+                    escaped_package_name = escape_cypher_string(package_name)
+                    resource_query = f"""
+                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                    ON CREATE SET r.id = '{escaped_resource_id}',
+                                  r.enabled = true,
+                                  r.databaseType = '{escaped_db_type}',
+                                  r.schemaName = '{escaped_schema_name}',
+                                  r.packageName = '{escaped_package_name}',
+                                  r.foundInRepo = false,
+                                  r.notFoundInRepo = true,
+                                  r.manuallyResolved = true
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
+                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
+                                 r.packageName = COALESCE(r.packageName, '{escaped_package_name}'),
+                                 r.manuallyResolved = true
+                    RETURN r.id as resourceId
+                    """
+                else:
+                    resource_query = f"""
+                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
+                    ON CREATE SET r.id = '{escaped_resource_id}',
+                                  r.enabled = true,
+                                  r.databaseType = '{escaped_db_type}',
+                                  r.schemaName = '{escaped_schema_name}',
+                                  r.foundInRepo = false,
+                                  r.notFoundInRepo = true,
+                                  r.manuallyResolved = true
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
+                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
+                                 r.manuallyResolved = true
+                    RETURN r.id as resourceId
+                    """
                 result = session.run(resource_query)
                 if result.single():
                     logger.info(f"     Resource created/updated: {procedure_name} ({resource_type})")
@@ -248,12 +281,17 @@ class ManualResourceAssociator:
                 self.stats['relationships_created'] += 1
                 
                 # Update method's procedureCalls property to reflect resolved procedure
+                # Format: schema:package:procedure:db_type:type:confidence
+                schema_part = escaped_schema_name
+                package_part = escape_cypher_string(package_name) if package_name else 'NONE'
+                proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
+                
                 update_method_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
+                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
                 SET m.procedureCalls = [proc IN m.procedureCalls | 
                     CASE 
                         WHEN proc CONTAINS 'DYNAMIC' OR proc CONTAINS 'UNKNOWN'
-                        THEN '{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH'
+                        THEN '{proc_value}'
                         ELSE proc
                     END
                 ],
@@ -441,7 +479,7 @@ class ManualResourceAssociator:
                 logger.info(f"  [{idx}] {method_fqn}")
                 logger.info(f"      Operation: {operation_type} on table '{table_name}'")
                 self.associate_db_operation(method_fqn, operation_type, table_name, schema_name, confidence)
-                logger.info()
+                
         
         # Process procedure calls
         procedure_calls = mappings.get('procedure_calls', [])
@@ -450,6 +488,8 @@ class ManualResourceAssociator:
             for idx, proc in enumerate(procedure_calls, 1):
                 method_fqn = proc.get('method_fqn')
                 procedure_name = proc.get('procedure_name')
+                schema_name = proc.get('schema_name')
+                package_name = proc.get('package_name')
                 database_type = proc.get('database_type', 'UNKNOWN')
                 is_function = proc.get('is_function', False)
                 
@@ -459,9 +499,15 @@ class ManualResourceAssociator:
                     continue
                 
                 logger.info(f"  [{idx}] {method_fqn}")
-                logger.info(f"      Procedure: {procedure_name} ({database_type})")
-                self.associate_procedure_call(method_fqn, procedure_name, database_type, is_function)
-                logger.info()
+                # Build display name with hierarchy
+                display_name = procedure_name
+                if package_name:
+                    display_name = f"{package_name}.{display_name}"
+                if schema_name:
+                    display_name = f"{schema_name}.{display_name}"
+                logger.info(f"      Procedure: {display_name} ({database_type})")
+                self.associate_procedure_call(method_fqn, procedure_name, schema_name, package_name, database_type, is_function)
+                logger.info("")
         
         # Process shell executions
         shell_executions = mappings.get('shell_executions', [])
@@ -495,7 +541,7 @@ class ManualResourceAssociator:
                     remote_host, remote_user, remote_port, ssh_key_location,
                     confidence, description
                 )
-                logger.info()
+                logger.info("")
         
         # Print statistics
         self.print_statistics()

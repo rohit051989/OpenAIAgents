@@ -28,6 +28,7 @@ from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from neo4j_direct_step_loader import parse_directory
 from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
+from db_repo_scanner import DBRepoScanner
 import time
 
 # Configure logging
@@ -697,10 +698,19 @@ class InformationGraphBuilder:
                 # Create file node
                 self._create_file_shot1(item, parent_path_str, stats, session)
             else:
-                # Create folder node
+                # Check if this is a db_repo type repository
+                repo_info = self.repos_map.get(item_path_str) or self.repos_map.get(str(item))
+                is_db_repo = repo_info and repo_info.get('type') == 'db_repo'
+                
+                # Create folder node and link to parent
                 self._create_folder_shot1(item, parent_path_str, stats, session)
-                # Recurse into folder
-                self._scan_recursive_shot1(item, item_path_str, stats, session, depth + 1)
+                
+                if is_db_repo:
+                    # Link db_repo to parent but don't scan its internal structure (Phase 0 handles that)
+                    logger.info(f"  Linked db_repo to parent: {item.name} (internal structure handled by Phase 0)")
+                else:
+                    # Recurse into folder
+                    self._scan_recursive_shot1(item, item_path_str, stats, session, depth + 1)
             
             # Mark as created after successful creation
             self.created_nodes.add(item_path_str)
@@ -1786,9 +1796,17 @@ def main():
         builder.create_constraints()
         logger.info(f"    Completed in {time.time() - phase_start:.1f} seconds")
         
+        # PHASE 0: Scan DB repositories (before code scanning)
+        phase_start = time.time()
+        logger.info(" 3. PHASE 0: Scanning database repositories...")
+        db_scanner = DBRepoScanner(builder.config, builder.driver, builder.database)
+        db_scanner.scan_db_repositories()
+        db_scan_time = time.time() - phase_start
+        logger.info(f"    DB Repository scanning completed in {db_scan_time:.1f} seconds")
+        
         # SHOT 1: Create basic tree
         phase_start = time.time()
-        logger.info(" 3. SHOT 1: Building tree structure...")
+        logger.info(" 4. SHOT 1: Building tree structure...")
         root_dir = builder.config['root_directory']
         builder.shot1_create_tree(root_dir)
         shot1_time = time.time() - phase_start
@@ -1796,7 +1814,7 @@ def main():
         
         # SHOT 2: Mark packages
         phase_start = time.time()
-        logger.info(" 4. SHOT 2: Marking package folders...")
+        logger.info(" 5. SHOT 2: Marking package folders...")
         builder.shot2_mark_packages()
         shot2_time = time.time() - phase_start
         logger.info(f"    SHOT 2 completed in {shot2_time:.1f} seconds")
@@ -1811,6 +1829,7 @@ def main():
         logger.info(" " + "=" * 80)
         logger.info(" ⏱️  PERFORMANCE SUMMARY")
         logger.info("=" * 80)
+        logger.info(f"  DB Repo Scan:         {db_scan_time:>8.1f} seconds")
         logger.info(f"  Shot 1 (Tree):        {shot1_time:>8.1f} seconds")
         logger.info(f"  Shot 2 (Packages):    {shot2_time:>8.1f} seconds")
         logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
@@ -1819,11 +1838,6 @@ def main():
         logger.info("=" * 80)
         logger.info("  Information Graph built successfully!")
         logger.info("")
-        logger.info("  Optimization Tips:")
-        logger.info("     - Current: ~260 stmt/s with FQN indexes (9x faster!)")
-        logger.info("     - Reduce batch_size to 2000 to minimize failures")
-        logger.info("     - 24K failures at batch_size=8000 vs 6 failures at 2000")
-        logger.info("=" * 80)
         
     except Exception as e:
         logger.info(f"  Error: {str(e)}")

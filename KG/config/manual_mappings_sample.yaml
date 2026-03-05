@@ -22,11 +22,21 @@ db_operations:
 # Stored Procedure Calls  
 # ----------------------
 # For methods that call stored procedures or functions
+# Oracle procedures support hierarchy: schema_name.package_name.procedure_name
 procedure_calls:
 - method_fqn: com.companyname.dao.CustomerDAOImpl.uploadLoadStatus
   procedure_name: UPLOAD_LOAD_STATUS
+  schema_name: APMDATA  # Database schema (optional)
+  package_name: PKG_BATCH  # Oracle package name (optional)
   database_type: ORACLE
   is_function: false
+
+- method_fqn: com.companyname.dao.ReportDAOImpl.generateMonthlyReport
+  procedure_name: GENERATE_REPORT
+  schema_name: REPORTING
+  package_name: null  # No package, just schema.procedure
+  database_type: ORACLE
+  is_function: true
 
 # Shell Script Executions
 # ------------------------

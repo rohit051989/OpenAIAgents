@@ -90,6 +90,8 @@ class ProcedureCall:
     procedure_name: str
     database_type: str  # ORACLE, POSTGRES, MYSQL, etc.
     method_fqn: str
+    schema_name: Optional[str] = None  # Database schema (e.g., APMDATA)
+    package_name: Optional[str] = None  # Package name for Oracle (e.g., PKG_BATCH)
     parameters: List[str] = field(default_factory=list)
     is_function: bool = False  # True if returns value, False for procedure
     confidence: str = "HIGH"  # HIGH, MEDIUM, LOW
