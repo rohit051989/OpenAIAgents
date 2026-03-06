@@ -32,8 +32,8 @@ procedure_calls:
   is_function: false
 
 - method_fqn: com.companyname.dao.ReportDAOImpl.generateMonthlyReport
-  procedure_name: GENERATE_REPORT
-  schema_name: REPORTING
+  procedure_name: SP_APMS_TO_DATAMART_DAY_END
+  schema_name: DMDATA
   package_name: null  # No package, just schema.procedure
   database_type: ORACLE
   is_function: true
