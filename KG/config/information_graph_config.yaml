@@ -129,11 +129,18 @@ scan_options:
   # Performance data: 2000=6 failures, 5000=15K failures, 8000=24K failures
   # With FQN indexes: 260 stmt/s (9x faster!)
   # Smaller batches minimize transaction failures and maintain high throughput
-  skip_initial_phases: true  # Set to true to skip DB clearing, constraints, and DB repo scanning (start directly at SHOT 1)
+  skip_initial_phases: false  # Set to true to skip DB clearing, constraints, and DB repo scanning (start directly at SHOT 1)
   
   # Job filtering for faster testing
   build_all_jobs: true  # Set to false to build only specific jobs
   jobs_to_build: []  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
+  
+  # Internal package prefixes for interface implementation validation
+  internal_package_prefixes:
+    - "com.companyname"  # Your internal package prefix
+    # Add more prefixes as needed, e.g.:
+    # - "com.yourclient"
+    # - "org.yourorg"
 
 # Class data configuration
 class_data:

@@ -294,6 +294,12 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                 
                                 calls_rel += ";"
                                 lines.append(calls_rel)
+                                
+                                # CRITICAL: Recursively process the called class to extract its method calls
+                                # This is especially important for interface-resolved implementations that weren't
+                                # in the original call hierarchy
+                                if called_class_fqn != class_fqn:  # Avoid infinite recursion for self-calls
+                                    process_class_recursive(called_class_fqn, depth + 1, max_depth)
                             else:
                                 # Method not found in class, but still create CALLS relationship if target method exists
                                 escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
@@ -1288,6 +1294,107 @@ class InformationGraphBuilder:
                                     packages_marked.add(folder_path)
                         break
     
+    def shot2_5_validate_implements(self):
+        """
+        Shot 2.5: Validate that referenced interfaces/classes in 'implements' property exist.
+        Flag JavaClass nodes where implements references are missing.
+        This uses AST parser results, no pattern matching.
+        """
+        logger.info("  SHOT 2.5: Validating implements references")
+        logger.info("=" * 60)
+        
+        # Query all JavaClass nodes that have implements property
+        query_classes_with_implements = """
+        MATCH (j:JavaClass)
+        WHERE j.implements IS NOT NULL AND size(j.implements) > 0
+        RETURN j.fqn, j.implements, j.package, j.isInterface
+        """
+        
+        # Get all existing class FQNs for validation
+        query_all_fqns = """
+        MATCH (j:JavaClass)
+        RETURN j.fqn
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            # Load all existing FQNs
+            result = session.run(query_all_fqns)
+            existing_fqns = {record['j.fqn'] for record in result}
+            logger.info(f"  Found {len(existing_fqns)} JavaClass nodes in graph")
+            
+            # Load classes with implements
+            result = session.run(query_classes_with_implements)
+            classes_with_implements = [(record['j.fqn'], record['j.implements'], 
+                                       record['j.package'], record['j.isInterface']) 
+                                      for record in result]
+            logger.info(f"  Found {len(classes_with_implements)} classes with implements property")
+        
+        # Validate each class's implements references
+        flagged_count = 0
+        missing_refs_summary = {}
+        
+        with self.driver.session(database=self.database) as session:
+            for class_fqn, implements_list, package, is_interface in classes_with_implements:
+                missing_interfaces = []
+                
+                for impl_ref in implements_list:
+                    # Check if this interface/class exists in the graph
+                    if impl_ref not in existing_fqns:
+                        # Try to resolve as FQN if it's a simple name
+                        resolved_fqn = None
+                        if '.' not in impl_ref and package:
+                            # Try same package
+                            resolved_fqn = f"{package}.{impl_ref}"
+                            if resolved_fqn not in existing_fqns:
+                                resolved_fqn = None
+                        
+                        if not resolved_fqn:
+                            missing_interfaces.append(impl_ref)
+                
+                # Flag if any interfaces are missing
+                if missing_interfaces:
+                    flag_query = """
+                    MATCH (j:JavaClass {fqn: $class_fqn})
+                    SET j.missingImplementsReferences = $missing_interfaces,
+                        j.implementsValidationStatus = 'MISSING_REFERENCES'
+                    RETURN j.fqn
+                    """
+                    result = session.run(flag_query, class_fqn=class_fqn, missing_interfaces=missing_interfaces)
+                    if result.single():
+                        flagged_count += 1
+                        logger.info(f"    FLAGGED: {class_fqn}")
+                        logger.info(f"       Missing: {', '.join(missing_interfaces)}")
+                        
+                        # Track for summary
+                        for missing_ref in missing_interfaces:
+                            if missing_ref not in missing_refs_summary:
+                                missing_refs_summary[missing_ref] = []
+                            missing_refs_summary[missing_ref].append(class_fqn)
+                else:
+                    # Mark as validated
+                    validate_query = """
+                    MATCH (j:JavaClass {fqn: $class_fqn})
+                    SET j.implementsValidationStatus = 'VALID'
+                    """
+                    session.run(validate_query, class_fqn=class_fqn)
+        
+        logger.info("  " + "=" * 60)
+        logger.info(f"  Validation Summary:")
+        logger.info(f"    Classes validated: {len(classes_with_implements)}")
+        logger.info(f"    Classes flagged: {flagged_count}")
+        logger.info(f"    Unique missing references: {len(missing_refs_summary)}")
+        
+        if missing_refs_summary:
+            logger.info(f"  \n  Top missing interface/class references:")
+            sorted_missing = sorted(missing_refs_summary.items(), key=lambda x: len(x[1]), reverse=True)
+            for missing_ref, referencing_classes in sorted_missing[:10]:
+                logger.info(f"    - {missing_ref} (referenced by {len(referencing_classes)} classes)")
+                if len(referencing_classes) <= 3:
+                    for ref_class in referencing_classes:
+                        logger.info(f"        -> {ref_class}")
+        
+        logger.info("=" * 60)
+    
     def _load_spring_xml_files_from_graph(self) -> List[str]:
         """
         Load Spring XML configuration files from the Neo4j graph.
@@ -1890,74 +1997,79 @@ class InformationGraphBuilder:
         # Step 5.5: Build interface-implementation registry for human-assisted resolution
         phase_start = time.time()
         logger.info(" " + "=" * 80)
-        logger.info(" PHASE 5.5: Building Interface-Implementation Registry")
+        logger.info(" PHASE 5.5: Building Interface-Implementation Registry from Neo4j")
         logger.info("=" * 80)
         
-        # Collect all classes from enriched jobs
+        # CORRECT APPROACH: Query Neo4j for ALL JavaClass nodes (already created in SHOT 1)
+        # This avoids assumptions about naming conventions and uses existing graph data
+        logger.info("  Querying Neo4j for all JavaClass nodes...")
+        
+        query_all_classes = """
+        MATCH (j:JavaClass)
+        WHERE j.fqn IS NOT NULL AND j.path IS NOT NULL
+        RETURN j.fqn as fqn, j.path as path, j.isInterface as isInterface, j.implements as implements
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query_all_classes)
+            neo4j_classes = [(record['fqn'], record['path'], record['isInterface'], record['implements']) 
+                           for record in result]
+        
+        logger.info(f"  Found {len(neo4j_classes)} JavaClass nodes in Neo4j")
+        
+        # Start with classes from call hierarchy cache (already parsed)
         all_classes_cache = {}
         for job in enriched_jobs:
             if hasattr(job, 'enrichment') and job.enrichment:
                 cache = job.enrichment.get('all_classes_cache', {})
                 all_classes_cache.update(cache)
         
-        logger.info(f"  Collected {len(all_classes_cache)} classes from call hierarchy")
+        logger.info(f"  Already have {len(all_classes_cache)} classes from call hierarchy cache")
         
-        # EXTEND CACHE: Parse interfaces that are referenced but not yet in cache
-        logger.info("  Scanning for referenced interfaces not yet in cache...")
+        # Parse missing classes from Neo4j (interfaces and implementations)
         parser = JavaCallHierarchyParser()
-        referenced_interfaces = set()
-        
-        # Collect all interface FQNs from implements arrays
-        for class_info in all_classes_cache.values():
-            if not class_info.is_interface and class_info.implements:
-                for impl_interface in class_info.implements:
-                    # Only consider interfaces from our codebase (not java.*, org.springframework.*, etc.)
-                    if impl_interface.startswith('com.') or impl_interface.startswith('org.'):
-                        if not impl_interface.startswith('org.springframework'):
-                            referenced_interfaces.add(impl_interface)
-        
-        logger.info(f"  Found {len(referenced_interfaces)} interfaces to parse from our codebase")
-        
-        # Try to parse each referenced interface
         parsed_count = 0
-        for interface_fqn in referenced_interfaces:
-            if interface_fqn not in all_classes_cache:
-                # Extract just the class name (last part of FQN)
-                interface_class_name = interface_fqn.split('.')[-1]
-                
-                # Search in repository roots from config
-                repositories = self.config.get('repositories', [])
-                repo_roots = [repo['path'] for repo in repositories if 'path' in repo]
-                
-                for repo_root in repo_roots:
-                    # Search for any Java file with this class name
-                    from pathlib import Path
-                    found = False
-                    
-                    for java_file in Path(repo_root).rglob(f"{interface_class_name}.java"):
-                        try:
-                            class_info = parser.parse_java_file(str(java_file))
-                            if class_info and class_info.is_interface and class_info.fqn == interface_fqn:
-                                all_classes_cache[interface_fqn] = class_info
-                                parsed_count += 1
-                                logger.debug(f"    ✓ Parsed interface: {interface_fqn}")
-                                found = True
-                                break
-                        except Exception as e:
-                            logger.debug(f"    ✗ Failed to parse {java_file}: {str(e)[:100]}")
-                    if found:
-                        break
+        parse_errors = 0
         
-        logger.info(f"  Successfully parsed {parsed_count} additional interfaces")
+        logger.info("  Parsing missing classes from Neo4j data...")
+        for fqn, path, is_interface, implements_array in neo4j_classes:
+            if fqn not in all_classes_cache:
+                try:
+                    class_info = parser.parse_java_file(path)
+                    if class_info and class_info.fqn == fqn:
+                        all_classes_cache[fqn] = class_info
+                        parsed_count += 1
+                        
+                        # Log interfaces and their potential implementations
+                        if class_info.is_interface:
+                            logger.debug(f"    ✓ Parsed interface: {fqn}")
+                        elif class_info.implements:
+                            logger.debug(f"    ✓ Parsed implementation: {fqn} implements {class_info.implements}")
+                    else:
+                        parse_errors += 1
+                        logger.debug(f"    ✗ FQN mismatch for {path}: expected {fqn}, got {class_info.fqn if class_info else 'None'}")
+                except Exception as e:
+                    parse_errors += 1
+                    logger.debug(f"    ✗ Failed to parse {path}: {str(e)[:100]}")
+        
+        logger.info(f"  Parsed {parsed_count} additional classes from Neo4j")
+        if parse_errors > 0:
+            logger.warning(f"  Failed to parse {parse_errors} classes (see debug logs)")
         logger.info(f"  Total classes in cache: {len(all_classes_cache)}")
         
-        # Build the registry
+        # Build the interface-implementation registry
+        logger.info("  Building interface-implementation registry...")
         interface_registry = build_simple_interface_registry(all_classes_cache)
         
-        # Store registry in job enrichment for later use
+        # CRITICAL: Update each job's cache with the complete class cache
+        logger.info(f"  Updating each job's cache with complete class information...")
         for job in enriched_jobs:
             if hasattr(job, 'enrichment') and job.enrichment:
+                # Replace the job's cache with the consolidated cache that includes all newly parsed classes
+                job.enrichment['all_classes_cache'] = all_classes_cache
                 job.enrichment['interface_registry'] = interface_registry
+        
+        logger.info(f"  All jobs updated with {len(all_classes_cache)} classes and {len(interface_registry)} interfaces")
         
         logger.info(f"  Phase 5.5 completed in {time.time() - phase_start:.1f} seconds")
         logger.info(" " + "=" * 80)
@@ -2140,6 +2252,13 @@ def main():
             builder.shot2_mark_packages()
             shot2_time = time.time() - phase_start
             logger.info(f"    SHOT 2 completed in {shot2_time:.1f} seconds")
+            
+            # SHOT 2.5: Validate implements references
+            phase_start = time.time()
+            logger.info(" 5.5. SHOT 2.5: Validating implements references...")
+            builder.shot2_5_validate_implements()
+            shot2_5_time = time.time() - phase_start
+            logger.info(f"    SHOT 2.5 completed in {shot2_5_time:.1f} seconds")
 
         # Load classes (Phases 1-9)
         phase_start = time.time()
@@ -2155,11 +2274,12 @@ def main():
             logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
             logger.info(f"  " + "-" * 40)
             logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
-            logger.info(f"  Note: Initial phases (DB clearing, constraints, DB repo scan, SHOT 1-2) were skipped")
+            logger.info(f"  Note: Initial phases (DB clearing, constraints, DB repo scan, SHOT 1-2.5) were skipped")
         else:
             logger.info(f"  DB Repo Scan:         {db_scan_time:>8.1f} seconds")
             logger.info(f"  Shot 1 (Tree):        {shot1_time:>8.1f} seconds")
             logger.info(f"  Shot 2 (Packages):    {shot2_time:>8.1f} seconds")
+            logger.info(f"  Shot 2.5 (Validation):{shot2_5_time:>8.1f} seconds")
             logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
             logger.info(f"  " + "-" * 40)
             logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
