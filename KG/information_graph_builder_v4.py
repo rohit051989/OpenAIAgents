@@ -48,8 +48,12 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     - Each JavaMethod node represents a method
     - Relationships: HAS_METHOD (Class->Method), CALLS (Method->Method), USES_CLASS (Class->Class)
     
+    Includes interface-to-implementation resolution with human review flags:
+    - Attempts to resolve interface method calls to concrete implementations
+    - Marks unresolvable cases for human review with appropriate flags
+    
     Args:
-        job: Enriched JobDef with enrichment data containing step_classes and all_classes_cache
+        job: Enriched JobDef with enrichment data containing step_classes, all_classes_cache, and interface_registry
         
     Returns:
         Cypher statements as a single string
@@ -66,14 +70,27 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     
     step_classes = job.enrichment.get('step_classes', {})
     all_classes_cache = job.enrichment.get('all_classes_cache', {})
+    interface_registry = job.enrichment.get('interface_registry', {})
     dao_analyzer = DAOAnalyzer()
     shell_analyzer = ShellScriptAnalyzer()
+    
+    # Track resolution statistics for human review
+    resolution_stats = {
+        'total_calls': 0,
+        'interface_calls': 0,
+        'resolved_single': 0,
+        'resolved_multiple': 0,
+        'unresolved_no_impl': 0,
+        'unresolved_method_missing': 0
+    }
     
     if not step_classes:
         logger.warning(f"Job '{job.name}' has no step_classes in enrichment. Skipping.")
         return ""
     
     logger.info(f"Generating call hierarchy for job '{job.name}' with {len(step_classes)} step classes")
+    if interface_registry:
+        logger.info(f"  Interface registry available: {len(interface_registry)} interfaces")
     
     def escape_cypher_string(s: str) -> str:
         """Escape string for Cypher query"""
@@ -97,6 +114,9 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
         is_shell_executor_value = "true" if is_shell_executor else "false"
         
+        # Determine if this is an interface
+        is_interface_value = "true" if class_info.is_interface else "false"
+        
         # Create JavaClass node
         escaped_fqn = escape_cypher_string(class_fqn)
         escaped_class_name = escape_cypher_string(class_info.class_name)
@@ -106,9 +126,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             f"MERGE (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
             f"ON CREATE SET c.className = '{escaped_class_name}', "
             f"c.package = '{escaped_package}', "
+            f"c.isInterface = {is_interface_value}, "
             f"c.isDAOClass = {is_dao_class_value}, "
             f"c.isShellExecutorClass = {is_shell_executor_value} "
-            f"ON MATCH SET c.isDAOClass = {is_dao_class_value}, "
+            f"ON MATCH SET c.isInterface = {is_interface_value}, "
+            f"c.isDAOClass = {is_dao_class_value}, "
             f"c.isShellExecutorClass = {is_shell_executor_value};"
         )
         
@@ -150,8 +172,72 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                 
                 # Process method calls
                 for call in method_def.calls:
+                    resolution_stats['total_calls'] += 1
+                    
                     # Determine target class - if not set, assume same class for self-calls
                     called_class_fqn = call.target_class if call.target_class else class_fqn
+                    
+                    # === INTERFACE RESOLUTION WITH HUMAN REVIEW FLAGS ===
+                    # Check if target is an interface and attempt resolution
+                    original_called_class_fqn = called_class_fqn
+                    resolved_to_implementation = False
+                    requires_human_review = False
+                    review_reason = None
+                    candidate_implementations = []
+                    
+                    if called_class_fqn in all_classes_cache:
+                        called_class_info_check = all_classes_cache[called_class_fqn]
+                        
+                        if called_class_info_check.is_interface:
+                            resolution_stats['interface_calls'] += 1
+                            logger.debug(f"  Interface call detected: {called_class_fqn}.{call.method_name}")
+                            
+                            # Look up implementations in registry
+                            implementations = interface_registry.get(called_class_fqn, [])
+                            
+                            if len(implementations) == 0:
+                                # No implementation found
+                                requires_human_review = True
+                                review_reason = "no_implementation"
+                                resolution_stats['unresolved_no_impl'] += 1
+                                logger.debug(f"    → No implementation found (external interface or unused)")
+                                
+                            elif len(implementations) == 1:
+                                # Single implementation - check if method exists
+                                impl_fqn = implementations[0]
+                                if impl_fqn in all_classes_cache:
+                                    impl_class_info = all_classes_cache[impl_fqn]
+                                    if call.method_name in impl_class_info.methods:
+                                        # SUCCESS: Resolve to implementation
+                                        called_class_fqn = impl_fqn
+                                        resolved_to_implementation = True
+                                        resolution_stats['resolved_single'] += 1
+                                        logger.debug(f"    ✓ Resolved to single implementation: {impl_fqn}")
+                                    else:
+                                        # Method not found in implementation
+                                        requires_human_review = True
+                                        review_reason = "method_not_found_in_implementation"
+                                        candidate_implementations = [impl_fqn]
+                                        resolution_stats['unresolved_method_missing'] += 1
+                                        logger.debug(f"    ✗ Method {call.method_name} not found in implementation {impl_fqn}")
+                            
+                            else:
+                                # Multiple implementations - need human decision
+                                requires_human_review = True
+                                review_reason = "multiple_implementations"
+                                candidate_implementations = implementations
+                                resolution_stats['resolved_multiple'] += 1
+                                logger.debug(f"    ? Multiple implementations found ({len(implementations)}): {implementations[:3]}")
+                                
+                                # Use first implementation as default for now (user can review)
+                                impl_fqn = implementations[0]
+                                if impl_fqn in all_classes_cache:
+                                    impl_class_info = all_classes_cache[impl_fqn]
+                                    if call.method_name in impl_class_info.methods:
+                                        called_class_fqn = impl_fqn
+                                        resolved_to_implementation = True
+                                        logger.debug(f"    → Using first implementation: {impl_fqn}")
+                    
                     called_method_fqn = f"{called_class_fqn}.{call.method_name}"
                     
                     call_key = (method_fqn, called_method_fqn)
@@ -185,33 +271,89 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                 )
                                 lines.append(called_cypher_stmt)                                    
                                 
-                                # Create CALLS relationship
-                                lines.append(
+                                # Create CALLS relationship with human review flags
+                                escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
+                                escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
+                                escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
+                                
+                                calls_rel = (
                                     f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
                                     f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"MERGE (m)-[:CALLS {{lineNumber: {call.line_number}}}]->(cm);"
+                                    f"MERGE (m)-[r:CALLS]->(cm) "
+                                    f"SET r.lineNumber = {call.line_number}, "
+                                    f"r.requiresHumanReview = {str(requires_human_review).lower()}, "
+                                    f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
                                 )
+                                
+                                if escaped_original_interface:
+                                    calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
+                                if escaped_review_reason:
+                                    calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
+                                if escaped_candidates:
+                                    calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
+                                
+                                calls_rel += ";"
+                                lines.append(calls_rel)
                             else:
                                 # Method not found in class, but still create CALLS relationship if target method exists
                                 escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
                                 logger.debug(f"Method {call.method_name} not found in class {called_class_fqn}, checking if method node exists")
                                 
-                                # Try to create relationship anyway (method might have been created elsewhere)
-                                lines.append(
+                                # Add human review flags
+                                escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
+                                escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
+                                escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
+                                
+                                calls_rel = (
                                     f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
                                     f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"MERGE (m)-[:CALLS {{lineNumber: {call.line_number}}}]->(cm);"
+                                    f"MERGE (m)-[r:CALLS]->(cm) "
+                                    f"SET r.lineNumber = {call.line_number}, "
+                                    f"r.requiresHumanReview = true, "  # Always true when method not found
+                                    f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
                                 )
+                                
+                                if escaped_original_interface:
+                                    calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
+                                if escaped_review_reason:
+                                    calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
+                                else:
+                                    calls_rel += f", r.reviewReason = 'method_not_found'"
+                                if escaped_candidates:
+                                    calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
+                                
+                                calls_rel += ";"
+                                lines.append(calls_rel)
                         else:
                             # Class not in cache, but still try to create relationship if both methods exist
                             escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
                             logger.debug(f"Class {called_class_fqn} not in cache, attempting to link existing method nodes")
                             
-                            lines.append(
+                            # Add human review flags
+                            escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
+                            escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
+                            escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
+                            
+                            calls_rel = (
                                 f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
                                 f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                f"MERGE (m)-[:CALLS {{lineNumber: {call.line_number}}}]->(cm);"
+                                f"MERGE (m)-[r:CALLS]->(cm) "
+                                f"SET r.lineNumber = {call.line_number}, "
+                                f"r.requiresHumanReview = true, "  # Always true when class not in cache
+                                f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
                             )
+                            
+                            if escaped_original_interface:
+                                calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
+                            if escaped_review_reason:
+                                calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
+                            else:
+                                calls_rel += f", r.reviewReason = 'class_not_in_cache'"
+                            if escaped_candidates:
+                                calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
+                            
+                            calls_rel += ";"
+                            lines.append(calls_rel)
         
         # Process called_classes relationships
         for called_class_fqn in class_info.called_classes:
@@ -237,13 +379,18 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                     is_shell_executor_called = shell_analyzer_called.is_shell_executor_class(called_class_info)
                     is_shell_executor_called_value = "true" if is_shell_executor_called else "false"
                     
+                    # Determine if this is an interface
+                    is_interface_called_value = "true" if called_class_info.is_interface else "false"
+                    
                     lines.append(
                         f"MERGE (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
                         f"ON CREATE SET cc.className = '{escaped_called_class_name}', "
                         f"cc.package = '{escaped_called_package}', "
+                        f"cc.isInterface = {is_interface_called_value}, "
                         f"cc.isDAOClass = {is_dao_class_called_value}, "
                         f"cc.isShellExecutorClass = {is_shell_executor_called_value} "
-                        f"ON MATCH SET cc.isDAOClass = {is_dao_class_called_value}, "
+                        f"ON MATCH SET cc.isInterface = {is_interface_called_value}, "
+                        f"cc.isDAOClass = {is_dao_class_called_value}, "
                         f"cc.isShellExecutorClass = {is_shell_executor_called_value};"
                     )
                     
@@ -343,7 +490,81 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     logger.info(f"  - Identified {dao_class_count} DAO classes")
     logger.info(f"  - Identified {shell_executor_count} Shell Executor classes")
     
+    # Log interface resolution statistics
+    if resolution_stats['interface_calls'] > 0:
+        logger.info(f"  Interface Resolution Statistics:")
+        logger.info(f"    - Total method calls: {resolution_stats['total_calls']}")
+        logger.info(f"    - Interface calls detected: {resolution_stats['interface_calls']}")
+        logger.info(f"    - ✓ Resolved to single implementation: {resolution_stats['resolved_single']}")
+        logger.info(f"    - ? Resolved to first of multiple: {resolution_stats['resolved_multiple']}")
+        logger.info(f"    - ✗ Unresolved (no implementation): {resolution_stats['unresolved_no_impl']}")
+        logger.info(f"    - ✗ Unresolved (method missing): {resolution_stats['unresolved_method_missing']}")
+        
+        total_needs_review = (resolution_stats['resolved_multiple'] + 
+                             resolution_stats['unresolved_no_impl'] + 
+                             resolution_stats['unresolved_method_missing'])
+        if total_needs_review > 0:
+            logger.warning(f"  ⚠️  {total_needs_review} calls marked for HUMAN REVIEW - check CALLS relationships with requiresHumanReview=true")
+    
     return "\n".join(lines)
+
+
+def build_simple_interface_registry(all_classes_cache: Dict[str, ClassInfo]) -> Dict[str, List[str]]:
+    """
+    Build simple interface-to-implementation registry for human-assisted resolution.
+    
+    Maps: interface_fqn -> [list of implementing class FQNs]
+    
+    This is intentionally SIMPLE (no transitive closure) to enable human review
+    for complex cases. Only direct implementations are included.
+    
+    Args:
+        all_classes_cache: Dictionary of all parsed ClassInfo objects (fqn -> ClassInfo)
+        
+    Returns:
+        Dictionary mapping interface FQN to list of implementing class FQNs
+    """
+    logger.info("Building interface-implementation registry...")
+    
+    interface_registry = {}
+    
+    # Step 1: Identify all interfaces
+    for class_fqn, class_info in all_classes_cache.items():
+        if class_info.is_interface:
+            interface_registry[class_fqn] = []
+    
+    logger.info(f"  Found {len(interface_registry)} interfaces in cache")
+    
+    
+    # Step 2: Map concrete classes to their directly implemented interfaces
+    for class_fqn, class_info in all_classes_cache.items():
+        if not class_info.is_interface:  # Concrete class
+            # Check each interface this class implements
+            for implemented_interface in class_info.implements:
+                # Only add if we have this interface in our registry (i.e., it's in our codebase)
+                if implemented_interface in interface_registry:
+                    interface_registry[implemented_interface].append(class_fqn)
+    
+    # Step 3: Log statistics
+    total_interfaces = len(interface_registry)
+    no_impl = sum(1 for impls in interface_registry.values() if len(impls) == 0)
+    single_impl = sum(1 for impls in interface_registry.values() if len(impls) == 1)
+    multi_impl = sum(1 for impls in interface_registry.values() if len(impls) > 1)
+    
+    logger.info(f"  Registry built: {total_interfaces} interfaces found")
+    logger.info(f"    - {no_impl} interfaces with NO implementations (external or unused)")
+    logger.info(f"    - {single_impl} interfaces with SINGLE implementation (auto-resolvable)")
+    logger.info(f"    - {multi_impl} interfaces with MULTIPLE implementations (need human review)")
+    
+    # Log top 5 interfaces with multiple implementations
+    multi_impl_interfaces = [(iface, impls) for iface, impls in interface_registry.items() if len(impls) > 1]
+    if multi_impl_interfaces:
+        logger.info("  Top interfaces with multiple implementations:")
+        for iface, impls in sorted(multi_impl_interfaces, key=lambda x: len(x[1]), reverse=True)[:5]:
+            logger.info(f"    - {iface}: {len(impls)} implementations")
+    
+    return interface_registry
+
 
 class InformationGraphBuilder:
     """Builds hierarchical information graph using two-shot approach."""
@@ -883,6 +1104,7 @@ class InformationGraphBuilder:
             n.imports = $imports,
             n.fields = $fields,
             n.method_count = $method_count,
+            n.isInterface = $isInterface,
             n.isDAOClass = $isDAOClass,
             n.isShellExecutorClass = $isShellExecutorClass,
             n.isTestClass = $isTestClass,
@@ -905,6 +1127,7 @@ class InformationGraphBuilder:
                 imports=class_info.imports,
                 fields=json.dumps(class_info.fields),
                 method_count=len(class_info.methods),
+                isInterface=class_info.is_interface,
                 isDAOClass=is_dao_class,
                 isShellExecutorClass=is_shell_executor,
                 isTestClass=is_test_class,
@@ -1637,6 +1860,19 @@ class InformationGraphBuilder:
         logger.info("=" * 80)
         
         job_defs = parse_directory(global_bean_map, spring_xml_files)
+        logger.info(f"  Found {len(job_defs)} total jobs")
+        
+        # Filter jobs based on configuration (for faster testing)
+        build_all_jobs = self.config.get('scan_options', {}).get('build_all_jobs', True)
+        jobs_to_build = self.config.get('scan_options', {}).get('jobs_to_build', [])
+        
+        if not build_all_jobs and jobs_to_build:
+            original_count = len(job_defs)
+            job_defs = [job for job in job_defs if job.name in jobs_to_build]
+            logger.info(f"  🎯 Filtered to {len(job_defs)} jobs (configured): {', '.join([j.name for j in job_defs])}")
+            logger.info(f"  Skipped {original_count - len(job_defs)} jobs for faster testing")
+        else:
+            logger.info(f"  Processing all {len(job_defs)} jobs")
         
         logger.info(f"  Phase 5 completed in {time.time() - phase_start:.1f} seconds")
 
@@ -1650,6 +1886,80 @@ class InformationGraphBuilder:
         enriched_jobs = enrich_with_call_hierarchy_v2(job_defs, registry, global_bean_map)
         
         logger.info(f"  Phase 6 completed in {time.time() - phase_start:.1f} seconds")
+        
+        # Step 5.5: Build interface-implementation registry for human-assisted resolution
+        phase_start = time.time()
+        logger.info(" " + "=" * 80)
+        logger.info(" PHASE 5.5: Building Interface-Implementation Registry")
+        logger.info("=" * 80)
+        
+        # Collect all classes from enriched jobs
+        all_classes_cache = {}
+        for job in enriched_jobs:
+            if hasattr(job, 'enrichment') and job.enrichment:
+                cache = job.enrichment.get('all_classes_cache', {})
+                all_classes_cache.update(cache)
+        
+        logger.info(f"  Collected {len(all_classes_cache)} classes from call hierarchy")
+        
+        # EXTEND CACHE: Parse interfaces that are referenced but not yet in cache
+        logger.info("  Scanning for referenced interfaces not yet in cache...")
+        parser = JavaCallHierarchyParser()
+        referenced_interfaces = set()
+        
+        # Collect all interface FQNs from implements arrays
+        for class_info in all_classes_cache.values():
+            if not class_info.is_interface and class_info.implements:
+                for impl_interface in class_info.implements:
+                    # Only consider interfaces from our codebase (not java.*, org.springframework.*, etc.)
+                    if impl_interface.startswith('com.') or impl_interface.startswith('org.'):
+                        if not impl_interface.startswith('org.springframework'):
+                            referenced_interfaces.add(impl_interface)
+        
+        logger.info(f"  Found {len(referenced_interfaces)} interfaces to parse from our codebase")
+        
+        # Try to parse each referenced interface
+        parsed_count = 0
+        for interface_fqn in referenced_interfaces:
+            if interface_fqn not in all_classes_cache:
+                # Extract just the class name (last part of FQN)
+                interface_class_name = interface_fqn.split('.')[-1]
+                
+                # Search in repository roots from config
+                repositories = self.config.get('repositories', [])
+                repo_roots = [repo['path'] for repo in repositories if 'path' in repo]
+                
+                for repo_root in repo_roots:
+                    # Search for any Java file with this class name
+                    from pathlib import Path
+                    found = False
+                    
+                    for java_file in Path(repo_root).rglob(f"{interface_class_name}.java"):
+                        try:
+                            class_info = parser.parse_java_file(str(java_file))
+                            if class_info and class_info.is_interface and class_info.fqn == interface_fqn:
+                                all_classes_cache[interface_fqn] = class_info
+                                parsed_count += 1
+                                logger.debug(f"    ✓ Parsed interface: {interface_fqn}")
+                                found = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"    ✗ Failed to parse {java_file}: {str(e)[:100]}")
+                    if found:
+                        break
+        
+        logger.info(f"  Successfully parsed {parsed_count} additional interfaces")
+        logger.info(f"  Total classes in cache: {len(all_classes_cache)}")
+        
+        # Build the registry
+        interface_registry = build_simple_interface_registry(all_classes_cache)
+        
+        # Store registry in job enrichment for later use
+        for job in enriched_jobs:
+            if hasattr(job, 'enrichment') and job.enrichment:
+                job.enrichment['interface_registry'] = interface_registry
+        
+        logger.info(f"  Phase 5.5 completed in {time.time() - phase_start:.1f} seconds")
         logger.info(" " + "=" * 80)
         logger.info(" CALL HIERARCHY BUILD COMPLETE")
         logger.info("=" * 80)
@@ -1784,40 +2094,52 @@ def main():
     builder = InformationGraphBuilder(config_path=config_file)
     
     try:
-        # Clear existing data
-        phase_start = time.time()
-        logger.info(" 1. Clearing existing database...")
-        builder.clear_database()
-        logger.info(f"    Completed in {time.time() - phase_start:.1f} seconds")
+        # Check if we should skip initial phases
+        skip_initial = builder.config.get('scan_options', {}).get('skip_initial_phases', False)
         
-        # Create constraints
-        phase_start = time.time()
-        logger.info(" 2. Creating constraints and indexes...")
-        builder.create_constraints()
-        logger.info(f"    Completed in {time.time() - phase_start:.1f} seconds")
-        
-        # PHASE 0: Scan DB repositories (before code scanning)
-        phase_start = time.time()
-        logger.info(" 3. PHASE 0: Scanning database repositories...")
-        db_scanner = DBRepoScanner(builder.config, builder.driver, builder.database)
-        db_scanner.scan_db_repositories()
-        db_scan_time = time.time() - phase_start
-        logger.info(f"    DB Repository scanning completed in {db_scan_time:.1f} seconds")
+        if skip_initial:
+            logger.info(" ⏭️  SKIPPING initial phases (clear, constraints, DB repo scan) as per configuration")
+            logger.info("    Starting directly at SHOT 1: Building tree structure...")
+            logger.info("")
+            db_scan_time = 0
+            shot1_time = 0
+            shot2_time = 0
+        else:
+            # Clear existing data
+            phase_start = time.time()
+            logger.info(" 1. Clearing existing database...")
+            builder.clear_database()
+            logger.info(f"    Completed in {time.time() - phase_start:.1f} seconds")
+            
+            # Create constraints
+            phase_start = time.time()
+            logger.info(" 2. Creating constraints and indexes...")
+            builder.create_constraints()
+            logger.info(f"    Completed in {time.time() - phase_start:.1f} seconds")
+            
+            # PHASE 0: Scan DB repositories (before code scanning)
+            phase_start = time.time()
+            logger.info(" 3. PHASE 0: Scanning database repositories...")
+            db_scanner = DBRepoScanner(builder.config, builder.driver, builder.database)
+            db_scanner.scan_db_repositories()
+            db_scan_time = time.time() - phase_start
+            logger.info(f"    DB Repository scanning completed in {db_scan_time:.1f} seconds")
         
         # SHOT 1: Create basic tree
         phase_start = time.time()
         logger.info(" 4. SHOT 1: Building tree structure...")
-        root_dir = builder.config['root_directory']
-        builder.shot1_create_tree(root_dir)
-        shot1_time = time.time() - phase_start
-        logger.info(f"    SHOT 1 completed in {shot1_time:.1f} seconds")
-        
-        # SHOT 2: Mark packages
-        phase_start = time.time()
-        logger.info(" 5. SHOT 2: Marking package folders...")
-        builder.shot2_mark_packages()
-        shot2_time = time.time() - phase_start
-        logger.info(f"    SHOT 2 completed in {shot2_time:.1f} seconds")
+        if not skip_initial:
+            root_dir = builder.config['root_directory']
+            builder.shot1_create_tree(root_dir)
+            shot1_time = time.time() - phase_start
+            logger.info(f"    SHOT 1 completed in {shot1_time:.1f} seconds")
+            
+            # SHOT 2: Mark packages
+            phase_start = time.time()
+            logger.info(" 5. SHOT 2: Marking package folders...")
+            builder.shot2_mark_packages()
+            shot2_time = time.time() - phase_start
+            logger.info(f"    SHOT 2 completed in {shot2_time:.1f} seconds")
 
         # Load classes (Phases 1-9)
         phase_start = time.time()
@@ -1829,12 +2151,18 @@ def main():
         logger.info(" " + "=" * 80)
         logger.info(" ⏱️  PERFORMANCE SUMMARY")
         logger.info("=" * 80)
-        logger.info(f"  DB Repo Scan:         {db_scan_time:>8.1f} seconds")
-        logger.info(f"  Shot 1 (Tree):        {shot1_time:>8.1f} seconds")
-        logger.info(f"  Shot 2 (Packages):    {shot2_time:>8.1f} seconds")
-        logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
-        logger.info(f"  " + "-" * 40)
-        logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
+        if skip_initial:
+            logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
+            logger.info(f"  " + "-" * 40)
+            logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
+            logger.info(f"  Note: Initial phases (DB clearing, constraints, DB repo scan, SHOT 1-2) were skipped")
+        else:
+            logger.info(f"  DB Repo Scan:         {db_scan_time:>8.1f} seconds")
+            logger.info(f"  Shot 1 (Tree):        {shot1_time:>8.1f} seconds")
+            logger.info(f"  Shot 2 (Packages):    {shot2_time:>8.1f} seconds")
+            logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
+            logger.info(f"  " + "-" * 40)
+            logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
         logger.info("=" * 80)
         logger.info("  Information Graph built successfully!")
         logger.info("")
