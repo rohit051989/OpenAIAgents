@@ -19,6 +19,12 @@ db_operations:
   schema_name: batch_schema
   confidence: HIGH
 
+- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap
+  operation_type: SELECT
+  table_name: APMS_BATCH_JOB
+  schema_name: APMLOAD
+  confidence: HIGH
+
 # Stored Procedure Calls  
 # ----------------------
 # For methods that call stored procedures or functions
@@ -67,14 +73,4 @@ shell_executions:
   script_type: BASH
   confidence: MEDIUM
   description: "Cleanup temporary files after customer export"
-- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus
-  operation_type: SELECT
-  table_name: batch_job
-  schema_name: batch_schema
-  confidence: HIGH
-- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobDetails
-  operation_type: SELECT
-  table_name: batch_job_execution
-  schema_name: batch_schema
-  confidence: HIGH
 

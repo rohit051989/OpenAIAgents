@@ -168,11 +168,12 @@ class ManualResourceAssociator:
                 self.stats['relationships_created'] += 1
                 
                 # Update method's dbOperations property to reflect resolved table
+                # Only replace operations that match the specific operation_type AND contain UNKNOWN/DYNAMIC
                 update_method_query = f"""
                 MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
                 SET m.dbOperations = [op IN m.dbOperations | 
                     CASE 
-                        WHEN op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN'
+                        WHEN op STARTS WITH '{escaped_operation_type}:' AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
                         THEN '{escaped_operation_type}:{escaped_table_name}:{escaped_confidence}'
                         ELSE op
                     END
@@ -282,6 +283,7 @@ class ManualResourceAssociator:
                 
                 # Update method's procedureCalls property to reflect resolved procedure
                 # Format: schema:package:procedure:db_type:type:confidence
+                # Only replace entries that contain the specific procedure name being resolved
                 schema_part = escaped_schema_name
                 package_part = escape_cypher_string(package_name) if package_name else 'NONE'
                 proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
@@ -290,7 +292,8 @@ class ManualResourceAssociator:
                 MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
                 SET m.procedureCalls = [proc IN m.procedureCalls | 
                     CASE 
-                        WHEN proc CONTAINS 'DYNAMIC' OR proc CONTAINS 'UNKNOWN'
+                        WHEN (proc CONTAINS 'DYNAMIC' OR proc CONTAINS 'UNKNOWN') AND 
+                             (proc CONTAINS ':{escaped_proc_name}:' OR proc ENDS WITH ':{escaped_proc_name}')
                         THEN '{proc_value}'
                         ELSE proc
                     END
@@ -416,11 +419,13 @@ class ManualResourceAssociator:
                 self.stats['relationships_created'] += 1
                 
                 # Update method's shellExecutions property to reflect resolved script
+                # Only replace entries that match the specific script being resolved
                 update_method_query = f"""
                 MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
                 SET m.shellExecutions = [exec IN m.shellExecutions | 
                     CASE 
-                        WHEN exec CONTAINS 'DYNAMIC' OR exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'PARAMETERIZED'
+                        WHEN (exec CONTAINS 'DYNAMIC' OR exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'PARAMETERIZED') AND 
+                             (exec CONTAINS ':{escaped_script_name}:' OR exec ENDS WITH ':{escaped_script_name}')
                         THEN 'RESOLVED:{escaped_script_name}:{escaped_confidence}'
                         ELSE exec
                     END
@@ -437,6 +442,158 @@ class ManualResourceAssociator:
             logger.error(f"   Error associating shell execution: {e}")
             self.stats['errors'] += 1
             return False
+    
+    def _consolidate_all_steps(self):
+        """
+        Consolidate all operations (DB, procedures, shell) at Step level.
+        This is called ONCE after all manual fixes are complete.
+        Similar to db_operation_enricher._consolidate_step_db_operations but handles all operation types.
+        """
+        logger.info("\n" + "="*80)
+        logger.info("CONSOLIDATING STEP OPERATIONS")
+        logger.info("="*80)
+        
+        # Get all Steps
+        query_steps = """
+        MATCH (s:Step)
+        RETURN s.name as stepName, 
+               s.stepKind as stepKind,
+               elementId(s) as stepId
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query_steps)
+            steps_data = [dict(record) for record in result]
+        
+        logger.info(f"  Found {len(steps_data)} Steps to consolidate")
+        
+        steps_updated = 0
+        
+        for step_data in steps_data:
+            step_name = step_data['stepName']
+            step_kind = step_data['stepKind']
+            step_id = step_data['stepId']
+            
+            if not step_kind:
+                continue
+            
+            # Determine entry method names based on step kind
+            if step_kind == "TASKLET":
+                entry_method_names = ["execute"]
+            elif step_kind == "CHUNK":
+                entry_method_names = ["read", "process", "write"]
+            else:
+                continue
+            
+            # Find entry methods for this Step
+            query_entry_methods = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod)
+            WHERE m.methodName IN $methodNames
+            RETURN elementId(m) as methodId, 
+                   m.methodName as methodName,
+                   m.dbOperations as dbOps,
+                   m.procedureCalls as procCalls,
+                   m.shellExecutions as shellExecs
+            """
+            
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query_entry_methods, 
+                                    stepId=step_id, 
+                                    methodNames=entry_method_names)
+                entry_methods = [dict(record) for record in result]
+            
+            if not entry_methods:
+                continue
+            
+            # BFS traversal to collect all operations from call graph
+            all_db_operations = set()
+            all_procedure_calls = set()
+            all_shell_executions = set()
+            
+            for entry_method in entry_methods:
+                method_id = entry_method['methodId']
+                
+                # Add operations from entry method itself
+                if entry_method.get('dbOps'):
+                    all_db_operations.update(entry_method['dbOps'])
+                if entry_method.get('procCalls'):
+                    all_procedure_calls.update(entry_method['procCalls'])
+                if entry_method.get('shellExecs'):
+                    all_shell_executions.update(entry_method['shellExecs'])
+                
+                # BFS traversal
+                visited = set()
+                queue = [method_id]
+                visited.add(method_id)
+                
+                while queue:
+                    current_id = queue.pop(0)
+                    
+                    # Get all called methods
+                    query_calls = """
+                    MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
+                    WHERE elementId(m) = $methodId
+                    RETURN elementId(called) as calledId,
+                           called.dbOperations as dbOps,
+                           called.procedureCalls as procCalls,
+                           called.shellExecutions as shellExecs
+                    """
+                    
+                    with self.driver.session(database=self.database) as session2:
+                        result = session2.run(query_calls, methodId=current_id)
+                        called_methods = [dict(record) for record in result]
+                    
+                    for called in called_methods:
+                        called_id = called['calledId']
+                        
+                        if called_id not in visited:
+                            visited.add(called_id)
+                            queue.append(called_id)
+                            
+                            # Collect operations from called method
+                            if called.get('dbOps'):
+                                all_db_operations.update(called['dbOps'])
+                            if called.get('procCalls'):
+                                all_procedure_calls.update(called['procCalls'])
+                            if called.get('shellExecs'):
+                                all_shell_executions.update(called['shellExecs'])
+            
+            # Update Step with recalculated operations
+            step_db_ops = sorted(list(all_db_operations))
+            step_proc_calls = sorted(list(all_procedure_calls))
+            step_shell_execs = sorted(list(all_shell_executions))
+            
+            query_update = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            SET s.stepDbOperations = $dbOps,
+                s.stepDbOperationCount = $dbOpCount,
+                s.stepProcedureCalls = $procCalls,
+                s.stepProcedureCallCount = $procCallCount,
+                s.stepShellExecutions = $shellExecs,
+                s.stepShellExecutionCount = $shellExecCount,
+                s.lastUpdated = datetime()
+            RETURN s.name as name
+            """
+            
+            with self.driver.session(database=self.database) as session:
+                session.run(query_update, 
+                           stepId=step_id,
+                           dbOps=step_db_ops,
+                           dbOpCount=len(step_db_ops),
+                           procCalls=step_proc_calls,
+                           procCallCount=len(step_proc_calls),
+                           shellExecs=step_shell_execs,
+                           shellExecCount=len(step_shell_execs))
+            
+            logger.info(f"    Step '{step_name}': {len(step_db_ops)} DB ops, "
+                      f"{len(step_proc_calls)} proc calls, {len(step_shell_execs)} shell execs")
+            steps_updated += 1
+        
+        logger.info(f"\n  Updated {steps_updated} Steps with consolidated operations")
+        logger.info("="*80)
     
     def process_config_file(self, config_path: str = manual_mappings_file_path):
         """
@@ -542,6 +699,10 @@ class ManualResourceAssociator:
                     confidence, description
                 )
                 logger.info("")
+        
+        # Consolidate all Step operations ONCE after all fixes
+        if db_operations or procedure_calls or shell_executions:
+            self._consolidate_all_steps()
         
         # Print statistics
         self.print_statistics()
