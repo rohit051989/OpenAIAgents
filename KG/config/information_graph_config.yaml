@@ -134,13 +134,6 @@ scan_options:
   # Job filtering for faster testing
   build_all_jobs: true  # Set to false to build only specific jobs
   jobs_to_build: []  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
-  
-  # Internal package prefixes for interface implementation validation
-  internal_package_prefixes:
-    - "com.companyname"  # Your internal package prefix
-    # Add more prefixes as needed, e.g.:
-    # - "com.yourclient"
-    # - "org.yourorg"
 
 # Class data configuration
 class_data:

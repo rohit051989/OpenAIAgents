@@ -1514,7 +1514,7 @@ class InformationGraphBuilder:
                         
                         if composite_key in global_bean_map:
                             logger.info(f"  Warning: Duplicate bean definition found. "
-                                  f"Bean ID: '{bean_id}', Class: '{bean_class}'")
+                                  f"Bean ID: '{bean_id}', Class: '{bean_class}', XML File: '{xml_file}' ")
                         
                         global_bean_map[composite_key] = (bean_class, source_path, xml_file)
                 

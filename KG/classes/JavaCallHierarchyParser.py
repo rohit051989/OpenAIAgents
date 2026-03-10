@@ -94,7 +94,8 @@ class JavaCallHierarchyParser:
                     implements.extend([self._resolve_type(ext.name, imports, package) for ext in node.extends])
                 else:
                     extends = self._resolve_type(node.extends.name, imports, package)
-
+            
+            logger.info(f"  Parsed with JavaLang to identify the respective implementation for : {fqn} (extends: {extends}, implements: {implements})")
             class_info = ClassInfo(
                 package=package,
                 class_name=class_name,
@@ -181,23 +182,50 @@ class JavaCallHierarchyParser:
         name_node = self._ts_find_child_by_type(class_node, "identifier")
         if name_node:
             class_name = self._ts_get_text(name_node, source)
+
+        if(class_name == "BatchJobDaoImpl"):
+            logger.info(f"  Debug: Found class declaration for {class_name} in {file_path}")
         
         fqn = f"{package}.{class_name}" if package else class_name
         
         # Extract extends and implements (simplified)
         extends = None
         implements = []
+        
+        # Handle extends/superclass
         superclass_node = self._ts_find_child_by_type(class_node, "superclass")
         if superclass_node:
+            # Try different type nodes (type_identifier, generic_type, scoped_type_identifier)
             type_node = self._ts_find_child_by_type(superclass_node, "type_identifier")
+            if not type_node:
+                type_node = self._ts_find_child_by_type(superclass_node, "scoped_type_identifier")
+            if not type_node:
+                # For generic types like SomeClass<T>, get the base type
+                generic_node = self._ts_find_child_by_type(superclass_node, "generic_type")
+                if generic_node:
+                    type_node = self._ts_find_child_by_type(generic_node, "type_identifier")
             if type_node:
                 extends = self._ts_get_text(type_node, source)
         
+        # Handle implements/super_interfaces (IMPROVED for complex syntax)
         interfaces_node = self._ts_find_child_by_type(class_node, "super_interfaces")
         if interfaces_node:
-            for type_node in self._ts_find_children_by_type(interfaces_node, "type_identifier"):
-                implements.append(self._ts_get_text(type_node, source))
+            # Get all type-related children (type_identifier, scoped_type_identifier, generic_type)
+            for child in interfaces_node.children:
+                if child.type == "type_identifier":
+                    implements.append(self._ts_get_text(child, source))
+                elif child.type == "scoped_type_identifier":
+                    # Handle qualified names like com.example.Interface
+                    implements.append(self._ts_get_text(child, source))
+                elif child.type == "generic_type":
+                    # Handle generic types like List<String> - extract base type
+                    base_type_node = self._ts_find_child_by_type(child, "type_identifier")
+                    if not base_type_node:
+                        base_type_node = self._ts_find_child_by_type(child, "scoped_type_identifier")
+                    if base_type_node:
+                        implements.append(self._ts_get_text(base_type_node, source))
         
+        logger.info(f"  Parsed with tree-sitter to identify the respective implementation for : {fqn} (extends: {extends}, implements: {implements})")
         # Create ClassInfo with basic information
         class_info = ClassInfo(
             package=package,
