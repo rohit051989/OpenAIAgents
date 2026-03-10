@@ -188,7 +188,7 @@ class JavaCallHierarchyParser:
         
         fqn = f"{package}.{class_name}" if package else class_name
         
-        # Extract extends and implements (simplified)
+        # Extract extends and implements
         extends = None
         implements = []
         
@@ -205,25 +205,45 @@ class JavaCallHierarchyParser:
                 if generic_node:
                     type_node = self._ts_find_child_by_type(generic_node, "type_identifier")
             if type_node:
-                extends = self._ts_get_text(type_node, source)
+                extends_name = self._ts_get_text(type_node, source)
+                # Resolve to FQN using imports and package
+                extends = self._resolve_type(extends_name, imports, package)
         
         # Handle implements/super_interfaces (IMPROVED for complex syntax)
         interfaces_node = self._ts_find_child_by_type(class_node, "super_interfaces")
         if interfaces_node:
             # Get all type-related children (type_identifier, scoped_type_identifier, generic_type)
             for child in interfaces_node.children:
+                interface_name = None
+                
                 if child.type == "type_identifier":
-                    implements.append(self._ts_get_text(child, source))
+                    interface_name = self._ts_get_text(child, source)
+                elif child.type == "type_list":
+                    for type_child in child.children:
+                        if type_child.type == "type_identifier":
+                            interface_name = self._ts_get_text(type_child, source)
+                            # Resolve to FQN and add
+                            implements.append(self._resolve_type(interface_name, imports, package))
+                            interface_name = None  # Reset after adding
+                        elif type_child.type == "scoped_type_identifier":
+                            interface_name = self._ts_get_text(type_child, source)
+                            # Resolve to FQN and add
+                            implements.append(self._resolve_type(interface_name, imports, package))
+                            interface_name = None  # Reset after adding
                 elif child.type == "scoped_type_identifier":
                     # Handle qualified names like com.example.Interface
-                    implements.append(self._ts_get_text(child, source))
+                    interface_name = self._ts_get_text(child, source)
                 elif child.type == "generic_type":
                     # Handle generic types like List<String> - extract base type
                     base_type_node = self._ts_find_child_by_type(child, "type_identifier")
                     if not base_type_node:
                         base_type_node = self._ts_find_child_by_type(child, "scoped_type_identifier")
                     if base_type_node:
-                        implements.append(self._ts_get_text(base_type_node, source))
+                        interface_name = self._ts_get_text(base_type_node, source)
+                
+                # Resolve and add interface name if found
+                if interface_name:
+                    implements.append(self._resolve_type(interface_name, imports, package))
         
         logger.info(f"  Parsed with tree-sitter to identify the respective implementation for : {fqn} (extends: {extends}, implements: {implements})")
         # Create ClassInfo with basic information

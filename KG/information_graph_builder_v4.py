@@ -798,21 +798,30 @@ class InformationGraphBuilder:
             
             # Check extensions
             if 'extensions' in rules and file_ext in rules['extensions']:
-                # Check include patterns
-                if 'include_patterns' in rules:
+                # For rules with BOTH include_patterns AND locations (like java_test_class),
+                # use OR logic: match if pattern matches OR location matches
+                if 'include_patterns' in rules and 'locations' in rules:
+                    pattern_matched = any(re.search(pattern, file_str, re.IGNORECASE) for pattern in rules['include_patterns'])
+                    location_matched = any(loc in file_str for loc in rules['locations'])
+                    matched = pattern_matched or location_matched
+                # Check include patterns only
+                elif 'include_patterns' in rules:
                     if any(re.search(pattern, file_str, re.IGNORECASE) for pattern in rules['include_patterns']):
                         matched = True
                 # Check exclude patterns
                 elif 'exclude_patterns' in rules:
                     if not any(re.search(pattern, file_str, re.IGNORECASE) for pattern in rules['exclude_patterns']):
                         matched = True
+                        # For exclude patterns with locations, use AND logic (must pass both)
+                        if 'locations' in rules:
+                            if not any(loc in file_str for loc in rules['locations']):
+                                matched = False
                 else:
                     matched = True
-            
-            # Check locations
-            if matched and 'locations' in rules:
-                if not any(loc in file_str for loc in rules['locations']):
-                    matched = False
+                    # Check locations if specified
+                    if 'locations' in rules:
+                        if not any(loc in file_str for loc in rules['locations']):
+                            matched = False
             
             if matched:
                 # Convert type_name to CamelCase label
@@ -850,7 +859,7 @@ class InformationGraphBuilder:
             'projects': 0,
             'files': 0,
             'java_classes': 0,
-            'test_classes': 0,
+            'test_classes_skipped': 0,
             'config_files': 0
         }
         
@@ -887,7 +896,7 @@ class InformationGraphBuilder:
         logger.info(f"  Projects: {stats['projects']}")
         logger.info(f"  Files: {stats['files']}")
         logger.info(f"    Java Classes: {stats['java_classes']}")
-        logger.info(f"    Test Classes: {stats['test_classes']}")
+        logger.info(f"    Test Classes (skipped): {stats['test_classes_skipped']}")
         logger.info(f"    Config Files: {stats['config_files']}")
         logger.info("=" * 60)
     
@@ -986,8 +995,13 @@ class InformationGraphBuilder:
         OPTIMIZED: Reuses provided session instead of opening new one."""
         file_types = self.identify_file_type(file_path)
         
-        # Check if it's a Java class
-        is_java = 'JavaClass' in file_types or 'JavaTestClass' in file_types
+        # Skip test classes entirely - they are not needed in the information graph
+        if 'JavaTestClass' in file_types:
+            stats['test_classes_skipped'] = stats.get('test_classes_skipped', 0) + 1
+            return
+        
+        # Check if it's a Java class (but not a test class)
+        is_java = 'JavaClass' in file_types
         
         if is_java and self.java_parser:
             # Parse Java file to get ClassInfo - use absolute path
@@ -997,8 +1011,6 @@ class InformationGraphBuilder:
             if class_info:
                 self._create_java_class_shot1(class_info, parent_path, session)
                 stats['java_classes'] += 1
-                if 'JavaTestClass' in file_types:
-                    stats['test_classes'] += 1
             else:
                 # Failed to parse, create regular file
                 self._create_regular_file_shot1(file_path, parent_path, file_types, stats, session)
