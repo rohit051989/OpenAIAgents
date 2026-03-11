@@ -241,15 +241,31 @@ def parse_job_element(job_el: ET.Element, job: JobDef, global_bean_map: Dict[str
 def parse_step_element(step_el: ET.Element, job: JobDef, global_bean_map: Dict[str, Tuple[str, str, str]], xml_path: str = "") -> None:
     sid = step_el.get("id")
     if not sid:
+        logger.warning(f"⚠️  Skipping step with no 'id' attribute in {Path(xml_path).name}")
         return
 
-    # Find tasklet element
+    # Find tasklet element - try multiple namespace variations
+    # 1. batch namespace (correct): <batch:tasklet>
+    # 2. beans namespace (incorrect but happens): <tasklet> when default xmlns is beans
+    # 3. no namespace (incorrect but happens): <tasklet> with no namespace
     tasklet_el = step_el.find(f"{N_BATCH}tasklet")
     if tasklet_el is None:
+        tasklet_el = step_el.find(f"{N_BEANS}tasklet")
+    if tasklet_el is None:
+        tasklet_el = step_el.find("tasklet")
+    
+    if tasklet_el is None:
+        logger.warning(f"⚠️  SKIPPING STEP '{sid}': No <tasklet> element found in {Path(xml_path).name}")
+        logger.warning(f"    Step '{sid}' will NOT be created in the graph - check XML structure")
         return
     
     # Check if it's a chunk-based step or tasklet-based step
+    # Try multiple namespace variations
     chunk_el = tasklet_el.find(f"{N_BATCH}chunk")
+    if chunk_el is None:
+        chunk_el = tasklet_el.find(f"{N_BEANS}chunk")
+    if chunk_el is None:
+        chunk_el = tasklet_el.find("chunk")
     
     if chunk_el is not None:
         # CHUNK-based step
@@ -472,6 +488,7 @@ def generate_cypher(job: JobDef) -> str:
 
     # Steps
     for step in job.steps.values():
+        logger.info(f"Generating Cypher for Job: {job.name} for Step: {step.name}, kind: {step.step_kind}")
         if step.step_kind == "CHUNK":
             # For chunk-based steps, create step with reader, processor, writer info
             # Escape paths for Cypher
@@ -644,12 +661,27 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str, str]], xml_files:
     # SECOND PASS: Parse batch jobs using the global bean map
     logger.info(" === Second Pass: Parsing Batch Jobs ===")
     all_job_defs = []
+    total_steps_in_xml = 0  # Count from XML
+    total_steps_parsed = 0  # Count successfully parsed
 
     for xml_file in xml_files:
         try:
             logger.info(f" Parsing: {os.path.basename(xml_file)}")
+            
+            # Count actual <step> elements in XML before parsing
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+            steps_in_xml = len(root.findall(f".//{N_BATCH}step"))
+            total_steps_in_xml += steps_in_xml
+            
             job_defs = parse_spring_batch_xml(xml_file, global_bean_map)
             all_job_defs.extend(job_defs)
+            
+            steps_parsed = sum(len(job.steps) for job in job_defs)
+            if steps_parsed < steps_in_xml:
+                logger.warning(f"  ⚠️  XML has {steps_in_xml} <step> elements but only {steps_parsed} were parsed!")
+                logger.warning(f"      {steps_in_xml - steps_parsed} step(s) were SKIPPED - check warnings above")
+            
             if job_defs:
                 logger.info(f"  Found {len(job_defs)} job(s): {[j.name for j in job_defs]}")
             else:
@@ -719,6 +751,16 @@ def parse_directory(global_bean_map: Dict[str, Tuple[str, str, str]], xml_files:
     total_chunk_steps = sum(sum(1 for s in job.steps.values() if s.step_kind == "CHUNK") for job in all_job_defs)
     total_decisions = sum(len(job.decisions) for job in all_job_defs)
     total_listeners = sum(len(job.listeners) for job in all_job_defs)
+    
+    # Check for skipped steps
+    skipped_steps = total_steps_in_xml - total_steps
+    if skipped_steps > 0:
+        logger.warning("=" * 80)
+        logger.warning(f"⚠️  STEPS MISSING: {skipped_steps} step(s) were found in XML but NOT parsed!")
+        logger.warning(f"    Steps in XML files: {total_steps_in_xml}")
+        logger.warning(f"    Steps successfully parsed: {total_steps}")
+        logger.warning(f"    Check warnings above for steps without <tasklet> element")
+        logger.warning("=" * 80)
 
     resolved_tasklet_steps = sum(
         sum(1 for step in job.steps.values() if step.step_kind == "TASKLET" and step.class_name)

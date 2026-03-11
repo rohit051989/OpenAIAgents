@@ -486,16 +486,45 @@ class ManualResourceAssociator:
                 continue
             
             # Find entry methods for this Step
+            # Support inheritance: traverse EXTENDS chain to find inherited methods
             query_entry_methods = """
             MATCH (s:Step)
             WHERE elementId(s) = $stepId
-            MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod)
-            WHERE m.methodName IN $methodNames
-            RETURN elementId(m) as methodId, 
-                   m.methodName as methodName,
-                   m.dbOperations as dbOps,
-                   m.procedureCalls as procCalls,
-                   m.shellExecutions as shellExecs
+            MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+            
+            // Find methods in the class or its parent hierarchy (up to 10 levels)
+            CALL {
+                WITH jc
+                // Check direct methods first (closest in hierarchy)
+                MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId, 
+                       m.methodName as methodName,
+                       m.dbOperations as dbOps,
+                       m.procedureCalls as procCalls,
+                       m.shellExecutions as shellExecs,
+                       0 as inheritanceDepth
+                
+                UNION
+                
+                // Check parent classes (up to 10 levels of inheritance)
+                WITH jc
+                MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
+                MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId, 
+                       m.methodName as methodName,
+                       m.dbOperations as dbOps,
+                       m.procedureCalls as procCalls,
+                       m.shellExecutions as shellExecs,
+                       length(path) as inheritanceDepth
+            }
+            
+            // Return the method closest in the inheritance hierarchy (prefer child overrides)
+            WITH methodId, methodName, dbOps, procCalls, shellExecs, inheritanceDepth
+            ORDER BY inheritanceDepth ASC
+            RETURN methodId, methodName, dbOps, procCalls, shellExecs
+            LIMIT 3  // For TASKLET: 1 execute, For CHUNK: read, write, process
             """
             
             with self.driver.session(database=self.database) as session:

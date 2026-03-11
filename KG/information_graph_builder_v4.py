@@ -1407,6 +1407,35 @@ class InformationGraphBuilder:
         
         logger.info("=" * 60)
     
+    def shot2_6_create_extends_relationships(self):
+        """
+        SHOT 2.6: Create EXTENDS relationships based on JavaClass 'extends' property.
+        
+        This enables inheritance traversal for finding inherited methods,
+        which is critical for cases like:
+        - MyTasklet extends BaseTasklet (where BaseTasklet has execute() method)
+        - Child classes that inherit entry methods from parent classes
+        """
+        logger.info(f"  Creating EXTENDS relationships for class inheritance")
+        logger.info("=" * 60)
+        
+        query = """
+        MATCH (child:JavaClass)
+        WHERE child.extends IS NOT NULL AND child.extends <> ''
+        WITH child, child.extends as parentFqn
+        MATCH (parent:JavaClass {fqn: parentFqn})
+        MERGE (child)-[:EXTENDS]->(parent)
+        RETURN count(*) as relationshipCount
+        """
+        
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query)
+            record = result.single()
+            count = record['relationshipCount'] if record else 0
+            
+        logger.info(f"    Created {count} EXTENDS relationships")
+        logger.info("=" * 60)
+    
     def _load_spring_xml_files_from_graph(self) -> List[str]:
         """
         Load Spring XML configuration files from the Neo4j graph.
@@ -2228,6 +2257,8 @@ def main():
             db_scan_time = 0
             shot1_time = 0
             shot2_time = 0
+            shot2_5_time = 0
+            shot2_6_time = 0
         else:
             # Clear existing data
             phase_start = time.time()
@@ -2271,6 +2302,13 @@ def main():
             builder.shot2_5_validate_implements()
             shot2_5_time = time.time() - phase_start
             logger.info(f"    SHOT 2.5 completed in {shot2_5_time:.1f} seconds")
+            
+            # SHOT 2.6: Create EXTENDS relationships for inheritance
+            phase_start = time.time()
+            logger.info(" 5.6. SHOT 2.6: Creating EXTENDS relationships...")
+            builder.shot2_6_create_extends_relationships()
+            shot2_6_time = time.time() - phase_start
+            logger.info(f"    SHOT 2.6 completed in {shot2_6_time:.1f} seconds")
 
         # Load classes (Phases 1-9)
         phase_start = time.time()
@@ -2292,6 +2330,7 @@ def main():
             logger.info(f"  Shot 1 (Tree):        {shot1_time:>8.1f} seconds")
             logger.info(f"  Shot 2 (Packages):    {shot2_time:>8.1f} seconds")
             logger.info(f"  Shot 2.5 (Validation):{shot2_5_time:>8.1f} seconds")
+            logger.info(f"  Shot 2.6 (EXTENDS):   {shot2_6_time:>8.1f} seconds")
             logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
             logger.info(f"  " + "-" * 40)
             logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
