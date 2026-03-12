@@ -44,6 +44,13 @@ procedure_calls:
   database_type: ORACLE
   is_function: true
 
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure
+  procedure_name: P_DATA_RESTORE_PROCESSOR
+  schema_name: APMLOAD
+  package_name: null  # No package, just schema.procedure
+  database_type: ORACLE
+  is_function: true
+
 # Shell Script Executions
 # ------------------------
 # For methods that execute shell scripts with dynamic paths or unknown details

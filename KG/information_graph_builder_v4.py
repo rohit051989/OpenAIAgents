@@ -98,6 +98,49 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             return ""
         return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
     
+    def find_method_in_class_hierarchy(class_fqn: str, method_name: str, all_classes_cache: Dict[str, ClassInfo], max_depth: int = 10) -> Optional[Tuple[str, ClassInfo]]:
+        """
+        Find a method in a class or its parent classes via inheritance chain.
+        
+        Args:
+            class_fqn: Fully qualified name of the class to search
+            method_name: Name of the method to find
+            all_classes_cache: Dictionary of all parsed classes
+            max_depth: Maximum inheritance depth to prevent infinite loops
+            
+        Returns:
+            Tuple of (class_fqn_with_method, ClassInfo) if found, None otherwise
+        """
+        current_fqn = class_fqn
+        depth = 0
+        
+        while current_fqn and depth < max_depth:
+            if current_fqn not in all_classes_cache:
+                logger.debug(f"    Inheritance check: Class {current_fqn} not in cache")
+                return None
+            
+            current_class_info = all_classes_cache[current_fqn]
+            
+            # Check if method exists in current class
+            if method_name in current_class_info.methods:
+                logger.debug(f"    ✓ Method {method_name} found in {current_fqn} (depth={depth})")
+                return (current_fqn, current_class_info)
+            
+            # Move to parent class
+            if current_class_info.extends:
+                logger.debug(f"    Checking parent: {current_class_info.extends}")
+                current_fqn = current_class_info.extends
+                depth += 1
+            else:
+                # No parent, method not found
+                logger.debug(f"    ✗ Method {method_name} not found in {class_fqn} or its {depth} parent(s)")
+                return None
+        
+        if depth >= max_depth:
+            logger.warning(f"    ⚠️  Hit max inheritance depth ({max_depth}) while searching for {method_name} in {class_fqn}")
+        
+        return None
+    
     def process_class_recursive(class_fqn: str, depth: int = 0, max_depth: int = 10):
         """Recursively process a class and its called classes"""
         if depth > max_depth or class_fqn in processed_classes or class_fqn not in all_classes_cache:
@@ -171,11 +214,47 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                 )
                 
                 # Process method calls
-                for call in method_def.calls:
+                # Track previous method calls within this method for chained call resolution
+                previous_call_return_types = {}  # call_index -> return_type_fqn
+                
+                for call_index, call in enumerate(method_def.calls):
                     resolution_stats['total_calls'] += 1
                     
-                    # Determine target class - if not set, assume same class for self-calls
+                    # Determine target class - if not set, try to resolve chained calls
                     called_class_fqn = call.target_class if call.target_class else class_fqn
+                    
+                    # === CHAINED METHOD CALL RESOLUTION ===
+                    # If target_class is None, check if a previous call's return type has this method
+                    if not call.target_class and previous_call_return_types:
+                        logger.debug(f"  Attempting to resolve chained call for {call.method_name} (no target class)")
+                        for prev_idx, prev_return_type in previous_call_return_types.items():
+                            if prev_return_type and prev_return_type in all_classes_cache:
+                                prev_class_info = all_classes_cache[prev_return_type]
+                                if call.method_name in prev_class_info.methods:
+                                    logger.info(f"  ✓ Resolved chained call: previous method returned {prev_return_type}, calling {call.method_name}")
+                                    called_class_fqn = prev_return_type
+                                    break
+                    
+                    # Store this call's return type for potential future chained calls
+                    if called_class_fqn and called_class_fqn in all_classes_cache:
+                        target_class_info = all_classes_cache[called_class_fqn]
+                        if call.method_name in target_class_info.methods:
+                            target_method = target_class_info.methods[call.method_name]
+                            return_type_simple = target_method.return_type
+                            # Try to find FQN of return type in all_classes_cache
+                            return_type_fqn = None
+                            if return_type_simple:
+                                # If it's already an FQN (contains dots)
+                                if '.' in return_type_simple and return_type_simple in all_classes_cache:
+                                    return_type_fqn = return_type_simple
+                                else:
+                                    # Search for matching class name in cache
+                                    for fqn in all_classes_cache.keys():
+                                        if fqn.endswith('.' + return_type_simple) or fqn == return_type_simple:
+                                            return_type_fqn = fqn
+                                            break
+                            if return_type_fqn:
+                                previous_call_return_types[call_index] = return_type_fqn
                     
                     # === INTERFACE RESOLUTION WITH HUMAN REVIEW FLAGS ===
                     # Check if target is an interface and attempt resolution
@@ -203,23 +282,28 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                 logger.debug(f"    → No implementation found (external interface or unused)")
                                 
                             elif len(implementations) == 1:
-                                # Single implementation - check if method exists
+                                # Single implementation - check if method exists (including parent classes)
                                 impl_fqn = implementations[0]
                                 if impl_fqn in all_classes_cache:
-                                    impl_class_info = all_classes_cache[impl_fqn]
-                                    if call.method_name in impl_class_info.methods:
-                                        # SUCCESS: Resolve to implementation
-                                        called_class_fqn = impl_fqn
+                                    # Check if method exists in implementation or its parent classes
+                                    method_found = find_method_in_class_hierarchy(impl_fqn, call.method_name, all_classes_cache)
+                                    if method_found:
+                                        # SUCCESS: Resolve to implementation (or parent class with method)
+                                        actual_class_fqn, actual_class_info = method_found
+                                        called_class_fqn = actual_class_fqn
                                         resolved_to_implementation = True
                                         resolution_stats['resolved_single'] += 1
-                                        logger.debug(f"    ✓ Resolved to single implementation: {impl_fqn}")
+                                        if actual_class_fqn != impl_fqn:
+                                            logger.debug(f"    ✓ Resolved to single implementation: {impl_fqn} (method found in parent: {actual_class_fqn})")
+                                        else:
+                                            logger.debug(f"    ✓ Resolved to single implementation: {impl_fqn}")
                                     else:
-                                        # Method not found in implementation
+                                        # Method not found in implementation or parent classes
                                         requires_human_review = True
                                         review_reason = "method_not_found_in_implementation"
                                         candidate_implementations = [impl_fqn]
                                         resolution_stats['unresolved_method_missing'] += 1
-                                        logger.debug(f"    ✗ Method {call.method_name} not found in implementation {impl_fqn}")
+                                        logger.debug(f"    ✗ Method {call.method_name} not found in implementation {impl_fqn} or its parents")
                             
                             else:
                                 # Multiple implementations - need human decision
@@ -232,11 +316,16 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                 # Use first implementation as default for now (user can review)
                                 impl_fqn = implementations[0]
                                 if impl_fqn in all_classes_cache:
-                                    impl_class_info = all_classes_cache[impl_fqn]
-                                    if call.method_name in impl_class_info.methods:
-                                        called_class_fqn = impl_fqn
+                                    # Check if method exists in implementation or its parent classes
+                                    method_found = find_method_in_class_hierarchy(impl_fqn, call.method_name, all_classes_cache)
+                                    if method_found:
+                                        actual_class_fqn, actual_class_info = method_found
+                                        called_class_fqn = actual_class_fqn
                                         resolved_to_implementation = True
-                                        logger.debug(f"    → Using first implementation: {impl_fqn}")
+                                        if actual_class_fqn != impl_fqn:
+                                            logger.debug(f"    → Using first implementation: {impl_fqn} (method found in parent: {actual_class_fqn})")
+                                        else:
+                                            logger.debug(f"    → Using first implementation: {impl_fqn}")
                     
                     called_method_fqn = f"{called_class_fqn}.{call.method_name}"
                     

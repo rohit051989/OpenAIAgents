@@ -377,8 +377,57 @@ class JavaCallHierarchyParser:
                 # Determine target class from qualifier
                 target_class = None
                 if qualifier:
+                    # Check if qualifier is a chained method call (contains parentheses)
+                    # e.g., "getJobsDao()" or "storedProcedureExecutor.getJobsDao()"
+                    if '(' in qualifier:
+                        logger.info(f"    Detected chained method call: {qualifier}.{method_name}")
+                        # Extract the method name (remove parentheses and arguments)
+                        # Handle nested calls: "obj.method1().method2()" -> get last method before current
+                        qual_parts = qualifier.split('.')
+                        last_method_part = qual_parts[-1]
+                        # Extract method name before '('
+                        if '(' in last_method_part:
+                            chained_method_name = last_method_part.split('(')[0].strip()
+                            # Determine which class contains this method
+                            chained_target_class = None
+                            if len(qual_parts) > 1:
+                                # Method called on an object: obj.method()
+                                obj_qualifier = '.'.join(qual_parts[:-1])
+                                logger.info(f"      Looking up object: '{obj_qualifier}' in fields: {list(class_info.fields.keys())}")
+                                if obj_qualifier in class_info.fields:
+                                    chained_target_class = class_info.fields[obj_qualifier]
+                                    logger.info(f"      Found field type: {chained_target_class}")
+                                    chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
+                                    logger.info(f"      Resolved to FQN: {chained_target_class}")
+                                else:
+                                    chained_target_class = self._resolve_type(obj_qualifier, class_info.imports, class_info.package)
+                                    logger.info(f"      Not a field, resolved as class: {chained_target_class}")
+                            else:
+                                # Method called on self: method()
+                                chained_target_class = class_info.fqn
+                                logger.info(f"      Method called on self: {chained_target_class}")
+                            
+                            # Look up the method and get its return type
+                            if chained_target_class:
+                                # Check in self.classes cache
+                                logger.info(f"      Looking for method '{chained_method_name}' in class '{chained_target_class}'")
+                                logger.info(f"      Available classes in cache: {len(self.classes)} (checking if {chained_target_class} is present: {chained_target_class in self.classes})")
+                                if chained_target_class in self.classes:
+                                    chained_class_info = self.classes[chained_target_class]
+                                    logger.info(f"      Methods in {chained_target_class}: {list(chained_class_info.methods.keys())}")
+                                    if chained_method_name in chained_class_info.methods:
+                                        chained_method = chained_class_info.methods[chained_method_name]
+                                        target_class = chained_method.return_type
+                                        logger.info(f"      Found method! Return type: {target_class}")
+                                        # Resolve return type to FQN
+                                        target_class = self._resolve_type(target_class, chained_class_info.imports, chained_class_info.package)
+                                        logger.info(f"      ✓ Chained call resolved: {qualifier}.{method_name} -> target class: {target_class}")
+                                    else:
+                                        logger.warning(f"      ✗ Method '{chained_method_name}' not found in class '{chained_target_class}'")
+                                else:
+                                    logger.warning(f"      ✗ Class '{chained_target_class}' not found in cache")
                     # Check if it's a field reference
-                    if qualifier in class_info.fields:
+                    elif qualifier in class_info.fields:
                         target_class = class_info.fields[qualifier]
                         target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
                     # Check if it's a class name (static method call)
@@ -470,37 +519,198 @@ class JavaCallHierarchyParser:
             if node is not None:
                 extract_local_variables(node)
 
+        # Track chained method calls: track return types of methods we've seen
+        # Key: method position in source, Value: return type
+        method_return_types = {}
+        
+        def track_method_invocations(node, depth=0):
+            """First pass: track all method invocations and their return types"""
+            if isinstance(node, javalang.tree.MethodInvocation):
+                method_name = node.member
+                qualifier = node.qualifier if node.qualifier else None
+                
+                # Determine the return type of this method call
+                if qualifier:
+                    # Method called on object/field
+                    target_class = None
+                    if qualifier in class_info.fields:
+                        target_class = class_info.fields[qualifier]
+                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                    elif qualifier in param_types:
+                        target_class = param_types[qualifier]
+                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                    elif qualifier in local_var_types:
+                        target_class = local_var_types[qualifier]
+                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                    
+                    # Look up method and get return type
+                    if target_class and target_class in self.classes:
+                        target_class_info = self.classes[target_class]
+                        if method_name in target_class_info.methods:
+                            method_def = target_class_info.methods[method_name]
+                            return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
+                            # Store with unique key (node object id)
+                            method_return_types[id(node)] = return_type
+                            logger.info(f"    Tracked: {qualifier}.{method_name}() returns {return_type}")
+                else:
+                    # Method called on self
+                    if method_name in class_info.methods:
+                        method_def = class_info.methods[method_name]
+                        return_type = self._resolve_type(method_def.return_type, class_info.imports, class_info.package)
+                        method_return_types[id(node)] = return_type
+                        logger.info(f"    Tracked: {method_name}() returns {return_type}")
+            
+            # Recursively track children
+            if hasattr(node, 'children'):
+                for child in node.children:
+                    if child is not None:
+                        if isinstance(child, list):
+                            for item in child:
+                                if item is not None:
+                                    track_method_invocations(item, depth + 1)
+                        else:
+                            track_method_invocations(child, depth + 1)
+        
+        # Track all method invocations first
+        for node in body_nodes:
+            if node is not None:
+                track_method_invocations(node)
+
+        # Track the last method invocation we've seen (for chained calls)
+        last_method_with_qualifier = {}  # qualifier_name -> return_type
+        
         # Recursively search for MethodInvocation nodes in the body
         def search_invocations(node):
+            nonlocal last_method_with_qualifier
+            
             if isinstance(node, javalang.tree.MethodInvocation):
                 method_name = node.member
                 target_class = None
+                
+                # Log every method invocation for debugging
+                qualifier_type = type(node.qualifier).__name__ if node.qualifier else "None"
+                logger.info(f"    Method call: {method_name}, qualifier type: {qualifier_type}")
 
                 # Try to determine target class from qualifier
                 if node.qualifier:
                     qualifier = node.qualifier
 
-                    # Check if it's a field reference
-                    if qualifier in class_info.fields:
-                        target_class = class_info.fields[qualifier]
-                        # Resolve short names to FQN
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    # Check if it's a method parameter
-                    elif qualifier in param_types:
-                        target_class = param_types[qualifier]
-                        # Resolve short names to FQN
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    # Check if it's a local variable
-                    elif qualifier in local_var_types:
-                        target_class = local_var_types[qualifier]
-                        # Resolve short names to FQN
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    # Check if it's an imported class (static method call)
-                    else:
-                        # Try to resolve as a class name from imports
-                        target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
-                        # If resolved to same as qualifier, it might not be in imports (target_class will be qualifier)
-                        # This is ok - we keep it as the simple name
+                    # Check if qualifier is itself a MethodInvocation (chained call)
+                    if isinstance(node.qualifier, javalang.tree.MethodInvocation):
+                        logger.info(f"    Detected chained method call (javalang): ...{node.qualifier.member}().{method_name}")
+                        # Chained method call: obj.method1().method2()
+                        # Get the return type of the chained method
+                        chained_method_name = node.qualifier.member
+                        chained_qualifier = node.qualifier.qualifier if hasattr(node.qualifier, 'qualifier') else None
+                        
+                        logger.info(f"      Chained method: {chained_method_name}, qualifier: {chained_qualifier}")
+                        
+                        # Determine which class contains the chained method
+                        chained_target_class = None
+                        if chained_qualifier:
+                            # Method called on an object
+                            logger.info(f"      Looking up qualifier: '{chained_qualifier}' (fields: {list(class_info.fields.keys())})")
+                            if chained_qualifier in class_info.fields:
+                                chained_target_class = class_info.fields[chained_qualifier]
+                                logger.info(f"      Found in fields: {chained_target_class}")
+                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
+                                logger.info(f"      Resolved to: {chained_target_class}")
+                            elif chained_qualifier in param_types:
+                                chained_target_class = param_types[chained_qualifier]
+                                logger.info(f"      Found in params: {chained_target_class}")
+                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
+                            elif chained_qualifier in local_var_types:
+                                chained_target_class = local_var_types[chained_qualifier]
+                                logger.info(f"      Found in local vars: {chained_target_class}")
+                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
+                            else:
+                                chained_target_class = self._resolve_type(chained_qualifier, class_info.imports, class_info.package)
+                                logger.info(f"      Resolved as class: {chained_target_class}")
+                        else:
+                            # Method called on self
+                            chained_target_class = class_info.fqn
+                            logger.info(f"      Method called on self: {chained_target_class}")
+                        
+                        # Look up the method and get its return type
+                        if chained_target_class:
+                            logger.info(f"      Looking for method '{chained_method_name}' in '{chained_target_class}'")
+                            if chained_target_class in self.classes:
+                                chained_class_info = self.classes[chained_target_class]
+                                logger.info(f"      Methods available: {list(chained_class_info.methods.keys())}")
+                                if chained_method_name in chained_class_info.methods:
+                                    chained_method = chained_class_info.methods[chained_method_name]
+                                    target_class = chained_method.return_type
+                                    logger.info(f"      Found! Return type: {target_class}")
+                                    # Resolve return type to FQN
+                                    target_class = self._resolve_type(target_class, chained_class_info.imports, chained_class_info.package)
+                                    logger.info(f"      ✓ Chained call resolved: {chained_qualifier}.{chained_method_name}().{method_name} -> target: {target_class}")
+                                else:
+                                    logger.warning(f"      ✗ Method '{chained_method_name}' not found in class '{chained_target_class}'")
+                            else:
+                                logger.warning(f"      ✗ Class'{chained_target_class}' not found in cache")
+                    
+                    # Standard qualifier handling (not a chained call)
+                    elif isinstance(qualifier, str):
+                        # Check if it's a field reference
+                        if qualifier in class_info.fields:
+                            target_class = class_info.fields[qualifier]
+                            # Resolve short names to FQN
+                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                        # Check if it's a method parameter
+                        elif qualifier in param_types:
+                            target_class = param_types[qualifier]
+                            # Resolve short names to FQN
+                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                        # Check if it's a local variable
+                        elif qualifier in local_var_types:
+                            target_class = local_var_types[qualifier]
+                            # Resolve short names to FQN
+                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
+                        # Check if it's an imported class (static method call)
+                        else:
+                            # Try to resolve as a class name from imports
+                            target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
+                            # If resolved to same as qualifier, it might not be in imports (target_class will be qualifier)
+                            # This is ok - we keep it as the simple name
+                        
+                        # Store this method's return type for potential chained calls
+                        logger.info(f"    Checking if we can track: method={method_name}, target_class={target_class}, in_cache={target_class in self.classes if target_class else 'N/A'}")
+                        if target_class and target_class in self.classes:
+                            target_class_info = self.classes[target_class]
+                            logger.info(f"    Target class has methods: {list(target_class_info.methods.keys())}")
+                            if method_name in target_class_info.methods:
+                                method_def = target_class_info.methods[method_name]
+                                return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
+                                last_method_with_qualifier[qualifier] = {
+                                    'method_name': method_name,
+                                    'return_type': return_type,
+                                    'full_call': f"{qualifier}.{method_name}()"
+                                }
+                                logger.info(f"    ✓ Stored: {qualifier}.{method_name}() returns {return_type} for potential chaining")
+                            else:
+                                logger.info(f"    Method {method_name} not found in {target_class}")
+                        else:
+                            logger.info(f"    Cannot track: target_class not in cache or None")
+                else:
+                    # No qualifier - check if previous method returned something we can chain on
+                    # Look through tracked methods to find one whose return type might match
+                    logger.info(f"    No qualifier for {method_name}. Tracked methods: {list(last_method_with_qualifier.keys())}")
+                    if last_method_with_qualifier:
+                        # Get the most recently tracked method
+                        for qual_name, info in last_method_with_qualifier.items():
+                            return_type = info['return_type']
+                            logger.info(f"    Checking if {return_type} has method {method_name}")
+                            if return_type and return_type in self.classes:
+                                return_class_info = self.classes[return_type]
+                                logger.info(f"    {return_type} has methods: {list(return_class_info.methods.keys())}")
+                                if method_name in return_class_info.methods:
+                                    target_class = return_type
+                                    logger.info(f"    ✓ Chained call detected: {info['full_call']}.{method_name}() -> target: {target_class}")
+                                    break
+                                else:
+                                    logger.info(f"    Method {method_name} not in {return_type}")
+                            else:
+                                logger.info(f"    {return_type} not in cache or None")
 
                 calls.append(MethodCall(
                     target_class=target_class,

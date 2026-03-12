@@ -283,7 +283,7 @@ class ManualResourceAssociator:
                 
                 # Update method's procedureCalls property to reflect resolved procedure
                 # Format: schema:package:procedure:db_type:type:confidence
-                # Only replace entries that contain the specific procedure name being resolved
+                # Replace entries that contain DYNAMIC_PROCEDURE or UNKNOWN (since they don't have the actual procedure name yet)
                 schema_part = escaped_schema_name
                 package_part = escape_cypher_string(package_name) if package_name else 'NONE'
                 proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
@@ -292,8 +292,8 @@ class ManualResourceAssociator:
                 MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
                 SET m.procedureCalls = [proc IN m.procedureCalls | 
                     CASE 
-                        WHEN (proc CONTAINS 'DYNAMIC' OR proc CONTAINS 'UNKNOWN') AND 
-                             (proc CONTAINS ':{escaped_proc_name}:' OR proc ENDS WITH ':{escaped_proc_name}')
+                        WHEN (proc CONTAINS 'DYNAMIC_PROCEDURE' OR 
+                              (proc CONTAINS 'UNKNOWN' AND proc CONTAINS ':{escaped_db_type}:' AND proc CONTAINS ':{resource_type}:'))
                         THEN '{proc_value}'
                         ELSE proc
                     END
