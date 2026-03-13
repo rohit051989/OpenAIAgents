@@ -45,11 +45,12 @@ procedure_calls:
   is_function: true
 
 - method_fqn: com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure
+  tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
   procedure_name: P_DATA_RESTORE_PROCESSOR
   schema_name: APMLOAD
   package_name: null  # No package, just schema.procedure
   database_type: ORACLE
-  is_function: true
+  is_function: false
 
 # Shell Script Executions
 # ------------------------

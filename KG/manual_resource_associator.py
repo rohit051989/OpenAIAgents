@@ -4,6 +4,10 @@ Manual Resource Associator - Associate Resources with JavaMethods after manual r
 This tool allows you to manually specify actual table names or procedure names for methods
 that were marked with DYNAMIC_TABLE, UNKNOWN, or DYNAMIC_PROCEDURE during enrichment.
 
+TWO MODES:
+1. Update JavaMethod directly (default) - for specific DAO methods
+2. Update JavaClass (Tasklet/Reader/Writer/Processor) - for generic methods called from multiple places
+
 Usage:
     1. Create a YAML config file with manual mappings
     2. Run: python manual_resource_associator.py --config manual_mappings.yaml
@@ -19,8 +23,10 @@ Config File Format (manual_mappings.yaml):
         schema_name: "batch_schema"
         confidence: "HIGH"
       
-      - method_fqn: "com.companyname.dao.CustomerDAOImpl.deleteById"
-        operation_type: "DELETE"
+      # For generic methods, specify tasklet/reader/writer/processor to update JavaClass
+      - method_fqn: "com.companyname.dao.CustomerDAOImpl.executeQuery"
+        writer_fqn: "com.companyname.batch.writer.CustomerItemWriter"  # Update Writer class
+        operation_type: "UPDATE"
         table_name: "customer"
         confidence: "HIGH"
     
@@ -31,6 +37,29 @@ Config File Format (manual_mappings.yaml):
         package_name: "PKG_BATCH"
         database_type: "ORACLE"
         is_function: false
+      
+      # For generic executeStoredProcedure method, specify tasklet to update JavaClass
+      - method_fqn: "com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure"
+        tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
+        procedure_name: "P_DATA_RESTORE_PROCESSOR"
+        schema_name: "APMLOAD"
+        database_type: "ORACLE"
+        is_function: true
+    
+    shell_executions:
+      - method_fqn: "com.companyname.util.ShellExecutor.runScript"
+        tasklet_fqn: "com.companyname.batch.tasklet.DataMigrationTasklet"
+        script_name: "data_migration.sh"
+        script_path: "/opt/batch/scripts/data_migration.sh"
+        script_type: "BASH"
+        confidence: "HIGH"
+
+HOW IT WORKS:
+- Without tasklet/reader/writer/processor FQN: Updates the JavaMethod directly (original behavior)
+- With tasklet/reader/writer/processor FQN: Updates the JavaClass directly, skipping JavaMethod
+- Step consolidation collects from JavaClass properties FIRST, then filtered call chain (ignores UNKNOWN/DYNAMIC)
+- This allows generic methods to be reused across 500+ Steps without conflict
+
 """
 
 import os
@@ -91,14 +120,20 @@ class ManualResourceAssociator:
             'relationships_created': 0,
             'errors': 0
         }
+        # Track method FQNs that were configured with class-level updates
+        # These are "generic" methods whose operations should be skipped during traversal
+        self.class_level_methods = set()
     
     def close(self):
         self.driver.close()
     
     def associate_db_operation(self, method_fqn: str, operation_type: str, table_name: str, 
-                                schema_name: str = None, confidence: str = "HIGH") -> bool:
+                                schema_name: str = None, confidence: str = "HIGH",
+                                tasklet_fqn: str = None, reader_fqn: str = None,
+                                writer_fqn: str = None, processor_fqn: str = None) -> bool:
         """
         Create TABLE Resource and DB_OPERATION relationship for a method.
+        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
         
         Args:
             method_fqn: Method fully qualified name
@@ -106,6 +141,10 @@ class ManualResourceAssociator:
             table_name: Actual table name
             schema_name: Optional schema/entity name
             confidence: HIGH, MEDIUM, LOW
+            tasklet_fqn: Optional Tasklet class FQN to update directly
+            reader_fqn: Optional ItemReader class FQN to update directly
+            writer_fqn: Optional ItemWriter class FQN to update directly
+            processor_fqn: Optional ItemProcessor class FQN to update directly
         
         Returns:
             True if successful, False otherwise
@@ -167,25 +206,52 @@ class ManualResourceAssociator:
                 logger.info(f"     Relationship created: {method_fqn} -[DB_OPERATION:{operation_type}]-> {table_name}")
                 self.stats['relationships_created'] += 1
                 
-                # Update method's dbOperations property to reflect resolved table
-                # Only replace operations that match the specific operation_type AND contain UNKNOWN/DYNAMIC
-                update_method_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                SET m.dbOperations = [op IN m.dbOperations | 
-                    CASE 
-                        WHEN op STARTS WITH '{escaped_operation_type}:' AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
-                        THEN '{escaped_operation_type}:{escaped_table_name}:{escaped_confidence}'
-                        ELSE op
-                    END
-                ],
-                m.furtherAnalysisRequired = false
-                """
-                session.run(update_method_query)
-                logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                # Build db operation value
+                db_op_value = f"{escaped_operation_type}:{escaped_table_name}:{escaped_confidence}"
                 
-                self.stats['db_operations_processed'] += 1
-                return True
+                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                 
+                if class_fqn:
+                    # Update JavaClass with dbOperations
+                    escaped_class_fqn = escape_cypher_string(class_fqn)
+                    
+                    # Verify class exists
+                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
+                    result = session.run(check_class_query, fqn=class_fqn)
+                    if not result.single():
+                        logger.error(f"     JavaClass not found: {class_fqn}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_class_query = f"""
+                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
+                    SET jc.dbOperations = CASE
+                        WHEN jc.dbOperations IS NULL THEN ['{db_op_value}']
+                        ELSE jc.dbOperations + ['{db_op_value}']
+                    END,
+                    jc.dbOperationCount = size(jc.dbOperations)
+                    """
+                    session.run(update_class_query)
+                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    logger.info(f"     Added: {db_op_value}")
+                    # Track this method as class-level configured (generic method)
+                    self.class_level_methods.add(method_fqn)
+                else:
+                    # Original behavior: Update JavaMethod
+                    update_method_query = f"""
+                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    SET m.dbOperations = [op IN m.dbOperations | 
+                        CASE 
+                            WHEN op STARTS WITH '{escaped_operation_type}:' AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
+                            THEN '{db_op_value}'
+                            ELSE op
+                        END
+                    ],
+                    m.furtherAnalysisRequired = false
+                    """
+                    session.run(update_method_query)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
         except Exception as e:
             logger.error(f"   Error associating DB operation: {e}")
             self.stats['errors'] += 1
@@ -193,17 +259,24 @@ class ManualResourceAssociator:
     
     def associate_procedure_call(self, method_fqn: str, procedure_name: str, 
                                   schema_name: str = None, package_name: str = None,
-                                  database_type: str = "UNKNOWN", is_function: bool = False) -> bool:
+                                  database_type: str = "UNKNOWN", is_function: bool = False,
+                                  tasklet_fqn: str = None, reader_fqn: str = None,
+                                  writer_fqn: str = None, processor_fqn: str = None) -> bool:
         """
         Create PROCEDURE/FUNCTION Resource and INVOKES relationship for a method.
+        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
         
         Args:
-            method_fqn: Method fully qualified name
+            method_fqn: Method fully qualified name (the generic method that calls procedure)
             procedure_name: Actual procedure/function name
             schema_name: Database schema (e.g., APMDATA)
             package_name: Oracle package name (e.g., PKG_BATCH)
             database_type: ORACLE, DB2, POSTGRESQL, etc.
             is_function: True if function, False if procedure
+            tasklet_fqn: Optional Tasklet class FQN to update directly
+            reader_fqn: Optional ItemReader class FQN to update directly
+            writer_fqn: Optional ItemWriter class FQN to update directly
+            processor_fqn: Optional ItemProcessor class FQN to update directly
         
         Returns:
             True if successful, False otherwise
@@ -281,27 +354,55 @@ class ManualResourceAssociator:
                 logger.info(f"     Relationship created: {method_fqn} -[INVOKES]-> {procedure_name}")
                 self.stats['relationships_created'] += 1
                 
-                # Update method's procedureCalls property to reflect resolved procedure
-                # Format: schema:package:procedure:db_type:type:confidence
-                # Replace entries that contain DYNAMIC_PROCEDURE or UNKNOWN (since they don't have the actual procedure name yet)
+                # Build procedure call value
                 schema_part = escaped_schema_name
                 package_part = escape_cypher_string(package_name) if package_name else 'NONE'
                 proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
                 
-                update_method_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
-                SET m.procedureCalls = [proc IN m.procedureCalls | 
-                    CASE 
-                        WHEN (proc CONTAINS 'DYNAMIC_PROCEDURE' OR 
-                              (proc CONTAINS 'UNKNOWN' AND proc CONTAINS ':{escaped_db_type}:' AND proc CONTAINS ':{resource_type}:'))
-                        THEN '{proc_value}'
-                        ELSE proc
-                    END
-                ],
-                m.furtherAnalysisRequired = false
-                """
-                session.run(update_method_query)
-                logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
+                
+                if class_fqn:
+                    # Update JavaClass with procedureCalls
+                    escaped_class_fqn = escape_cypher_string(class_fqn)
+                    
+                    # Verify class exists
+                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
+                    result = session.run(check_class_query, fqn=class_fqn)
+                    if not result.single():
+                        logger.error(f"     JavaClass not found: {class_fqn}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_class_query = f"""
+                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
+                    SET jc.procedureCalls = CASE
+                        WHEN jc.procedureCalls IS NULL THEN ['{proc_value}']
+                        ELSE jc.procedureCalls + ['{proc_value}']
+                    END,
+                    jc.procedureCallCount = size(jc.procedureCalls)
+                    """
+                    session.run(update_class_query)
+                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    logger.info(f"     Added: {proc_value}")
+                    # Track this method as class-level configured (generic method)
+                    self.class_level_methods.add(method_fqn)
+                else:
+                    # Original behavior: Update JavaMethod
+                    update_method_query = f"""
+                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    SET m.procedureCalls = [proc IN m.procedureCalls | 
+                        CASE 
+                            WHEN (proc CONTAINS 'DYNAMIC_PROCEDURE' OR 
+                                  (proc CONTAINS 'UNKNOWN' AND proc CONTAINS ':{escaped_db_type}:' AND proc CONTAINS ':{resource_type}:'))
+                            THEN '{proc_value}'
+                            ELSE proc
+                        END
+                    ],
+                    m.furtherAnalysisRequired = false
+                    """
+                    session.run(update_method_query)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 
                 self.stats['procedure_calls_processed'] += 1
                 return True
@@ -315,9 +416,12 @@ class ManualResourceAssociator:
                                    script_path: str = None, script_type: str = "BASH",
                                    remote_host: str = None, remote_user: str = None,
                                    remote_port: int = None, ssh_key_location: str = None,
-                                   confidence: str = "HIGH", description: str = None) -> bool:
+                                   confidence: str = "HIGH", description: str = None,
+                                   tasklet_fqn: str = None, reader_fqn: str = None,
+                                   writer_fqn: str = None, processor_fqn: str = None) -> bool:
         """
         Create SHELL_SCRIPT Resource and EXECUTES relationship for a method.
+        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
         
         Args:
             method_fqn: Method fully qualified name
@@ -330,6 +434,10 @@ class ManualResourceAssociator:
             ssh_key_location: SSH key file location
             confidence: HIGH, MEDIUM, LOW
             description: Optional description
+            tasklet_fqn: Optional Tasklet class FQN to update directly
+            reader_fqn: Optional ItemReader class FQN to update directly
+            writer_fqn: Optional ItemWriter class FQN to update directly
+            processor_fqn: Optional ItemProcessor class FQN to update directly
         
         Returns:
             True if successful, False otherwise
@@ -418,26 +526,53 @@ class ManualResourceAssociator:
                 logger.info(f"     Relationship created: {method_fqn} -[EXECUTES]-> {script_name}")
                 self.stats['relationships_created'] += 1
                 
-                # Update method's shellExecutions property to reflect resolved script
-                # Only replace entries that match the specific script being resolved
-                update_method_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                SET m.shellExecutions = [exec IN m.shellExecutions | 
-                    CASE 
-                        WHEN (exec CONTAINS 'DYNAMIC' OR exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'PARAMETERIZED') AND 
-                             (exec CONTAINS ':{escaped_script_name}:' OR exec ENDS WITH ':{escaped_script_name}')
-                        THEN 'RESOLVED:{escaped_script_name}:{escaped_confidence}'
-                        ELSE exec
-                    END
-                ],
-                m.furtherAnalysisRequired = false
-                """
-                session.run(update_method_query)
-                logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                # Build shell execution value
+                shell_exec_value = f"RESOLVED:{escaped_script_name}:{escaped_confidence}"
                 
-                self.stats['shell_executions_processed'] += 1
-                return True
+                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                 
+                if class_fqn:
+                    # Update JavaClass with shellExecutions
+                    escaped_class_fqn = escape_cypher_string(class_fqn)
+                    
+                    # Verify class exists
+                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
+                    result = session.run(check_class_query, fqn=class_fqn)
+                    if not result.single():
+                        logger.error(f"     JavaClass not found: {class_fqn}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_class_query = f"""
+                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
+                    SET jc.shellExecutions = CASE
+                        WHEN jc.shellExecutions IS NULL THEN ['{shell_exec_value}']
+                        ELSE jc.shellExecutions + ['{shell_exec_value}']
+                    END,
+                    jc.shellExecutionCount = size(jc.shellExecutions)
+                    """
+                    session.run(update_class_query)
+                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    logger.info(f"     Added: {shell_exec_value}")
+                    # Track this method as class-level configured (generic method)
+                    self.class_level_methods.add(method_fqn)
+                else:
+                    # Original behavior: Update JavaMethod
+                    update_method_query = f"""
+                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    SET m.shellExecutions = [exec IN m.shellExecutions | 
+                        CASE 
+                            WHEN (exec CONTAINS 'DYNAMIC' OR exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'PARAMETERIZED') AND 
+                                 (exec CONTAINS ':{escaped_script_name}:' OR exec ENDS WITH ':{escaped_script_name}')
+                            THEN '{shell_exec_value}'
+                            ELSE exec
+                        END
+                    ],
+                    m.furtherAnalysisRequired = false
+                    """
+                    session.run(update_method_query)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
         except Exception as e:
             logger.error(f"   Error associating shell execution: {e}")
             self.stats['errors'] += 1
@@ -485,12 +620,18 @@ class ManualResourceAssociator:
             else:
                 continue
             
-            # Find entry methods for this Step
+            # Find entry methods for this Step AND get JavaClass properties
             # Support inheritance: traverse EXTENDS chain to find inherited methods
             query_entry_methods = """
             MATCH (s:Step)
             WHERE elementId(s) = $stepId
             MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+            
+            // First, get JavaClass properties (NEW: collect from class itself)
+            WITH jc, 
+                 jc.dbOperations as classDbOps,
+                 jc.procedureCalls as classProcCalls,
+                 jc.shellExecutions as classShellExecs
             
             // Find methods in the class or its parent hierarchy (up to 10 levels)
             CALL {
@@ -500,6 +641,7 @@ class ManualResourceAssociator:
                 WHERE m.methodName IN $methodNames
                 RETURN elementId(m) as methodId, 
                        m.methodName as methodName,
+                       m.fqn as methodFqn,
                        m.dbOperations as dbOps,
                        m.procedureCalls as procCalls,
                        m.shellExecutions as shellExecs,
@@ -514,6 +656,7 @@ class ManualResourceAssociator:
                 WHERE m.methodName IN $methodNames
                 RETURN elementId(m) as methodId, 
                        m.methodName as methodName,
+                       m.fqn as methodFqn,
                        m.dbOperations as dbOps,
                        m.procedureCalls as procCalls,
                        m.shellExecutions as shellExecs,
@@ -521,9 +664,11 @@ class ManualResourceAssociator:
             }
             
             // Return the method closest in the inheritance hierarchy (prefer child overrides)
-            WITH methodId, methodName, dbOps, procCalls, shellExecs, inheritanceDepth
+            WITH methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, inheritanceDepth,
+                 classDbOps, classProcCalls, classShellExecs
             ORDER BY inheritanceDepth ASC
-            RETURN methodId, methodName, dbOps, procCalls, shellExecs
+            RETURN methodId, methodName, methodFqn, dbOps, procCalls, shellExecs,
+                   classDbOps, classProcCalls, classShellExecs
             LIMIT 3  // For TASKLET: 1 execute, For CHUNK: read, write, process
             """
             
@@ -541,16 +686,33 @@ class ManualResourceAssociator:
             all_procedure_calls = set()
             all_shell_executions = set()
             
+            # NEW: First, collect from JavaClass properties (if manually set)
+            if entry_methods:
+                first_entry = entry_methods[0]
+                if first_entry.get('classDbOps'):
+                    all_db_operations.update(first_entry['classDbOps'])
+                if first_entry.get('classProcCalls'):
+                    all_procedure_calls.update(first_entry['classProcCalls'])
+                if first_entry.get('classShellExecs'):
+                    all_shell_executions.update(first_entry['classShellExecs'])
+            
             for entry_method in entry_methods:
                 method_id = entry_method['methodId']
+                method_fqn = entry_method.get('methodFqn')
                 
-                # Add operations from entry method itself
-                if entry_method.get('dbOps'):
-                    all_db_operations.update(entry_method['dbOps'])
-                if entry_method.get('procCalls'):
-                    all_procedure_calls.update(entry_method['procCalls'])
-                if entry_method.get('shellExecs'):
-                    all_shell_executions.update(entry_method['shellExecs'])
+                # Check if this method was configured with class-level update (generic method)
+                # If so, skip its operations (already collected from JavaClass)
+                # If not, include ALL operations (even UNKNOWN/DYNAMIC) for human review
+                is_class_level_method = method_fqn in self.class_level_methods if method_fqn else False
+                
+                if not is_class_level_method:
+                    # Add operations from entry method itself (include UNKNOWN/DYNAMIC)
+                    if entry_method.get('dbOps'):
+                        all_db_operations.update(entry_method['dbOps'])
+                    if entry_method.get('procCalls'):
+                        all_procedure_calls.update(entry_method['procCalls'])
+                    if entry_method.get('shellExecs'):
+                        all_shell_executions.update(entry_method['shellExecs'])
                 
                 # BFS traversal
                 visited = set()
@@ -565,6 +727,7 @@ class ManualResourceAssociator:
                     MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
                     WHERE elementId(m) = $methodId
                     RETURN elementId(called) as calledId,
+                           called.fqn as calledFqn,
                            called.dbOperations as dbOps,
                            called.procedureCalls as procCalls,
                            called.shellExecutions as shellExecs
@@ -576,18 +739,25 @@ class ManualResourceAssociator:
                     
                     for called in called_methods:
                         called_id = called['calledId']
+                        called_fqn = called.get('calledFqn')
                         
                         if called_id not in visited:
                             visited.add(called_id)
                             queue.append(called_id)
                             
-                            # Collect operations from called method
-                            if called.get('dbOps'):
-                                all_db_operations.update(called['dbOps'])
-                            if called.get('procCalls'):
-                                all_procedure_calls.update(called['procCalls'])
-                            if called.get('shellExecs'):
-                                all_shell_executions.update(called['shellExecs'])
+                            # Check if this called method was configured with class-level update
+                            # If so, skip its operations (already handled at JavaClass level)
+                            # If not, include ALL operations (even UNKNOWN/DYNAMIC)
+                            is_class_level_called = called_fqn in self.class_level_methods if called_fqn else False
+                            
+                            if not is_class_level_called:
+                                # Collect operations from called method (include UNKNOWN/DYNAMIC)
+                                if called.get('dbOps'):
+                                    all_db_operations.update(called['dbOps'])
+                                if called.get('procCalls'):
+                                    all_procedure_calls.update(called['procCalls'])
+                                if called.get('shellExecs'):
+                                    all_shell_executions.update(called['shellExecs'])
             
             # Update Step with recalculated operations
             step_db_ops = sorted(list(all_db_operations))
@@ -656,6 +826,10 @@ class ManualResourceAssociator:
                 table_name = op.get('table_name')
                 schema_name = op.get('schema_name')
                 confidence = op.get('confidence', 'HIGH')
+                tasklet_fqn = op.get('tasklet_fqn')
+                reader_fqn = op.get('reader_fqn')
+                writer_fqn = op.get('writer_fqn')
+                processor_fqn = op.get('processor_fqn')
                 
                 if not all([method_fqn, operation_type, table_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, operation_type, table_name")
@@ -663,8 +837,13 @@ class ManualResourceAssociator:
                     continue
                 
                 logger.info(f"  [{idx}] {method_fqn}")
+                if tasklet_fqn or reader_fqn or writer_fqn or processor_fqn:
+                    class_type = 'Tasklet' if tasklet_fqn else ('Reader' if reader_fqn else ('Writer' if writer_fqn else 'Processor'))
+                    class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
+                    logger.info(f"      Target: {class_type} JavaClass - {class_fqn}")
                 logger.info(f"      Operation: {operation_type} on table '{table_name}'")
-                self.associate_db_operation(method_fqn, operation_type, table_name, schema_name, confidence)
+                self.associate_db_operation(method_fqn, operation_type, table_name, schema_name, 
+                                           confidence, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn)
                 
         
         # Process procedure calls
@@ -678,6 +857,10 @@ class ManualResourceAssociator:
                 package_name = proc.get('package_name')
                 database_type = proc.get('database_type', 'UNKNOWN')
                 is_function = proc.get('is_function', False)
+                tasklet_fqn = proc.get('tasklet_fqn')
+                reader_fqn = proc.get('reader_fqn')
+                writer_fqn = proc.get('writer_fqn')
+                processor_fqn = proc.get('processor_fqn')
                 
                 if not all([method_fqn, procedure_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, procedure_name")
@@ -685,6 +868,10 @@ class ManualResourceAssociator:
                     continue
                 
                 logger.info(f"  [{idx}] {method_fqn}")
+                if tasklet_fqn or reader_fqn or writer_fqn or processor_fqn:
+                    class_type = 'Tasklet' if tasklet_fqn else ('Reader' if reader_fqn else ('Writer' if writer_fqn else 'Processor'))
+                    class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
+                    logger.info(f"      Target: {class_type} JavaClass - {class_fqn}")
                 # Build display name with hierarchy
                 display_name = procedure_name
                 if package_name:
@@ -692,7 +879,9 @@ class ManualResourceAssociator:
                 if schema_name:
                     display_name = f"{schema_name}.{display_name}"
                 logger.info(f"      Procedure: {display_name} ({database_type})")
-                self.associate_procedure_call(method_fqn, procedure_name, schema_name, package_name, database_type, is_function)
+                self.associate_procedure_call(method_fqn, procedure_name, schema_name, package_name, 
+                                            database_type, is_function, tasklet_fqn, reader_fqn, 
+                                            writer_fqn, processor_fqn)
                 logger.info("")
         
         # Process shell executions
@@ -710,6 +899,10 @@ class ManualResourceAssociator:
                 ssh_key_location = shell.get('ssh_key_location')
                 confidence = shell.get('confidence', 'HIGH')
                 description = shell.get('description')
+                tasklet_fqn = shell.get('tasklet_fqn')
+                reader_fqn = shell.get('reader_fqn')
+                writer_fqn = shell.get('writer_fqn')
+                processor_fqn = shell.get('processor_fqn')
                 
                 if not all([method_fqn, script_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, script_name")
@@ -717,6 +910,10 @@ class ManualResourceAssociator:
                     continue
                 
                 logger.info(f"  [{idx}] {method_fqn}")
+                if tasklet_fqn or reader_fqn or writer_fqn or processor_fqn:
+                    class_type = 'Tasklet' if tasklet_fqn else ('Reader' if reader_fqn else ('Writer' if writer_fqn else 'Processor'))
+                    class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
+                    logger.info(f"      Target: {class_type} JavaClass - {class_fqn}")
                 logger.info(f"      Script: {script_name} ({script_type})")
                 if remote_host:
                     logger.info(f"      Execution: REMOTE ({remote_user}@{remote_host})")
@@ -725,7 +922,7 @@ class ManualResourceAssociator:
                 self.associate_shell_execution(
                     method_fqn, script_name, script_path, script_type,
                     remote_host, remote_user, remote_port, ssh_key_location,
-                    confidence, description
+                    confidence, description, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn
                 )
                 logger.info("")
         
@@ -781,6 +978,26 @@ def create_sample_config():
                 'procedure_name': 'UPLOAD_LOAD_STATUS',
                 'database_type': 'ORACLE',
                 'is_function': False
+            },
+            {
+                # Example: For generic methods, specify tasklet/reader/writer/processor FQN
+                'method_fqn': 'com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure',
+                'tasklet_fqn': 'com.companyname.batch.tasklet.StoredProcedureExecutorTasklet',
+                'procedure_name': 'P_DATA_RESTORE_PROCESSOR',
+                'schema_name': 'APMLOAD',
+                'database_type': 'ORACLE',
+                'is_function': True
+            }
+        ],
+        'shell_executions': [
+            {
+                # Example with tasklet FQN
+                'method_fqn': 'com.companyname.util.ShellExecutor.runScript',
+                'tasklet_fqn': 'com.companyname.batch.tasklet.DataMigrationTasklet',
+                'script_name': 'data_migration.sh',
+                'script_path': '/opt/batch/scripts/data_migration.sh',
+                'script_type': 'BASH',
+                'confidence': 'HIGH'
             }
         ]
     }
