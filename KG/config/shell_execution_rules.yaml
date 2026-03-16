@@ -26,6 +26,12 @@ actual_execution_patterns:
     description: "Runtime.getRuntime().exec() method call"
     execution_method: "Runtime.exec"
     confidence: HIGH
+  
+  runtime_variable_exec:
+    pattern: '(?:RUNTIME|runtime|rt)\s*\.\s*exec\s*\('
+    description: "Runtime stored in variable/constant and called via variable.exec()"
+    execution_method: "Runtime.exec"
+    confidence: HIGH
     
   processbuilder:
     pattern: 'new\s+ProcessBuilder\s*\('

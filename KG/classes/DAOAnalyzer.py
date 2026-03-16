@@ -103,6 +103,7 @@ class DAOAnalyzer:
         """Analyze a DAO method to detect database operations (returns list to handle multiple tables)"""
         # Only analyze if it looks like a DAO
         if not self._is_dao_class(class_info):
+            logger.info(f"      Method {method_def.method_name}: NOT a DAO class")
             return []
 
         # Read method source
@@ -110,21 +111,41 @@ class DAOAnalyzer:
             with open(class_info.source_path, 'r', encoding='utf-8') as f:
                 source = f.read()
             method_source = self._extract_method_source(source, method_def.method_name)
-        except:
+        except Exception as e:
+            logger.info(f"      Method {method_def.method_name}: Failed to read source - {e}")
             method_source = ""
+
+        if not method_source:
+            logger.info(f"      Method {method_def.method_name}: Empty method source")
+            return []
 
         # Detect operation type
         operation_type = self._detect_operation_type(method_def, method_source)
         if not operation_type:
+            logger.info(f"      Method {method_def.method_name}: No operation type detected")
             return []
+        
+        logger.info(f"      Method {method_def.method_name}: Detected operation type {operation_type}")
 
         # Extract entity/table info (now returns list of tables)
         raw_query = self._extract_query(method_source, class_info)
+        if raw_query:
+            logger.info(f"      Method {method_def.method_name}: Extracted query: {raw_query[:100]}")
+        else:
+            logger.info(f"      Method {method_def.method_name}: No query extracted")
+            
         tables_info = self._extract_entity_info(method_def, method_source, raw_query)
+        
+        if not tables_info:
+            logger.info(f"      Method {method_def.method_name}: No tables extracted")
+            return []
+        
+        logger.info(f"      Method {method_def.method_name}: Extracted {len(tables_info)} table(s)")
         
         # Create one DBOperation per table
         operations = []
         for entity_type, table_name, schema_name in tables_info:
+            logger.info(f"      Method {method_def.method_name}: Creating operation {operation_type}:{table_name}")
             operations.append(DBOperation(
                 operation_type=operation_type,
                 table_name=table_name,
@@ -186,8 +207,12 @@ class DAOAnalyzer:
         """Detect database operation type using configured rules"""
         
         # First, check if method directly uses DB APIs
-        if not self._has_direct_db_operation(source):
+        has_direct_op = self._has_direct_db_operation(source)
+        if not has_direct_op:
+            logger.info(f"      _detect_operation_type({method_def.method_name}): No direct DB operation found")
             return None
+        
+        logger.info(f"      _detect_operation_type({method_def.method_name}): Has direct DB operation")
         
         method_lower = method_def.method_name.lower()
 
@@ -195,14 +220,19 @@ class DAOAnalyzer:
         for operation, prefixes in self.operation_method_prefixes.items():
             for prefix in prefixes:
                 if method_lower.startswith(prefix.lower()):
+                    logger.info(f"      _detect_operation_type({method_def.method_name}): Matched name prefix '{prefix}' -> {operation}")
                     return operation
 
+        logger.info(f"      _detect_operation_type({method_def.method_name}): No method name match, trying pattern matching")
+        
         # Pattern matching using configured JPA patterns
         for op_type, compiled_patterns in self.jpa_patterns.items():
             for pattern in compiled_patterns:
                 if pattern.search(source):
+                    logger.info(f"      _detect_operation_type({method_def.method_name}): Matched pattern for {op_type}")
                     return op_type
 
+        logger.info(f"      _detect_operation_type({method_def.method_name}): No patterns matched")
         return None
     
     def _has_direct_db_operation(self, source: str) -> bool:
@@ -584,6 +614,7 @@ class DAOAnalyzer:
         """
         Extract SQL constant value using AST parsing with javalang.
         This properly ignores commented code unlike regex.
+        Handles both class constants and interface constants (which have implicit static/final).
         
         Args:
             source_code: Java source code content
@@ -596,10 +627,12 @@ class DAOAnalyzer:
             # Parse Java source with javalang
             tree = javalang.parse.parse(source_code)
             
-            # Find field declarations in the AST
+            # Find field declarations in the AST (works for both classes and interfaces)
             for path, node in tree.filter(javalang.tree.FieldDeclaration):
-                # Check if this is a final String field
-                if 'final' in node.modifiers and self._get_type_name_simple(node.type) == 'String':
+                # For interfaces: all fields are implicitly public static final
+                # For classes: check for explicit 'final' modifier
+                # So we accept fields that either have 'final' OR are in an interface
+                if self._get_type_name_simple(node.type) == 'String':
                     # Check each declarator (variable) in this field declaration
                     for declarator in node.declarators:
                         if declarator.name == constant_name:

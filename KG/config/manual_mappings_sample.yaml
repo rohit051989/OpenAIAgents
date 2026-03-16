@@ -12,12 +12,6 @@ db_operations:
   table_name: batch_job
   schema_name: batch_schema
   confidence: HIGH
-  
-- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobDetails
-  operation_type: SELECT
-  table_name: batch_job_execution
-  schema_name: batch_schema
-  confidence: HIGH
 
 - method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap
   operation_type: SELECT
@@ -46,6 +40,7 @@ procedure_calls:
 
 - method_fqn: com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure
   tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
+  bean_id: "customerStoredProcedureTasklet"
   procedure_name: P_DATA_RESTORE_PROCESSOR
   schema_name: APMLOAD
   package_name: null  # No package, just schema.procedure
@@ -56,7 +51,7 @@ procedure_calls:
 # ------------------------
 # For methods that execute shell scripts with dynamic paths or unknown details
 shell_executions:
-- method_fqn: com.companyname.util.BatchUtils.executeShellScript
+- method_fqn: com.companyname.util.BatchUtils.executeAsCommand
   script_name: customer_export.sh
   script_path: /opt/batch/scripts/customer_export.sh
   script_type: BASH
@@ -67,18 +62,34 @@ shell_executions:
   confidence: HIGH
   description: "Customer export shell script - runs on remote batch server"
   
-- method_fqn: com.companyname.util.BatchUtils.executeNativeCommand
-  script_name: data_validation.sh
-  script_path: /opt/batch/scripts/data_validation.sh
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess
+  tasklet_fqn: com.companyname.batch.tasklet.CustomerProcessingTasklet
+  bean_id: customerProcessingTasklet
+  script_name: data_customer_validation.sh
+  script_path: /opt/batch/scripts/data_customer_validation.sh
   script_type: BASH
   remote_host: null  # null means local execution
   confidence: HIGH
   description: "Local data validation script"
   
-- method_fqn: com.companyname.batch.CustomerExportTasklet.executePostProcessing
-  script_name: cleanup_temp_files.sh
-  script_path: /tmp/batch/cleanup_temp_files.sh
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess
+  tasklet_fqn: com.companyname.batch.tasklet.UserProcessingTasklet
+  bean_id: userProcessingTasklet
+  script_name: data_user_validation.sh
+  script_path: /opt/batch/scripts/data_user_validation.sh
   script_type: BASH
-  confidence: MEDIUM
-  description: "Cleanup temporary files after customer export"
+  remote_host: null  # null means local execution
+  confidence: HIGH
+  description: "Local data validation script"
+
+- method_fqn: com.companyname.service.ShellScriptService.executeShellScript
+  script_name: customer_dump.sh
+  script_path: /opt/batch/scripts/customer_dump.sh
+  script_type: BASH
+  remote_host: batch-server-01.company.com
+  remote_user: batchuser
+  remote_port: 22
+  ssh_key_location: /home/batchuser/.ssh/id_rsa
+  confidence: HIGH
+  description: "Customer export shell script - runs on remote batch server"
 

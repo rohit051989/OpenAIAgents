@@ -68,18 +68,34 @@ jpa_patterns:
     - \.find\(
     - \.findAll\(
     - getResultList\(
+    # JDBC patterns
+    - jdbcTemplate\.query\(
+    - jdbcTemplate\.queryForObject\(
+    - jdbcTemplate\.queryForList\(
+    - namedParameterJdbcTemplate\.query\(
+    - namedParameterJdbcTemplate\.queryForObject\(
+    - namedParameterJdbcTemplate\.queryForList\(
   INSERT:
     - \.persist\(
     - \.save\(
     - createQuery\s*\(\s*["']INSERT
+    # JDBC patterns
+    - jdbcTemplate\.update\(.*INSERT
+    - namedParameterJdbcTemplate\.update\(.*INSERT
   UPDATE:
     - \.merge\(
     - \.update\(
     - createQuery\s*\(\s*["']UPDATE
+    # JDBC patterns
+    - jdbcTemplate\.update\(
+    - namedParameterJdbcTemplate\.update\(
   DELETE:
     - \.remove\(
     - \.delete\(
     - createQuery\s*\(\s*["']DELETE
+    # JDBC patterns
+    - jdbcTemplate\.update\(.*DELETE
+    - namedParameterJdbcTemplate\.update\(.*DELETE
 
 # Patterns that indicate direct database operations
 direct_db_operation_patterns:

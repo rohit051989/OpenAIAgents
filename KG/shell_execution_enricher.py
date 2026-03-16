@@ -160,6 +160,134 @@ class ShellExecutionEnricher:
             logger.error(f"  Error reading source file {file_path}: {e}")
             return ""
     
+    def _build_class_info(self, path: str, class_fqn: str) -> Optional[ClassInfo]:
+        """Build ClassInfo object using JavaCallHierarchyParser"""
+        if not path or not Path(path).exists():
+            return None
+        
+        try:
+            from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
+            parser = JavaCallHierarchyParser()
+            return parser.parse_java_file(path)
+        except Exception as e:
+            logger.warning(f"  Failed to parse ClassInfo: {e}")
+            return None
+    
+    def _analyze_with_shell_analyzer(self, method: Dict, class_info: ClassInfo, method_source: str) -> List[Dict]:
+        """
+        Use ShellScriptAnalyzer to detect shell executions with config-based patterns.
+        Converts ShellScriptExecution result to enricher format with grey area detection.
+        """
+        try:
+            # Extract class FQN from method FQN
+            method_fqn = method['fqn']
+            method_name = method['name']
+            
+            # Find method in ClassInfo.methods dict
+            if method_name not in class_info.methods:
+                logger.warning(f"  Method {method_name} not found in ClassInfo")
+                return []
+            
+            method_def = class_info.methods[method_name]
+            
+            # Call analyzer with pre-loaded method source
+            shell_exec = self.shell_analyzer.analyze_method(method_def, class_info, method_source)
+            
+            if not shell_exec:
+                return []
+            
+            # Convert to enricher format with proper grey area detection
+            script_name = shell_exec.script_name
+            
+            # Determine if this needs manual analysis based on script name quality
+            further_analysis = False
+            grey_area_reason = None
+            confidence = 'HIGH'
+            
+            if not script_name:
+                # No script name extracted - needs manual review
+                script_name = 'UNKNOWN_SCRIPT'
+                further_analysis = True
+                grey_area_reason = 'UNKNOWN_SCRIPT:Cannot determine script from source'
+                confidence = 'LOW'
+            elif self._is_grey_area_script_name(script_name, method_source):
+                # Script name looks suspicious/incomplete - needs manual review
+                further_analysis = True
+                grey_area_reason = f'INCOMPLETE_ANALYSIS:Script name "{script_name}" appears incomplete or dynamic'
+                confidence = 'LOW'
+            
+            execution = {
+                'script_name': script_name,
+                'execution_method': shell_exec.execution_method,
+                'script_type': shell_exec.script_type,
+                'confidence': confidence,
+                'further_analysis': further_analysis,
+                'grey_area_reason': grey_area_reason or '',
+                'is_dynamic': further_analysis
+            }
+            
+            return [execution]
+        except Exception as e:
+            logger.error(f"  Error analyzing method with ShellScriptAnalyzer: {e}")
+            return []
+    
+    def _is_grey_area_script_name(self, script_name: str, method_source: str) -> bool:
+        """
+        Check if script name indicates grey area that needs manual review.
+        
+        Grey areas include:
+        - Script names that look like error messages or placeholders
+        - Script names without proper file extensions
+        - Variable names or generic terms
+        - Dynamic path indicators
+        """
+        if not script_name:
+            return True
+        
+        script_lower = script_name.lower()
+        
+        # Check for obvious grey area indicators
+        grey_area_keywords = [
+            'unknown', 'dynamic', 'parameterized', 'variable', 'placeholder',
+            'error', 'exception', 'unable', 'failed', 'missing', 'not found',
+            'invalid', 'undefined', 'null', 'empty'
+        ]
+        
+        for keyword in grey_area_keywords:
+            if keyword in script_lower:
+                return True
+        
+        # Check if script name looks like a variable name (camelCase or snake_case without extension)
+        if re.match(r'^[a-z][a-zA-Z0-9_]*$', script_name) and '.' not in script_name:
+            # Could be a variable like scriptPath, scriptFile, etc.
+            variable_patterns = ['script', 'file', 'path', 'command', 'cmd', 'dir']
+            if any(pattern in script_lower for pattern in variable_patterns):
+                return True
+        
+        # Check if method source has dynamic path construction
+        if '+' in method_source and ('"' in method_source or "'" in method_source):
+            # String concatenation detected - likely dynamic path
+            return True
+        
+        # Check for String.format, String.join, StringBuilder, etc.
+        if re.search(r'String\.(format|join)|StringBuilder|StringBuffer', method_source):
+            return True
+        
+        # Check if script name is too short to be a real file path
+        if len(script_name) < 3:
+            return True
+        
+        # If script has proper extension and looks like a path, it's probably OK
+        if re.search(r'\.(sh|py|ps1|bat|cmd|pl|rb|js)$', script_lower):
+            return False
+        
+        # Check if it's an absolute path (starts with / or C:\ etc.)
+        if re.match(r'^([a-zA-Z]:[/\\]|/)', script_name):
+            return False
+        
+        # Everything else might need review (no extension, unclear name)
+        return True
+    
     def _analyze_shell_execution(self, method_source: str, method_name: str) -> List[Dict]:
         """
         Analyze method source for shell script executions.
@@ -399,6 +527,13 @@ class ShellExecutionEnricher:
             # Get all methods for this class
             methods = self._get_class_methods(class_info['class_fqn'])
             
+            # Parse ClassInfo object for analyzer
+            parsed_class_info = self._build_class_info(class_info['path'], class_info['class_fqn'])
+            
+            if not parsed_class_info:
+                logger.warning(f"    Could not parse ClassInfo for {class_info['class_name']}")
+                continue
+            
             # Read source file once
             source_code = self._read_source_file(class_info['path']) if class_info['path'] else ""
             
@@ -416,8 +551,8 @@ class ShellExecutionEnricher:
                 # Only count methods that were analyzed (not all methods in class)
                 total_methods += 1
                 
-                # Analyze for shell executions (only direct execution patterns)
-                executions = self._analyze_shell_execution(method_source, method['name'])
+                # Use ShellScriptAnalyzer with config-based patterns
+                executions = self._analyze_with_shell_analyzer(method, parsed_class_info, method_source)
                 
                 # Only process if actual executions found
                 if executions:

@@ -38,9 +38,10 @@ Config File Format (manual_mappings.yaml):
         database_type: "ORACLE"
         is_function: false
       
-      # For generic executeStoredProcedure method, specify tasklet to update JavaClass
+      # For generic executeStoredProcedure method, specify tasklet and bean_id
       - method_fqn: "com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure"
         tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
+        bean_id: "storedProcedureExecutorTasklet"  # Required for class-level config
         procedure_name: "P_DATA_RESTORE_PROCESSOR"
         schema_name: "APMLOAD"
         database_type: "ORACLE"
@@ -49,6 +50,7 @@ Config File Format (manual_mappings.yaml):
     shell_executions:
       - method_fqn: "com.companyname.util.ShellExecutor.runScript"
         tasklet_fqn: "com.companyname.batch.tasklet.DataMigrationTasklet"
+        bean_id: "dataMigrationTasklet"  # Required for class-level config
         script_name: "data_migration.sh"
         script_path: "/opt/batch/scripts/data_migration.sh"
         script_type: "BASH"
@@ -56,8 +58,9 @@ Config File Format (manual_mappings.yaml):
 
 HOW IT WORKS:
 - Without tasklet/reader/writer/processor FQN: Updates the JavaMethod directly (original behavior)
-- With tasklet/reader/writer/processor FQN: Updates the JavaClass directly, skipping JavaMethod
-- Step consolidation collects from JavaClass properties FIRST, then filtered call chain (ignores UNKNOWN/DYNAMIC)
+- With tasklet/reader/writer/processor FQN + bean_id: Updates the Step node directly (using bean_id)
+- Step consolidation collects from Step properties FIRST, then call chain (excluding tracked generic methods)
+- bean_id creates composite key (method_fqn + bean_id) allowing same class to be used in multiple Steps
 - This allows generic methods to be reused across 500+ Steps without conflict
 
 """
@@ -122,6 +125,7 @@ class ManualResourceAssociator:
         }
         # Track method FQNs that were configured with class-level updates
         # These are "generic" methods whose operations should be skipped during traversal
+        # Key format: "method_fqn|bean_id" for composite uniqueness
         self.class_level_methods = set()
     
     def close(self):
@@ -130,10 +134,11 @@ class ManualResourceAssociator:
     def associate_db_operation(self, method_fqn: str, operation_type: str, table_name: str, 
                                 schema_name: str = None, confidence: str = "HIGH",
                                 tasklet_fqn: str = None, reader_fqn: str = None,
-                                writer_fqn: str = None, processor_fqn: str = None) -> bool:
+                                writer_fqn: str = None, processor_fqn: str = None,
+                                bean_id: str = None) -> bool:
         """
         Create TABLE Resource and DB_OPERATION relationship for a method.
-        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
+        If tasklet/reader/writer/processor FQN + bean_id provided, updates Step directly.
         
         Args:
             method_fqn: Method fully qualified name
@@ -141,10 +146,11 @@ class ManualResourceAssociator:
             table_name: Actual table name
             schema_name: Optional schema/entity name
             confidence: HIGH, MEDIUM, LOW
-            tasklet_fqn: Optional Tasklet class FQN to update directly
-            reader_fqn: Optional ItemReader class FQN to update directly
-            writer_fqn: Optional ItemWriter class FQN to update directly
-            processor_fqn: Optional ItemProcessor class FQN to update directly
+            tasklet_fqn: Optional Tasklet class FQN to update at Step level
+            reader_fqn: Optional ItemReader class FQN to update at Step level
+            writer_fqn: Optional ItemWriter class FQN to update at Step level
+            processor_fqn: Optional ItemProcessor class FQN to update at Step level
+            bean_id: Required when using class FQN - identifies specific Step bean instance
         
         Returns:
             True if successful, False otherwise
@@ -209,34 +215,42 @@ class ManualResourceAssociator:
                 # Build db operation value
                 db_op_value = f"{escaped_operation_type}:{escaped_table_name}:{escaped_confidence}"
                 
-                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                 
                 if class_fqn:
-                    # Update JavaClass with dbOperations
-                    escaped_class_fqn = escape_cypher_string(class_fqn)
-                    
-                    # Verify class exists
-                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
-                    result = session.run(check_class_query, fqn=class_fqn)
-                    if not result.single():
-                        logger.error(f"     JavaClass not found: {class_fqn}")
+                    if not bean_id:
+                        logger.error(f"     bean_id required when using class FQN")
                         self.stats['errors'] += 1
                         return False
                     
-                    update_class_query = f"""
-                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
-                    SET jc.dbOperations = CASE
-                        WHEN jc.dbOperations IS NULL THEN ['{db_op_value}']
-                        ELSE jc.dbOperations + ['{db_op_value}']
+                    # Update Step node with dbOperations
+                    escaped_bean_id = escape_cypher_string(bean_id)
+                    
+                    # Find Step by bean_id (stored in implBean property)
+                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+                    result = session.run(check_step_query, beanId=bean_id)
+                    step_record = result.single()
+                    if not step_record:
+                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_step_query = f"""
+                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    SET s.stepDbOperations = CASE
+                        WHEN s.stepDbOperations IS NULL THEN ['{db_op_value}']
+                        ELSE s.stepDbOperations + ['{db_op_value}']
                     END,
-                    jc.dbOperationCount = size(jc.dbOperations)
+                    s.stepDbOperationCount = size(s.stepDbOperations),
+                    s.manuallyResolvedDbOps = true
                     """
-                    session.run(update_class_query)
-                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    session.run(update_step_query)
+                    logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {db_op_value}")
-                    # Track this method as class-level configured (generic method)
-                    self.class_level_methods.add(method_fqn)
+                    # Track this method + bean combo as class-level configured (generic method)
+                    composite_key = f"{method_fqn}|{bean_id}"
+                    self.class_level_methods.add(composite_key)
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = f"""
@@ -252,6 +266,9 @@ class ManualResourceAssociator:
                     """
                     session.run(update_method_query)
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                self.stats['db_operations_processed'] += 1
+                return True
+                
         except Exception as e:
             logger.error(f"   Error associating DB operation: {e}")
             self.stats['errors'] += 1
@@ -261,10 +278,11 @@ class ManualResourceAssociator:
                                   schema_name: str = None, package_name: str = None,
                                   database_type: str = "UNKNOWN", is_function: bool = False,
                                   tasklet_fqn: str = None, reader_fqn: str = None,
-                                  writer_fqn: str = None, processor_fqn: str = None) -> bool:
+                                  writer_fqn: str = None, processor_fqn: str = None,
+                                  bean_id: str = None) -> bool:
         """
         Create PROCEDURE/FUNCTION Resource and INVOKES relationship for a method.
-        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
+        If tasklet/reader/writer/processor FQN + bean_id provided, updates Step directly.
         
         Args:
             method_fqn: Method fully qualified name (the generic method that calls procedure)
@@ -273,10 +291,11 @@ class ManualResourceAssociator:
             package_name: Oracle package name (e.g., PKG_BATCH)
             database_type: ORACLE, DB2, POSTGRESQL, etc.
             is_function: True if function, False if procedure
-            tasklet_fqn: Optional Tasklet class FQN to update directly
-            reader_fqn: Optional ItemReader class FQN to update directly
-            writer_fqn: Optional ItemWriter class FQN to update directly
-            processor_fqn: Optional ItemProcessor class FQN to update directly
+            tasklet_fqn: Optional Tasklet class FQN to update at Step level
+            reader_fqn: Optional ItemReader class FQN to update at Step level
+            writer_fqn: Optional ItemWriter class FQN to update at Step level
+            processor_fqn: Optional ItemProcessor class FQN to update at Step level
+            bean_id: Required when using class FQN - identifies specific Step bean instance
         
         Returns:
             True if successful, False otherwise
@@ -359,34 +378,42 @@ class ManualResourceAssociator:
                 package_part = escape_cypher_string(package_name) if package_name else 'NONE'
                 proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
                 
-                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                 
                 if class_fqn:
-                    # Update JavaClass with procedureCalls
-                    escaped_class_fqn = escape_cypher_string(class_fqn)
-                    
-                    # Verify class exists
-                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
-                    result = session.run(check_class_query, fqn=class_fqn)
-                    if not result.single():
-                        logger.error(f"     JavaClass not found: {class_fqn}")
+                    if not bean_id:
+                        logger.error(f"     bean_id required when using class FQN")
                         self.stats['errors'] += 1
                         return False
                     
-                    update_class_query = f"""
-                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
-                    SET jc.procedureCalls = CASE
-                        WHEN jc.procedureCalls IS NULL THEN ['{proc_value}']
-                        ELSE jc.procedureCalls + ['{proc_value}']
+                    # Update Step node with procedureCalls
+                    escaped_bean_id = escape_cypher_string(bean_id)
+                    
+                    # Find Step by bean_id (stored in implBean property)
+                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+                    result = session.run(check_step_query, beanId=bean_id)
+                    step_record = result.single()
+                    if not step_record:
+                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_step_query = f"""
+                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    SET s.stepProcedureCalls = CASE
+                        WHEN s.stepProcedureCalls IS NULL THEN ['{proc_value}']
+                        ELSE s.stepProcedureCalls + ['{proc_value}']
                     END,
-                    jc.procedureCallCount = size(jc.procedureCalls)
+                    s.stepProcedureCallCount = size(s.stepProcedureCalls),
+                    s.manuallyResolvedProcCalls = true
                     """
-                    session.run(update_class_query)
-                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    session.run(update_step_query)
+                    logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {proc_value}")
-                    # Track this method as class-level configured (generic method)
-                    self.class_level_methods.add(method_fqn)
+                    # Track this method + bean combo as class-level configured (generic method)
+                    composite_key = f"{method_fqn}|{bean_id}"
+                    self.class_level_methods.add(composite_key)
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = f"""
@@ -418,10 +445,11 @@ class ManualResourceAssociator:
                                    remote_port: int = None, ssh_key_location: str = None,
                                    confidence: str = "HIGH", description: str = None,
                                    tasklet_fqn: str = None, reader_fqn: str = None,
-                                   writer_fqn: str = None, processor_fqn: str = None) -> bool:
+                                   writer_fqn: str = None, processor_fqn: str = None,
+                                   bean_id: str = None) -> bool:
         """
         Create SHELL_SCRIPT Resource and EXECUTES relationship for a method.
-        If tasklet/reader/writer/processor FQN provided, updates JavaClass directly.
+        If tasklet/reader/writer/processor FQN + bean_id provided, updates Step directly.
         
         Args:
             method_fqn: Method fully qualified name
@@ -434,10 +462,11 @@ class ManualResourceAssociator:
             ssh_key_location: SSH key file location
             confidence: HIGH, MEDIUM, LOW
             description: Optional description
-            tasklet_fqn: Optional Tasklet class FQN to update directly
-            reader_fqn: Optional ItemReader class FQN to update directly
-            writer_fqn: Optional ItemWriter class FQN to update directly
-            processor_fqn: Optional ItemProcessor class FQN to update directly
+            tasklet_fqn: Optional Tasklet class FQN to update at Step level
+            reader_fqn: Optional ItemReader class FQN to update at Step level
+            writer_fqn: Optional ItemWriter class FQN to update at Step level
+            processor_fqn: Optional ItemProcessor class FQN to update at Step level
+            bean_id: Required when using class FQN - identifies specific Step bean instance
         
         Returns:
             True if successful, False otherwise
@@ -529,49 +558,64 @@ class ManualResourceAssociator:
                 # Build shell execution value
                 shell_exec_value = f"RESOLVED:{escaped_script_name}:{escaped_confidence}"
                 
-                # If tasklet/reader/writer/processor FQN specified, update JavaClass directly
+                # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                 
                 if class_fqn:
-                    # Update JavaClass with shellExecutions
-                    escaped_class_fqn = escape_cypher_string(class_fqn)
-                    
-                    # Verify class exists
-                    check_class_query = "MATCH (jc:JavaClass {fqn: $fqn}) RETURN jc.className as name"
-                    result = session.run(check_class_query, fqn=class_fqn)
-                    if not result.single():
-                        logger.error(f"     JavaClass not found: {class_fqn}")
+                    if not bean_id:
+                        logger.error(f"     bean_id required when using class FQN")
                         self.stats['errors'] += 1
                         return False
                     
-                    update_class_query = f"""
-                    MATCH (jc:JavaClass {{fqn: '{escaped_class_fqn}'}})
-                    SET jc.shellExecutions = CASE
-                        WHEN jc.shellExecutions IS NULL THEN ['{shell_exec_value}']
-                        ELSE jc.shellExecutions + ['{shell_exec_value}']
+                    # Update Step node with shellExecutions
+                    escaped_bean_id = escape_cypher_string(bean_id)
+                    
+                    # Find Step by bean_id (stored in implBean property)
+                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+                    result = session.run(check_step_query, beanId=bean_id)
+                    step_record = result.single()
+                    if not step_record:
+                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        self.stats['errors'] += 1
+                        return False
+                    
+                    update_step_query = f"""
+                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    SET s.stepShellExecutions = CASE
+                        WHEN s.stepShellExecutions IS NULL THEN ['{shell_exec_value}']
+                        ELSE s.stepShellExecutions + ['{shell_exec_value}']
                     END,
-                    jc.shellExecutionCount = size(jc.shellExecutions)
+                    s.stepShellExecutionCount = size(s.stepShellExecutions),
+                    s.manuallyResolvedShellExecs = true
                     """
-                    session.run(update_class_query)
-                    logger.info(f"     JavaClass updated: {class_fqn}")
+                    session.run(update_step_query)
+                    logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {shell_exec_value}")
-                    # Track this method as class-level configured (generic method)
-                    self.class_level_methods.add(method_fqn)
+                    # Track this method + bean combo as class-level configured (generic method)
+                    composite_key = f"{method_fqn}|{bean_id}"
+                    self.class_level_methods.add(composite_key)
                 else:
                     # Original behavior: Update JavaMethod
+                    # Strategy: Replace grey area entries with RESOLVED entry (idempotent)
+                    # A grey area entry is one that doesn't start with "RESOLVED:" and contains incomplete/error info
                     update_method_query = f"""
                     MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
-                    SET m.shellExecutions = [exec IN m.shellExecutions | 
-                        CASE 
-                            WHEN (exec CONTAINS 'DYNAMIC' OR exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'PARAMETERIZED') AND 
-                                 (exec CONTAINS ':{escaped_script_name}:' OR exec ENDS WITH ':{escaped_script_name}')
-                            THEN '{shell_exec_value}'
-                            ELSE exec
-                        END
-                    ],
+                    SET m.shellExecutions = CASE
+                        // If the RESOLVED entry already exists, keep existing (idempotent)
+                        WHEN '{shell_exec_value}' IN m.shellExecutions THEN m.shellExecutions
+                        
+                        // If only one entry and it's not RESOLVED, replace it
+                        WHEN size(m.shellExecutions) = 1 AND NOT m.shellExecutions[0] STARTS WITH 'RESOLVED:' 
+                        THEN ['{shell_exec_value}']
+                        
+                        // Otherwise, keep RESOLVED entries and add new one
+                        ELSE [exec IN m.shellExecutions WHERE exec STARTS WITH 'RESOLVED:'] + 
+                             ['{shell_exec_value}']
+                    END,
                     m.furtherAnalysisRequired = false
                     """
                     session.run(update_method_query)
+                    logger.info(f"     Method updated: shellExecutions updated with RESOLVED entry")
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
         except Exception as e:
             logger.error(f"   Error associating shell execution: {e}")
@@ -593,7 +637,11 @@ class ManualResourceAssociator:
         MATCH (s:Step)
         RETURN s.name as stepName, 
                s.stepKind as stepKind,
-               elementId(s) as stepId
+               s.implBean as stepBeanId,
+               elementId(s) as stepId,
+               s.stepDbOperations as stepDbOps,
+               s.stepProcedureCalls as stepProcCalls,
+               s.stepShellExecutions as stepShellExecs
         """
         
         with self.driver.session(database=self.database) as session:
@@ -608,6 +656,7 @@ class ManualResourceAssociator:
             step_name = step_data['stepName']
             step_kind = step_data['stepKind']
             step_id = step_data['stepId']
+            step_bean_id = step_data.get('stepBeanId')
             
             if not step_kind:
                 continue
@@ -620,18 +669,37 @@ class ManualResourceAssociator:
             else:
                 continue
             
+            # BFS traversal to collect all operations from call graph
+            all_db_operations = set()
+            all_procedure_calls = set()
+            all_shell_executions = set()
+            
+            # NEW: First, collect from Step properties (manually resolved operations)
+            # ONLY keep RESOLVED entries - discard all grey area/unresolved entries
+            # Grey area indicators: UNKNOWN, DYNAMIC, PARAMETERIZED, or entries from enrichers (Runtime.exec, CommonsExec, etc.)
+            if step_data.get('stepDbOps'):
+                for op in step_data['stepDbOps']:
+                    # Keep only if it starts with RESOLVED: or doesn't contain grey area keywords
+                    if op.startswith('RESOLVED:') or ('UNKNOWN' not in op and 'DYNAMIC' not in op and 'PARAMETERIZED' not in op):
+                        all_db_operations.add(op)
+            if step_data.get('stepProcCalls'):
+                for proc in step_data['stepProcCalls']:
+                    if proc.startswith('RESOLVED:') or ('UNKNOWN' not in proc and 'DYNAMIC' not in proc and 'PARAMETERIZED' not in proc):
+                        all_procedure_calls.add(proc)
+            if step_data.get('stepShellExecs'):
+                for shell in step_data['stepShellExecs']:
+                    # Only keep RESOLVED entries or clean entries (not from enricher detection)
+                    # Enricher entries contain method names like "Runtime.exec:", "CommonsExec:", "ProcessBuilder:", "SSHClient:"
+                    is_enricher_entry = any(prefix in shell for prefix in ['Runtime.exec:', 'CommonsExec:', 'ProcessBuilder:', 'SSHClient:', 'SSH:'])
+                    if shell.startswith('RESOLVED:') or (not is_enricher_entry and 'UNKNOWN' not in shell and 'DYNAMIC' not in shell and 'PARAMETERIZED' not in shell):
+                        all_shell_executions.add(shell)
+            
             # Find entry methods for this Step AND get JavaClass properties
             # Support inheritance: traverse EXTENDS chain to find inherited methods
             query_entry_methods = """
             MATCH (s:Step)
             WHERE elementId(s) = $stepId
             MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
-            
-            // First, get JavaClass properties (NEW: collect from class itself)
-            WITH jc, 
-                 jc.dbOperations as classDbOps,
-                 jc.procedureCalls as classProcCalls,
-                 jc.shellExecutions as classShellExecs
             
             // Find methods in the class or its parent hierarchy (up to 10 levels)
             CALL {
@@ -664,11 +732,9 @@ class ManualResourceAssociator:
             }
             
             // Return the method closest in the inheritance hierarchy (prefer child overrides)
-            WITH methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, inheritanceDepth,
-                 classDbOps, classProcCalls, classShellExecs
+            WITH methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, inheritanceDepth
             ORDER BY inheritanceDepth ASC
-            RETURN methodId, methodName, methodFqn, dbOps, procCalls, shellExecs,
-                   classDbOps, classProcCalls, classShellExecs
+            RETURN methodId, methodName, methodFqn, dbOps, procCalls, shellExecs
             LIMIT 3  // For TASKLET: 1 execute, For CHUNK: read, write, process
             """
             
@@ -681,29 +747,16 @@ class ManualResourceAssociator:
             if not entry_methods:
                 continue
             
-            # BFS traversal to collect all operations from call graph
-            all_db_operations = set()
-            all_procedure_calls = set()
-            all_shell_executions = set()
-            
-            # NEW: First, collect from JavaClass properties (if manually set)
-            if entry_methods:
-                first_entry = entry_methods[0]
-                if first_entry.get('classDbOps'):
-                    all_db_operations.update(first_entry['classDbOps'])
-                if first_entry.get('classProcCalls'):
-                    all_procedure_calls.update(first_entry['classProcCalls'])
-                if first_entry.get('classShellExecs'):
-                    all_shell_executions.update(first_entry['classShellExecs'])
-            
             for entry_method in entry_methods:
                 method_id = entry_method['methodId']
                 method_fqn = entry_method.get('methodFqn')
                 
-                # Check if this method was configured with class-level update (generic method)
-                # If so, skip its operations (already collected from JavaClass)
+                # Check if this method was configured with class-level update (generic method) for THIS STEP
+                # Use composite key: method_fqn|bean_id
+                # If so, skip its operations (already collected from Step properties)
                 # If not, include ALL operations (even UNKNOWN/DYNAMIC) for human review
-                is_class_level_method = method_fqn in self.class_level_methods if method_fqn else False
+                composite_key = f"{method_fqn}|{step_bean_id}" if method_fqn and step_bean_id else None
+                is_class_level_method = composite_key in self.class_level_methods if composite_key else False
                 
                 if not is_class_level_method:
                     # Add operations from entry method itself (include UNKNOWN/DYNAMIC)
@@ -745,10 +798,12 @@ class ManualResourceAssociator:
                             visited.add(called_id)
                             queue.append(called_id)
                             
-                            # Check if this called method was configured with class-level update
-                            # If so, skip its operations (already handled at JavaClass level)
+                            # Check if this called method was configured with class-level update for THIS STEP
+                            # Use composite key: method_fqn|bean_id
+                            # If so, skip its operations (already handled at Step level)
                             # If not, include ALL operations (even UNKNOWN/DYNAMIC)
-                            is_class_level_called = called_fqn in self.class_level_methods if called_fqn else False
+                            called_composite_key = f"{called_fqn}|{step_bean_id}" if called_fqn and step_bean_id else None
+                            is_class_level_called = called_composite_key in self.class_level_methods if called_composite_key else False
                             
                             if not is_class_level_called:
                                 # Collect operations from called method (include UNKNOWN/DYNAMIC)
@@ -763,6 +818,7 @@ class ManualResourceAssociator:
             step_db_ops = sorted(list(all_db_operations))
             step_proc_calls = sorted(list(all_procedure_calls))
             step_shell_execs = sorted(list(all_shell_executions))
+            
             
             query_update = """
             MATCH (s:Step)
@@ -830,6 +886,7 @@ class ManualResourceAssociator:
                 reader_fqn = op.get('reader_fqn')
                 writer_fqn = op.get('writer_fqn')
                 processor_fqn = op.get('processor_fqn')
+                bean_id = op.get('bean_id')
                 
                 if not all([method_fqn, operation_type, table_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, operation_type, table_name")
@@ -843,7 +900,7 @@ class ManualResourceAssociator:
                     logger.info(f"      Target: {class_type} JavaClass - {class_fqn}")
                 logger.info(f"      Operation: {operation_type} on table '{table_name}'")
                 self.associate_db_operation(method_fqn, operation_type, table_name, schema_name, 
-                                           confidence, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn)
+                                           confidence, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn, bean_id)
                 
         
         # Process procedure calls
@@ -861,6 +918,7 @@ class ManualResourceAssociator:
                 reader_fqn = proc.get('reader_fqn')
                 writer_fqn = proc.get('writer_fqn')
                 processor_fqn = proc.get('processor_fqn')
+                bean_id = proc.get('bean_id')
                 
                 if not all([method_fqn, procedure_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, procedure_name")
@@ -881,7 +939,7 @@ class ManualResourceAssociator:
                 logger.info(f"      Procedure: {display_name} ({database_type})")
                 self.associate_procedure_call(method_fqn, procedure_name, schema_name, package_name, 
                                             database_type, is_function, tasklet_fqn, reader_fqn, 
-                                            writer_fqn, processor_fqn)
+                                            writer_fqn, processor_fqn, bean_id)
                 logger.info("")
         
         # Process shell executions
@@ -903,6 +961,7 @@ class ManualResourceAssociator:
                 reader_fqn = shell.get('reader_fqn')
                 writer_fqn = shell.get('writer_fqn')
                 processor_fqn = shell.get('processor_fqn')
+                bean_id = shell.get('bean_id')
                 
                 if not all([method_fqn, script_name]):
                     logger.error(f"  [{idx}]  Missing required fields: method_fqn, script_name")
@@ -922,7 +981,7 @@ class ManualResourceAssociator:
                 self.associate_shell_execution(
                     method_fqn, script_name, script_path, script_type,
                     remote_host, remote_user, remote_port, ssh_key_location,
-                    confidence, description, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn
+                    confidence, description, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn, bean_id
                 )
                 logger.info("")
         
@@ -965,9 +1024,12 @@ def create_sample_config():
                 'confidence': 'HIGH'
             },
             {
-                'method_fqn': 'com.companyname.dao.BatchJobDAOImpl.getJobDetails',
-                'operation_type': 'SELECT',
-                'table_name': 'batch_job_execution',
+                # Example: For generic methods, specify reader/writer/processor FQN + bean_id
+                'method_fqn': 'com.companyname.dao.GenericDAO.executeQuery',
+                'writer_fqn': 'com.companyname.batch.writer.CustomerItemWriter',
+                'bean_id': 'customerItemWriter',  # Required for class-level config
+                'operation_type': 'UPDATE',
+                'table_name': 'customer',
                 'schema_name': 'batch_schema',
                 'confidence': 'HIGH'
             }
@@ -980,9 +1042,10 @@ def create_sample_config():
                 'is_function': False
             },
             {
-                # Example: For generic methods, specify tasklet/reader/writer/processor FQN
+                # Example: For generic methods, specify tasklet/reader/writer/processor FQN + bean_id
                 'method_fqn': 'com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure',
                 'tasklet_fqn': 'com.companyname.batch.tasklet.StoredProcedureExecutorTasklet',
+                'bean_id': 'customerStoredProcedureTasklet',  # Required for class-level config
                 'procedure_name': 'P_DATA_RESTORE_PROCESSOR',
                 'schema_name': 'APMLOAD',
                 'database_type': 'ORACLE',
@@ -991,9 +1054,10 @@ def create_sample_config():
         ],
         'shell_executions': [
             {
-                # Example with tasklet FQN
+                # Example with tasklet FQN + bean_id
                 'method_fqn': 'com.companyname.util.ShellExecutor.runScript',
                 'tasklet_fqn': 'com.companyname.batch.tasklet.DataMigrationTasklet',
+                'bean_id': 'dataMigrationTasklet',  # Required for class-level config
                 'script_name': 'data_migration.sh',
                 'script_path': '/opt/batch/scripts/data_migration.sh',
                 'script_type': 'BASH',
