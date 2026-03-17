@@ -686,7 +686,7 @@ class JavaCallHierarchyParser:
                                     'return_type': return_type,
                                     'full_call': f"{qualifier}.{method_name}()"
                                 }
-                                logger.info(f"    ✓ Stored: {qualifier}.{method_name}() returns {return_type} for potential chaining")
+                                logger.info(f"     Stored: {qualifier}.{method_name}() returns {return_type} for potential chaining")
                             else:
                                 logger.info(f"    Method {method_name} not found in {target_class}")
                         else:

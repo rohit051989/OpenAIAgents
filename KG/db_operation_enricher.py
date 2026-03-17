@@ -43,6 +43,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Load grey area keywords from config
+script_dir = Path(__file__).parent
+config_path = script_dir / "config" / "information_graph_config.yaml"
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+    grey_area = config.get('grey_area_keywords', {})
+    DB_SKIP_KEYWORDS = grey_area.get('db_operations', ['DYNAMIC_TABLE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']) + grey_area.get('core', ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED'])
+
 
 def escape_cypher_string(s: str) -> str:
     """Escape string for Cypher query"""
@@ -567,7 +575,7 @@ class DBOperationEnricher:
                 
                 # Skip Resource creation for DYNAMIC/UNKNOWN table names
                 # These need manual resolution before Resource association
-                skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_TABLE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']
+                skip_keywords = DB_SKIP_KEYWORDS
                 if any(keyword in table_name for keyword in skip_keywords):
                     logger.info(f"  Skipping Resource creation for {table_name} (requires manual resolution)")
                     continue
@@ -661,8 +669,7 @@ class DBOperationEnricher:
             MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
             
             // Find methods in the class or its parent hierarchy (up to 10 levels)
-            CALL {
-                WITH jc
+            CALL (jc) {
                 // Check direct methods first (closest in hierarchy)
                 MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
@@ -675,7 +682,6 @@ class DBOperationEnricher:
                 UNION
                 
                 // Check parent classes (up to 10 levels of inheritance)
-                WITH jc
                 MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
                 MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames

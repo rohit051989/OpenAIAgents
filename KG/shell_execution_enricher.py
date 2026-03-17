@@ -48,6 +48,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Load grey area keywords from config
+load_dotenv()
+_config_path = os.getenv('KG_CONFIG_FILE', 'config/information_graph_config.yaml')
+with open(_config_path, 'r') as f:
+    _config = yaml.safe_load(f)
+
+GREY_AREA_KEYWORDS = _config.get('grey_area_keywords', {})
+SCRIPT_QUALITY_KEYWORDS = GREY_AREA_KEYWORDS.get('script_quality', [])
+SHELL_SKIP_KEYWORDS = GREY_AREA_KEYWORDS.get('shell_executions', [])
+
 
 def escape_cypher_string(s: str) -> str:
     """Escape string for Cypher query"""
@@ -246,14 +256,8 @@ class ShellExecutionEnricher:
         
         script_lower = script_name.lower()
         
-        # Check for obvious grey area indicators
-        grey_area_keywords = [
-            'unknown', 'dynamic', 'parameterized', 'variable', 'placeholder',
-            'error', 'exception', 'unable', 'failed', 'missing', 'not found',
-            'invalid', 'undefined', 'null', 'empty'
-        ]
-        
-        for keyword in grey_area_keywords:
+        # Check for grey area indicators from config
+        for keyword in SCRIPT_QUALITY_KEYWORDS:
             if keyword in script_lower:
                 return True
         
@@ -454,7 +458,7 @@ class ShellExecutionEnricher:
         """
         Create or update ShellScript Resource node.
         """
-        if not script_name or script_name in ['DYNAMIC_PATH', 'PARAMETERIZED', 'UNKNOWN_SCRIPT', 'REMOTE_EXECUTION']:
+        if not script_name or script_name in SHELL_SKIP_KEYWORDS:
             return  # Don't create resources for grey areas
         
         escaped_name = escape_cypher_string(script_name)

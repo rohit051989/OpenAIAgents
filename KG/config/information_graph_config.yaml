@@ -172,3 +172,26 @@ db_operation_analysis:
   batch_size: 5  # Number of classes to process in parallel (for LLM)
   cache_results: true  # Cache LLM results to avoid re-analysis
   cache_file: ".db_operation_cache.json"
+
+# Grey Area Keywords - used by enrichers and tools
+# These keywords identify operations that need manual resolution
+grey_area_keywords:
+  # Core keywords for all operation types
+  core: ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED']
+  
+  # DB operations
+  db_operations: ['DYNAMIC_TABLE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']
+  
+  # Procedure calls
+  procedure_calls: ['DYNAMIC_PROCEDURE', 'DYNAMIC_PACKAGE']
+  
+  # Shell executions
+  shell_executions: ['DYNAMIC_PATH', 'DYNAMIC_SCRIPT', 'UNKNOWN_SCRIPT', 'REMOTE_EXECUTION']
+  
+  # Script quality indicators (lowercase)
+  script_quality: ['unknown', 'dynamic', 'parameterized', 'variable', 'placeholder', 
+                   'error', 'exception', 'unable', 'failed', 'missing', 'not found', 
+                   'invalid', 'undefined', 'null', 'empty']
+  
+  # Enricher entry prefixes (for filtering)
+  enricher_prefixes: ['Runtime.exec:', 'CommonsExec:', 'ProcessBuilder:', 'SSHClient:', 'SSH:']

@@ -43,6 +43,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Load grey area keywords from config
+load_dotenv()
+_config_path = os.getenv('CONFIG_FILE_PATH', 'config/information_graph_config.yaml')
+with open(_config_path, 'r') as f:
+    _config = yaml.safe_load(f)
+
+GREY_AREA_KEYWORDS = _config.get('grey_area_keywords', {})
+PROC_SKIP_KEYWORDS = GREY_AREA_KEYWORDS.get('procedure_calls', []) + GREY_AREA_KEYWORDS.get('core', [])
+
 
 def escape_cypher_string(s: str) -> str:
     """Escape string for Cypher query"""
@@ -201,10 +210,9 @@ class ProcedureCallEnricher:
         
         # Check if procedure name/schema/package is dynamic and requires manual review
         requires_further_analysis = (
-            'DYNAMIC' in procedure_call.procedure_name.upper() or
-            procedure_call.procedure_name == 'UNKNOWN' or
-            (procedure_call.schema_name and 'DYNAMIC' in procedure_call.schema_name.upper()) or
-            (procedure_call.package_name and 'DYNAMIC' in procedure_call.package_name.upper())
+            any(kw in procedure_call.procedure_name.upper() for kw in PROC_SKIP_KEYWORDS) or
+            (procedure_call.schema_name and any(kw in procedure_call.schema_name.upper() for kw in PROC_SKIP_KEYWORDS)) or
+            (procedure_call.package_name and any(kw in procedure_call.package_name.upper() for kw in PROC_SKIP_KEYWORDS))
         )
         
         query = """
@@ -247,7 +255,7 @@ class ProcedureCallEnricher:
         """
         # Skip Resource creation for DYNAMIC/UNKNOWN procedure names
         # These need manual resolution before Resource association
-        skip_keywords = ['DYNAMIC', 'UNKNOWN', 'DYNAMIC_PROCEDURE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA', 'DYNAMIC_PACKAGE']
+        skip_keywords = PROC_SKIP_KEYWORDS
         
         proc_name = procedure_call.procedure_name.upper() if procedure_call.procedure_name else 'UNKNOWN'
         schema_name = procedure_call.schema_name.upper() if procedure_call.schema_name else 'UNKNOWN'
@@ -414,7 +422,7 @@ class ProcedureCallEnricher:
             if class_has_procedures:
                 self._update_class_flag(class_fqn)
                 self.stats['classes_with_procedures'] += 1
-                logger.info(f"  → Class marked as is_procedure_invoked=true\n")
+                logger.info(f"  -> Class marked as is_procedure_invoked=true\n")
             else:
                 logger.info(f"  No procedure calls detected\n")
         

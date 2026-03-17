@@ -98,6 +98,14 @@ NEO4J_USER = config['neo4j']['user']
 NEO4J_PASSWORD = config['neo4j']['password']
 NEO4J_DATABASE = config['neo4j']['database_ig']
 
+# Load grey area keywords from config
+GREY_AREA_KEYWORDS = config.get('grey_area_keywords', {})
+CORE_KEYWORDS = GREY_AREA_KEYWORDS.get('core', ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED'])
+DB_KEYWORDS = GREY_AREA_KEYWORDS.get('db_operations', [])
+PROC_KEYWORDS = GREY_AREA_KEYWORDS.get('procedure_calls', [])
+SHELL_KEYWORDS = GREY_AREA_KEYWORDS.get('shell_executions', [])
+ENRICHER_PREFIXES = GREY_AREA_KEYWORDS.get('enricher_prefixes', [])
+
 
 def escape_cypher_string(s: str) -> str:
     """Escape single quotes in Cypher string literals"""
@@ -680,18 +688,17 @@ class ManualResourceAssociator:
             if step_data.get('stepDbOps'):
                 for op in step_data['stepDbOps']:
                     # Keep only if it starts with RESOLVED: or doesn't contain grey area keywords
-                    if op.startswith('RESOLVED:') or ('UNKNOWN' not in op and 'DYNAMIC' not in op and 'PARAMETERIZED' not in op):
+                    if op.startswith('RESOLVED:') or not any(kw in op for kw in CORE_KEYWORDS):
                         all_db_operations.add(op)
             if step_data.get('stepProcCalls'):
                 for proc in step_data['stepProcCalls']:
-                    if proc.startswith('RESOLVED:') or ('UNKNOWN' not in proc and 'DYNAMIC' not in proc and 'PARAMETERIZED' not in proc):
+                    if proc.startswith('RESOLVED:') or not any(kw in proc for kw in CORE_KEYWORDS):
                         all_procedure_calls.add(proc)
             if step_data.get('stepShellExecs'):
                 for shell in step_data['stepShellExecs']:
                     # Only keep RESOLVED entries or clean entries (not from enricher detection)
-                    # Enricher entries contain method names like "Runtime.exec:", "CommonsExec:", "ProcessBuilder:", "SSHClient:"
-                    is_enricher_entry = any(prefix in shell for prefix in ['Runtime.exec:', 'CommonsExec:', 'ProcessBuilder:', 'SSHClient:', 'SSH:'])
-                    if shell.startswith('RESOLVED:') or (not is_enricher_entry and 'UNKNOWN' not in shell and 'DYNAMIC' not in shell and 'PARAMETERIZED' not in shell):
+                    is_enricher_entry = any(prefix in shell for prefix in ENRICHER_PREFIXES)
+                    if shell.startswith('RESOLVED:') or (not is_enricher_entry and not any(kw in shell for kw in CORE_KEYWORDS)):
                         all_shell_executions.add(shell)
             
             # Find entry methods for this Step AND get JavaClass properties
@@ -702,8 +709,7 @@ class ManualResourceAssociator:
             MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
             
             // Find methods in the class or its parent hierarchy (up to 10 levels)
-            CALL {
-                WITH jc
+            CALL (jc) {
                 // Check direct methods first (closest in hierarchy)
                 MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
@@ -718,7 +724,6 @@ class ManualResourceAssociator:
                 UNION
                 
                 // Check parent classes (up to 10 levels of inheritance)
-                WITH jc
                 MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
                 MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
