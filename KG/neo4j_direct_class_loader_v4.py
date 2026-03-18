@@ -178,13 +178,14 @@ class Neo4jLoader:
         self._load_jobs_association(excel_file)
         self._load_job_contexts(excel_file)
         self._load_job_successors(excel_file)
-        self._load_steps()
+        #self._load_steps()
+        self._load_steps_directly_from_IG()
+        self._copy_step_db_operations_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
         self._load_calendar(excel_file)
         self._load_associate_calendar(excel_file)
         self._load_holidays(excel_file)
-        #self._load_step_interaction(excel_file)
         logger.info(" Class-level data loaded successfully")
     
     def _load_job_groups(self, excel_file):
@@ -479,9 +480,363 @@ class Neo4jLoader:
                     session.run(stmt)
 
             logger.info(f" Loaded {len(statements)} statements for job '{job_def.name}'")
+    
+    def _load_steps_directly_from_IG(self):
+        """
+        Load Steps, Blocks, Decisions, Listeners, and all their relationships 
+        directly from the information graph to the knowledge graph.
         
-        # Copy consolidated DB operations from information graph
-        self._copy_step_db_operations_from_info_graph()
+        This avoids duplicate XML parsing since the information graph already 
+        contains the complete call hierarchy built during the scanning phase.
+        
+        Entities loaded:
+        - Steps (TASKLET and CHUNK types)
+        - Blocks (FLOW, SPLIT, BRANCH types)
+        - Decisions
+        - Listeners
+        
+        Relationships loaded:
+        - Job CONTAINS Steps/Blocks
+        - Job ENTRY to first node
+        - Block CONTAINS Steps/Blocks
+        - Block ENTRY to first node
+        - PRECEDES edges between nodes
+        - HAS_LISTENER relationships
+        """
+        logger.info("Loading Steps and related entities directly from information graph...")
+        
+        # Step 1: Load all Steps
+        logger.info("  Querying Steps from information graph...")
+        steps_query = """
+        MATCH (s:Step)
+        RETURN s.name as name,
+               s.stepKind as stepKind,
+               s.readerBean as readerBean,
+               s.readerClass as readerClass,
+               s.readerSourcePath as readerSourcePath,
+               s.processorBean as processorBean,
+               s.processorClass as processorClass,
+               s.processorSourcePath as processorSourcePath,
+               s.writerBean as writerBean,
+               s.writerClass as writerClass,
+               s.writerSourcePath as writerSourcePath,
+               s.implBean as implBean,
+               s.className as className,
+               s.path as path
+        ORDER BY s.name
+        """
+        
+        steps = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(steps_query)
+            for record in result:
+                steps.append(dict(record))
+        
+        logger.info(f"    Found {len(steps)} Steps in information graph")
+        
+        # Step 2: Load all Blocks
+        logger.info("  Querying Blocks from information graph...")
+        blocks_query = """
+        MATCH (b:Block)
+        RETURN b.id as id,
+               b.blockType as blockType
+        ORDER BY b.id
+        """
+        
+        blocks = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(blocks_query)
+            for record in result:
+                blocks.append(dict(record))
+        
+        logger.info(f"    Found {len(blocks)} Blocks in information graph")
+        
+        # Step 3: Load all Decisions
+        logger.info("  Querying Decisions from information graph...")
+        decisions_query = """
+        MATCH (d:Decision)
+        RETURN d.name as name,
+               d.deciderBean as deciderBean,
+               d.className as className,
+               d.path as path
+        ORDER BY d.name
+        """
+        
+        decisions = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(decisions_query)
+            for record in result:
+                decisions.append(dict(record))
+        
+        logger.info(f"    Found {len(decisions)} Decisions in information graph")
+        
+        # Step 4: Load all Listeners
+        logger.info("  Querying Listeners from information graph...")
+        listeners_query = """
+        MATCH (l:Listener)
+        RETURN l.name as name,
+               l.scope as scope,
+               l.implBean as implBean,
+               l.path as path
+        ORDER BY l.name
+        """
+        
+        listeners = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(listeners_query)
+            for record in result:
+                listeners.append(dict(record))
+        
+        logger.info(f"    Found {len(listeners)} Listeners in information graph")
+        
+        # Step 5: Load all relationships
+        logger.info("  Querying relationships from information graph...")
+        
+        # CONTAINS relationships (Job->Step, Job->Block, Block->Step, Block->Block)
+        contains_query = """
+        MATCH (source)-[r:CONTAINS]->(target)
+        WHERE (source:Job OR source:Block) AND (target:Step OR target:Block)
+        WITH source, target, labels(source) as sourceLabels, labels(target) as targetLabels
+        RETURN 
+            CASE WHEN 'Job' IN sourceLabels THEN source.name ELSE source.id END as sourceName,
+            sourceLabels,
+            CASE WHEN 'Step' IN targetLabels THEN target.name ELSE target.id END as targetName,
+            targetLabels
+        """
+        
+        contains_rels = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(contains_query)
+            for record in result:
+                contains_rels.append(dict(record))
+        
+        logger.info(f"    Found {len(contains_rels)} CONTAINS relationships")
+        
+        # ENTRY relationships (Job->Step/Block, Block->Step/Decision)
+        entry_query = """
+        MATCH (source)-[r:ENTRY]->(target)
+        WHERE (source:Job OR source:Block) AND (target:Step OR target:Block OR target:Decision)
+        WITH source, target, labels(source) as sourceLabels, labels(target) as targetLabels
+        RETURN 
+            CASE WHEN 'Job' IN sourceLabels THEN source.name ELSE source.id END as sourceName,
+            sourceLabels,
+            CASE WHEN 'Step' IN targetLabels OR 'Decision' IN targetLabels THEN target.name ELSE target.id END as targetName,
+            targetLabels
+        """
+        
+        entry_rels = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(entry_query)
+            for record in result:
+                entry_rels.append(dict(record))
+        
+        logger.info(f"    Found {len(entry_rels)} ENTRY relationships")
+        
+        # PRECEDES relationships (with 'on' property)
+        precedes_query = """
+        MATCH (source)-[r:PRECEDES]->(target)
+        WHERE (source:Step OR source:Block OR source:Decision) AND (target:Step OR target:Block OR target:Decision)
+        WITH source, r, target, labels(source) as sourceLabels, labels(target) as targetLabels
+        RETURN 
+            CASE WHEN 'Step' IN sourceLabels OR 'Decision' IN sourceLabels THEN source.name ELSE source.id END as sourceName,
+            sourceLabels,
+            CASE WHEN 'Step' IN targetLabels OR 'Decision' IN targetLabels THEN target.name ELSE target.id END as targetName,
+            targetLabels,
+            r.on as onValue
+        """
+        
+        precedes_rels = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(precedes_query)
+            for record in result:
+                precedes_rels.append(dict(record))
+        
+        logger.info(f"    Found {len(precedes_rels)} PRECEDES relationships")
+        
+        # HAS_LISTENER relationships
+        listener_rels_query = """
+        MATCH (j:Job)-[r:HAS_LISTENER]->(l:Listener)
+        RETURN j.name as jobName,
+               l.name as listenerName
+        """
+        
+        listener_rels = []
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(listener_rels_query)
+            for record in result:
+                listener_rels.append(dict(record))
+        
+        logger.info(f"    Found {len(listener_rels)} HAS_LISTENER relationships")
+        
+        # Step 6: Write everything to knowledge graph
+        logger.info("  Writing entities and relationships to knowledge graph...")
+        
+        with self.driver.session(database=self.database) as session:
+            # Create Steps
+            for step in steps:
+                if step.get('stepKind') == 'CHUNK':
+                    query = """
+                    MERGE (s:Step {name: $name})
+                    SET s.stepKind = $stepKind,
+                        s.readerBean = $readerBean,
+                        s.readerClass = $readerClass,
+                        s.readerSourcePath = $readerSourcePath,
+                        s.processorBean = $processorBean,
+                        s.processorClass = $processorClass,
+                        s.processorSourcePath = $processorSourcePath,
+                        s.writerBean = $writerBean,
+                        s.writerClass = $writerClass,
+                        s.writerSourcePath = $writerSourcePath
+                    """
+                else:  # TASKLET
+                    query = """
+                    MERGE (s:Step {name: $name})
+                    SET s.stepKind = $stepKind,
+                        s.implBean = $implBean,
+                        s.className = $className,
+                        s.path = $path
+                    """
+                session.run(query, **step)
+            
+            logger.info(f"    Created {len(steps)} Steps")
+            
+            # Create Blocks
+            for block in blocks:
+                query = """
+                MERGE (b:Block {id: $id})
+                SET b.blockType = $blockType
+                """
+                session.run(query, **block)
+            
+            logger.info(f"    Created {len(blocks)} Blocks")
+            
+            # Create Decisions
+            for decision in decisions:
+                query = """
+                MERGE (d:Decision {name: $name})
+                SET d.deciderBean = $deciderBean,
+                    d.className = $className,
+                    d.path = $path
+                """
+                session.run(query, **decision)
+            
+            logger.info(f"    Created {len(decisions)} Decisions")
+            
+            # Create Listeners
+            for listener in listeners:
+                query = """
+                MERGE (l:Listener {name: $name})
+                SET l.scope = $scope,
+                    l.implBean = $implBean,
+                    l.path = $path
+                """
+                session.run(query, **listener)
+            
+            logger.info(f"    Created {len(listeners)} Listeners")
+            
+            # Create CONTAINS relationships
+            for rel in contains_rels:
+                source_label = 'Job' if 'Job' in rel['sourceLabels'] else 'Block'
+                target_label = 'Step' if 'Step' in rel['targetLabels'] else 'Block'
+                
+                if source_label == 'Job':
+                    source_match = "(source:Job {name: $sourceName})"
+                else:
+                    source_match = "(source:Block {id: $sourceName})"
+                
+                if target_label == 'Step':
+                    target_match = "(target:Step {name: $targetName})"
+                else:
+                    target_match = "(target:Block {id: $targetName})"
+                
+                query = f"""
+                MATCH {source_match}
+                MATCH {target_match}
+                MERGE (source)-[:CONTAINS]->(target)
+                """
+                session.run(query, sourceName=rel['sourceName'], targetName=rel['targetName'])
+            
+            logger.info(f"    Created {len(contains_rels)} CONTAINS relationships")
+            
+            # Create ENTRY relationships
+            for rel in entry_rels:
+                source_label = 'Job' if 'Job' in rel['sourceLabels'] else 'Block'
+                target_labels = rel['targetLabels']
+                
+                if 'Step' in target_labels:
+                    target_label = 'Step'
+                elif 'Decision' in target_labels:
+                    target_label = 'Decision'
+                else:
+                    target_label = 'Block'
+                
+                if source_label == 'Job':
+                    source_match = "(source:Job {name: $sourceName})"
+                else:
+                    source_match = "(source:Block {id: $sourceName})"
+                
+                if target_label == 'Block':
+                    target_match = "(target:Block {id: $targetName})"
+                else:
+                    target_match = f"(target:{target_label} {{name: $targetName}})"
+                
+                query = f"""
+                MATCH {source_match}
+                MATCH {target_match}
+                MERGE (source)-[:ENTRY]->(target)
+                """
+                session.run(query, sourceName=rel['sourceName'], targetName=rel['targetName'])
+            
+            logger.info(f"    Created {len(entry_rels)} ENTRY relationships")
+            
+            # Create PRECEDES relationships
+            for rel in precedes_rels:
+                source_labels = rel['sourceLabels']
+                target_labels = rel['targetLabels']
+                
+                # Determine source label
+                if 'Step' in source_labels:
+                    source_label = 'Step'
+                    source_match = "(source:Step {name: $sourceName})"
+                elif 'Decision' in source_labels:
+                    source_label = 'Decision'
+                    source_match = "(source:Decision {name: $sourceName})"
+                else:
+                    source_label = 'Block'
+                    source_match = "(source:Block {id: $sourceName})"
+                
+                # Determine target label
+                if 'Step' in target_labels:
+                    target_label = 'Step'
+                    target_match = "(target:Step {name: $targetName})"
+                elif 'Decision' in target_labels:
+                    target_label = 'Decision'
+                    target_match = "(target:Decision {name: $targetName})"
+                else:
+                    target_label = 'Block'
+                    target_match = "(target:Block {id: $targetName})"
+                
+                query = f"""
+                MATCH {source_match}
+                MATCH {target_match}
+                MERGE (source)-[:PRECEDES {{on: $onValue}}]->(target)
+                """
+                session.run(query, sourceName=rel['sourceName'], targetName=rel['targetName'], onValue=rel['onValue'])
+            
+            logger.info(f"    Created {len(precedes_rels)} PRECEDES relationships")
+            
+            # Create HAS_LISTENER relationships
+            for rel in listener_rels:
+                query = """
+                MATCH (j:Job {name: $jobName})
+                MATCH (l:Listener {name: $listenerName})
+                MERGE (j)-[:HAS_LISTENER]->(l)
+                """
+                session.run(query, jobName=rel['jobName'], listenerName=rel['listenerName'])
+            
+            logger.info(f"    Created {len(listener_rels)} HAS_LISTENER relationships")
+        
+        logger.info(" Steps and related entities loaded successfully from information graph")
     
     def _copy_step_db_operations_from_info_graph(self):
         """
@@ -806,71 +1161,6 @@ class Neo4jLoader:
             query += " RETURN r"
             tx.run(query, **data)
         
-    def _load_step_interaction(self, excel_file):
-        """Load Step Interaction"""
-        df = pd.read_excel(excel_file, 'DataInteraction_v2')
-        logger.info(f"Loading {len(df)} DataInteraction_v2...")
-        with self.driver.session(database=self.database) as session:
-            for _, row in df.iterrows():
-                data = row.to_dict()
-                # Handle NaN values
-                data = {k: v for k, v in data.items() if pd.notna(v)}
-                session.execute_write(self._associate_step_interaction, data)
-        
-        logger.info(f" Loaded {len(df)} DataInteraction_v2")
-    
-    @staticmethod
-    def _associate_step_interaction(tx, data: Dict):
-        """Transaction function to associate step interaction"""
-
-        entityType = data.get('entityType', None)
-        methodReference = data.get('methodReference', "NOT_SPECIFIED")
-        query = f"""
-            Merge (di: DataAsset{{id: $id}})
-            SET di.description = $description,
-                di.method = $method,
-                di.methodReference = "{methodReference}",
-                di.enabled = $enabled
-            WITH di
-            MATCH (r:Resource {{id: $dataInteractionId}})
-            MERGE (di)-[:FOR_RESOURCE]->(r)
-            WITH di, r
-        """
-        dataInteractionOperationType = data.get('dataInteractionOperationType', None)
-        if dataInteractionOperationType == "READ":
-            query += f"""
-            MATCH (entity:{entityType} {{name: $entityId}})
-            WITH di, r, entity
-            MERGE (entity)-[:READS_FROM]->(di)
-            RETURN di, entity, r
-            """
-        elif dataInteractionOperationType == "INSERT":
-            query +=  f"""
-            MATCH (entity:{entityType} {{name: $entityId}})
-            WITH di, r, entity
-            MERGE (entity)-[:WRITES_TO]->(di)
-            RETURN di, entity, r
-            """
-        elif dataInteractionOperationType == "DELETE":
-            query +=  f"""
-            MATCH (entity:{entityType} {{name: $entityId}})
-            WITH di, r, entity
-            MERGE (entity)-[:DELETES_FROM]->(di)
-            RETURN di, entity, r
-            """
-        elif dataInteractionOperationType == "AGGREGATE":
-            query +=  f"""
-            MATCH (entity:{entityType} {{name: $entityId}})
-            WITH di, r, entity
-            MERGE (entity)-[:AGGREGATES_ON]->(di)
-            RETURN di, entity, r
-            """
-        else:
-            query +=   """
-                RETURN di, r
-                """
-        #logger.info("Executing Step Interaction Query:", query, " with data:", data)
-        tx.run(query, **data)        
     
     def _load_job_successors(self, excel_file):
         """Load Job Successors and create relationships"""
@@ -1165,7 +1455,6 @@ def main():
     logger.info("=" * 70)
     logger.info("Spring Batch Knowledge Graph - Neo4j Direct Loader")
     logger.info("=" * 70)
-    logger.info()
     
     load_dotenv()
     config_path = os.getenv("KG_CONFIG_FILE") #or DEFAULT_CONFIG_FILE
@@ -1212,9 +1501,7 @@ def main():
             logger.info("\n" + "=" * 70)
             logger.info(" LOADING COMPLETE!")
             logger.info("=" * 70)
-            logger.info()
             logger.info("🎉 Your data is now in Neo4j!")
-            logger.info()
     
     except Exception as e:
         logger.error(f"Error during loading: {str(e)}", exc_info=True)

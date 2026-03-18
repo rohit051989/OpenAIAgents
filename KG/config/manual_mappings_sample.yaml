@@ -19,6 +19,12 @@ db_operations:
   schema_name: APMLOAD
   confidence: HIGH
 
+- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap
+  operation_type: SELECT
+  table_name: APMS_JOB_FILE_MAPPING
+  schema_name: APMLOAD
+  confidence: HIGH
+
 # Stored Procedure Calls  
 # ----------------------
 # For methods that call stored procedures or functions

@@ -2219,7 +2219,7 @@ class InformationGraphBuilder:
         # FQN indexes already provide 9x speedup (29→260 stmt/s)
         # Reducing failures is now more important than larger batches
         if batch_size > 5000:
-            logger.warning(f"  ⚠️  Large batch size ({batch_size}) may cause transaction failures")
+            logger.warning(f"  Warning:  Large batch size ({batch_size}) may cause transaction failures")
             logger.warning(f"  Recommendation: Use batch_size=2000 for minimal failures")
         
         logger.info(f"  Using batch size: {batch_size} statements per transaction")

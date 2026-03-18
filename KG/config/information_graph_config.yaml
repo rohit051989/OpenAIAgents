@@ -133,11 +133,12 @@ scan_options:
   
   # Job filtering for faster testing
   build_all_jobs: true  # Set to false to build only specific jobs
-  jobs_to_build: []  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
+  jobs_to_build: ["customerProcessingJob","customerExportJob"]  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
 
 # Class data configuration
 class_data:
   excel_file: "sample_data/class_level_data_1.xlsx"
+  #excel_file: "sample_data/class_level_data_main.xlsx"
 
 # Instance data configuration
 instance_data:
