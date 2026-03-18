@@ -32,6 +32,8 @@ with open(config_file_path, 'r') as f:
 # Load grey area keywords
 grey_area = config.get('grey_area_keywords', {})
 CORE_KEYWORDS = grey_area.get('core', ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED'])
+scan_options = config.get('scan_options', {})
+jobs_to_scan = scan_options.get('jobs_to_build', [])
 
 driver = GraphDatabase.driver(
     config['neo4j']['uri'],
@@ -305,10 +307,11 @@ def main():
 Examples:
   python test/trace_unknown_operations.py --step customerProcessingStep
   python test/trace_unknown_operations.py --job CUSTOMER_PROCESSING_JOB
+  python test/trace_unknown_operations.py  # Uses jobs from config
         """
     )
     
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--step', dest='step_name', help='Step name to trace')
     group.add_argument('--job', dest='job_name', help='Job name to trace (traces all steps)')
     
@@ -320,6 +323,10 @@ Examples:
         trace_step_operations(args.step_name, database)
     elif args.job_name:
         trace_job_operations(args.job_name, database)
+    elif jobs_to_scan:
+        print(f"Scanning predefined jobs from config: {jobs_to_scan}")
+        for job in jobs_to_scan:
+            trace_job_operations(job, database)
     
     driver.close()
 
