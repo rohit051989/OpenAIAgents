@@ -1,0 +1,60 @@
+<div id="shellFields" class="resolution-fields" style="display: none;">
+    <div class="form-row">
+        <div class="form-group">
+            <label for="shellScript">Script Name:</label>
+            <input type="text" id="shellScript" class="form-control" placeholder="e.g., process_files.sh">
+        </div>
+        <div class="form-group">
+            <label for="shellPath">Script Path:</label>
+            <input type="text" id="shellPath" class="form-control" placeholder="e.g., /opt/scripts/process_files.sh">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="shellType">Script Type:</label>
+            <select id="shellType" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="BASH">BASH</option>
+                <option value="PYTHON">Python</option>
+                <option value="POWERSHELL">PowerShell</option>
+                <option value="BATCH">Batch</option>
+                <option value="PERL">Perl</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="shellConfidence">Confidence:</label>
+            <select id="shellConfidence" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="LOW">LOW</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="shellRemoteHost">Remote Host (optional):</label>
+            <input type="text" id="shellRemoteHost" class="form-control" placeholder="e.g., batch-server-01.company.com">
+        </div>
+        <div class="form-group">
+            <label for="shellRemoteUser">Remote User (optional):</label>
+            <input type="text" id="shellRemoteUser" class="form-control" placeholder="e.g., batchuser">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="shellRemotePort">Remote Port (optional):</label>
+            <input type="number" id="shellRemotePort" class="form-control" placeholder="e.g., 22">
+        </div>
+        <div class="form-group">
+            <label for="shellSshKey">SSH Key Location (optional):</label>
+            <input type="text" id="shellSshKey" class="form-control" placeholder="e.g., /home/user/.ssh/id_rsa">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="shellDescription">Description (optional):</label>
+            <input type="text" id="shellDescription" class="form-control" placeholder="e.g., Customer export script">
+        </div>
+    </div>
+</div>

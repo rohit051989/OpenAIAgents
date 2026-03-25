@@ -25,6 +25,11 @@ import os
 from dotenv import load_dotenv
 from neo4j_direct_step_loader import generate_cypher
 from cpm_analyzer_v1 import CPMAnalyzer
+from classes.DataClasses import JobDef
+from classes.KGNodeDefs import (
+    JobGroupNodeDef, TagNodeDef, ScheduleInstanceContextNodeDef,
+    SLANodeDef, CalendarNodeDef, HolidayNodeDef, ResourceNodeDef
+)
 
 
 # Configure logging
@@ -189,19 +194,43 @@ class Neo4jLoader:
         logger.info(" Class-level data loaded successfully")
     
     def _load_job_groups(self, excel_file):
-        """Load JobGroups"""
+        """Load JobGroups and create PRECEDES relationships"""
         df = pd.read_excel(excel_file, 'JobGroups')
         logger.info(f"Loading {len(df)} JobGroups...")
         
+        # Step 1: Create all JobGroup nodes
         with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
                 session.execute_write(self._create_job_group, row.to_dict())
         
         logger.info(f" Loaded {len(df)} JobGroups")
+        
+        # Step 2: Create PRECEDES relationships based on successor column
+        logger.info(f"Creating PRECEDES relationships between JobGroups...")
+        precedes_count = 0
+        
+        with self.driver.session(database=self.database) as session:
+            for _, row in df.iterrows():
+                data = row.to_dict()
+                # Handle NaN values
+                data = {k: v for k, v in data.items() if pd.notna(v)}
+                
+                if 'successor' in data:
+                    session.execute_write(self._create_job_group_precedes, data)
+                    precedes_count += 1
+        
+        logger.info(f" Created {precedes_count} PRECEDES relationships between JobGroups")
     
     @staticmethod
     def _create_job_group(tx, data: Dict):
         """Transaction function to create JobGroup"""
+        node = JobGroupNodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            description=str(data.get('description', '')),
+            priority=str(data.get('priority', '')),
+            enabled=bool(data.get('enabled', True))
+        )
         query = """
         MERGE (jg:JobGroup {id: $id})
         SET jg.name = $name,
@@ -211,7 +240,38 @@ class Neo4jLoader:
             jg.createdAt = datetime()
         RETURN jg
         """
-        tx.run(query, **data)
+        tx.run(query, id=node.id, name=node.name, description=node.description,
+               priority=node.priority, enabled=node.enabled)
+    
+    @staticmethod
+    def _create_job_group_precedes(tx, data: Dict):
+        """Transaction function to create PRECEDES relationship between JobGroups"""
+        successor = data.get('successor', None)
+        
+        if successor is None:
+            return
+        
+        # Handle multiple successors (comma-separated)
+        if ',' in str(successor):
+            # Multiple parallel successors
+            for succ in str(successor).split(','):
+                successor_id = succ.strip()
+                query = """
+                MATCH (jg1:JobGroup {id: $id})
+                MATCH (jg2:JobGroup {id: $successorId})
+                MERGE (jg1)-[:PRECEDES {on: 'COMPLETED'}]->(jg2)
+                RETURN jg1, jg2
+                """
+                tx.run(query, id=data['id'], successorId=successor_id)
+        else:
+            # Single successor
+            query = """
+            MATCH (jg1:JobGroup {id: $id})
+            MATCH (jg2:JobGroup {id: $successor})
+            MERGE (jg1)-[:PRECEDES {on: 'COMPLETED'}]->(jg2)
+            RETURN jg1, jg2
+            """
+            tx.run(query, **data)
     
     def _load_tags(self, excel_file):
         """Load Tags"""
@@ -228,6 +288,13 @@ class Neo4jLoader:
     @staticmethod
     def _create_tag(tx, data: Dict):
         """Transaction function to create Tag"""
+        node = TagNodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            description=str(data.get('description', '')),
+            tagType=str(data.get('tagType', '')),
+            enabled=bool(data.get('enabled', True))
+        )
         query = """
         MERGE (tg:Tag {id: $id})
         SET tg.name = $name,
@@ -237,7 +304,8 @@ class Neo4jLoader:
             tg.createdAt = datetime()
         RETURN tg
         """
-        tx.run(query, **data)
+        tx.run(query, id=node.id, name=node.name, description=node.description,
+               tagType=node.tagType, enabled=node.enabled)
     
     def _load_jobs_from_graph(self):
         """Load Job nodes from information graph"""
@@ -287,20 +355,22 @@ class Neo4jLoader:
     @staticmethod
     def _create_job(tx, data: Dict):
         """Transaction function to create Job from information graph data"""
+        node = JobDef(
+            name=str(data.get('name', '')),
+            id=str(data.get('id', '')),
+            enabled=bool(data.get('enabled', True)),
+            source_file=str(data.get('sourceFile', ''))
+        )
         query = """
         MERGE (j:Job {name: $name})
         SET j.id = $id,
             j.enabled = $enabled,
             j.createdAt = datetime()
         """
-        
-        # Add sourceFile if available
-        if data.get('sourceFile'):
+        if node.source_file:
             query += ", j.sourceFile = $sourceFile"
-        
         query += " RETURN j"
-        
-        tx.run(query, **data)
+        tx.run(query, name=node.name, id=node.id, enabled=node.enabled, sourceFile=node.source_file)
     
     def _load_jobs_association(self, excel_file):
         """Load Jobs and create relationships to JobGroups"""
@@ -1124,27 +1194,41 @@ class Neo4jLoader:
     @staticmethod
     def _create_resource(tx, data: Dict):
         """Transaction function to create Resource"""
+        node = ResourceNodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            type=str(data.get('type', '')),
+            enabled=bool(data.get('enabled', True)),
+            checkInterval=int(data.get('checkInterval', 0)),
+            resourceLocation=str(data.get('filePath', '')),
+            schemaName=str(data.get('schemaName', '')),
+            packageName=str(data.get('packageName', '')),
+            foundInRepo=bool(data.get('foundInRepo', False)),
+            repoName=str(data.get('repoName', '')),
+            repoFilePath=str(data.get('repoFilePath', ''))
+        )
+        description = str(data.get('description', ''))
         query = """
         MERGE (r:Resource {id: $id})
         SET r.name = $name,
             r.type = $type,
             r.enabled = $enabled
         """
-        if 'checkInterval' in data:
+        if node.checkInterval:
             query += ", r.checkInterval = $checkInterval"
-        if 'filePath' in data:
-            query += ", r.resourceLocation = $filePath"
-        if 'schemaName' in data:
+        if node.resourceLocation:
+            query += ", r.resourceLocation = $resourceLocation"
+        if node.schemaName:
             query += ", r.schemaName = $schemaName"
-        if 'packageName' in data:
+        if node.packageName:
             query += ", r.packageName = $packageName"
-        if 'description' in data:
+        if description:
             query += ", r.description = $description"
-        if 'foundInRepo' in data:
+        if node.foundInRepo:
             query += ", r.foundInRepo = $foundInRepo"
-        if 'repoName' in data:
+        if node.repoName:
             query += ", r.repoName = $repoName"
-        if 'repoFilePath' in data:
+        if node.repoFilePath:
             query += ", r.repoFilePath = $repoFilePath"
         if 'tagId' in data:
             tagIds = data.get('tagId', None)
@@ -1156,10 +1240,20 @@ class Neo4jLoader:
                     MERGE (r)-[:HAS_TAG]->(tg)
                 """
                 query += " RETURN r"
-                tx.run(query, **data)
+                tx.run(query, id=node.id, name=node.name, type=node.type,
+                       enabled=node.enabled, checkInterval=node.checkInterval,
+                       resourceLocation=node.resourceLocation, schemaName=node.schemaName,
+                       packageName=node.packageName, description=description,
+                       foundInRepo=node.foundInRepo, repoName=node.repoName,
+                       repoFilePath=node.repoFilePath)
         else:
             query += " RETURN r"
-            tx.run(query, **data)
+            tx.run(query, id=node.id, name=node.name, type=node.type,
+                   enabled=node.enabled, checkInterval=node.checkInterval,
+                   resourceLocation=node.resourceLocation, schemaName=node.schemaName,
+                   packageName=node.packageName, description=description,
+                   foundInRepo=node.foundInRepo, repoName=node.repoName,
+                   repoFilePath=node.repoFilePath)
         
     
     def _load_job_successors(self, excel_file):
@@ -1242,33 +1336,37 @@ class Neo4jLoader:
     def _create_job_context(tx, data: Dict):
         """Transaction function to create Context for Job and Job Group"""
         context_for_entity_id = data['contextForEntityId']
-        rel_type = 'FOR_GROUP'
-        query = ""        
-        entity_label = 'Job'
-        rel_type = 'FOR_JOB'
+        node = ScheduleInstanceContextNodeDef(
+            id=str(data.get('id', '')),
+            name=f'Context_{context_for_entity_id}',
+            description=f'Context for {context_for_entity_id}',
+            enabled=True,
+            contextForEntityId=str(context_for_entity_id),
+            estimatedDurationMs=int(data.get('estimatedDurationMs', 0))
+        )
         job_group_id = data.get('jobGroupId', None)
-        query = f"""
-            MERGE (ctx:ScheduleInstanceContext {{id: $id}})
-            SET ctx.name = 'Context_{context_for_entity_id}',
-                ctx.description = 'Context for {context_for_entity_id}',
-                ctx.enabled = true,
-                ctx.contextForEntityId = '{context_for_entity_id}',
+        query = """
+            MERGE (ctx:ScheduleInstanceContext {id: $id})
+            SET ctx.name = $name,
+                ctx.description = $description,
+                ctx.enabled = $enabled,
+                ctx.contextForEntityId = $contextForEntityId,
                 ctx.estimatedDurationMs = $estimatedDurationMs
                 WITH ctx
-                    MATCH (entity:{entity_label} {{id: $contextForEntityId}})
-                    MERGE (ctx)-[:{rel_type}]->(entity)
-                                            
+                    MATCH (entity:Job {id: $contextForEntityId})
+                    MERGE (ctx)-[:FOR_JOB]->(entity)
         """
         if job_group_id is not None:
-            query += f"""
+            query += """
                 WITH ctx
-                    MATCH (groupEntity:JobGroup {{id: $jobGroupId}})                        
-                    MERGE (ctx)-[:FOR_GROUP]->(groupEntity) 
+                    MATCH (groupEntity:JobGroup {id: $jobGroupId})
+                    MERGE (ctx)-[:FOR_GROUP]->(groupEntity)
             """
-
         query += " RETURN ctx"
-        #logger.info(f" Query for JobContext {context_type} is {query}")
-        tx.run(query, **data)
+        tx.run(query, id=node.id, name=node.name, description=node.description,
+               enabled=node.enabled, contextForEntityId=node.contextForEntityId,
+               estimatedDurationMs=node.estimatedDurationMs,
+               jobGroupId=job_group_id)
 
     def _load_slas(self, excel_file):
         """Load SLAs and create relationships"""
@@ -1286,6 +1384,17 @@ class Neo4jLoader:
     @staticmethod
     def _create_sla(tx, data: Dict):
         """Transaction function to create SLA"""
+        node = SLANodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            policy=str(data.get('policy', '')),
+            severity=str(data.get('severity', '')),
+            enabled=bool(data.get('enabled', True)),
+            type=str(data.get('type', '')),
+            durationMs=int(data.get('durationMs', 0)),
+            time=str(data.get('time', '')),
+            tz=str(data.get('tz', ''))
+        )
         query = """
         MERGE (sla:SLA {id: $id})
         SET sla.name = $name,
@@ -1294,14 +1403,12 @@ class Neo4jLoader:
             sla.enabled = $enabled,
             sla.type = $type
         """
-        
-        if 'time' in data:
+        if node.time:
             query += ", sla.time = $time"
-        if 'durationMs' in data:
+        if node.durationMs:
             query += ", sla.durationMs = $durationMs"
-        if 'tz' in data:
+        if node.tz:
             query += ", sla.tz = $tz"
-        
         if 'relativeEntityId' in data:
             relative_entity_type = data['relativeEntityType']
             query += f"""
@@ -1309,7 +1416,6 @@ class Neo4jLoader:
                 MATCH (relativeEntity:{relative_entity_type} {{id: $relativeEntityId}})
                 MERGE (sla)-[:RELATIVE_TO_RESOURCE]->(relativeEntity)
             """
-        # Link to entity
         entity_type = data['forEntityType']
         query += f"""
         WITH sla
@@ -1317,8 +1423,12 @@ class Neo4jLoader:
         MERGE (entity)-[:HAS_SLA]->(sla)
         RETURN sla
         """
-        
-        tx.run(query, **data)
+        tx.run(query, id=node.id, name=node.name, policy=node.policy,
+               severity=node.severity, enabled=node.enabled, type=node.type,
+               time=node.time, durationMs=node.durationMs, tz=node.tz,
+               relativeEntityId=data.get('relativeEntityId'),
+               relativeEntityType=data.get('relativeEntityType'),
+               forEntityId=data.get('forEntityId'))
 
     def _load_associate_calendar(self, excel_file):
         """Load Associate Calendar"""
@@ -1373,6 +1483,18 @@ class Neo4jLoader:
     @staticmethod
     def _create_calendar(tx, data: Dict):
         """Transaction function to create Calendar"""
+        node = CalendarNodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            type=str(data.get('type', '')),
+            description=str(data.get('description', '')),
+            enabled=bool(data.get('enabled', True)),
+            startTime=str(data.get('startTime', '')),
+            endTime=str(data.get('endTime', '')),
+            tz=str(data.get('tz', ''))
+        )
+        if 'blockedDays' in data:
+            node.blockedDays = [d.strip() for d in str(data['blockedDays']).split(',') if d.strip()]
         query = """
         MERGE (c:Calendar {id: $id})
         SET c.name = $name,
@@ -1380,22 +1502,19 @@ class Neo4jLoader:
             c.description = $description,
             c.enabled = $enabled
         """
-        
-        if 'blockedDays' in data:
+        if node.blockedDays:
             query += ", c.blockedDays = $blockedDays"
-        if 'startTime' in data:
+        if node.startTime:
             query += ", c.startTime = $startTime"
-        if 'endTime' in data:
+        if node.endTime:
             query += ", c.endTime = $endTime"
-        if 'tz' in data:
+        if node.tz:
             query += ", c.tz = $tz"
-        
-        # Link to entity
-        query += f"""
-        RETURN c
-        """
-        
-        tx.run(query, **data)
+        query += " RETURN c"
+        tx.run(query, id=node.id, name=node.name, type=node.type,
+               description=node.description, enabled=node.enabled,
+               blockedDays=node.blockedDays, startTime=node.startTime,
+               endTime=node.endTime, tz=node.tz)
     
     def _load_holidays(self, excel_file):
         """Load Holidays and link to constraints"""
@@ -1412,6 +1531,12 @@ class Neo4jLoader:
     @staticmethod
     def _create_holiday(tx, data: Dict):
         """Transaction function to create Holiday"""
+        node = HolidayNodeDef(
+            id=str(data.get('id', '')),
+            name=str(data.get('name', '')),
+            date=str(data.get('date', '')),
+            enabled=bool(data.get('enabled', True))
+        )
         query = """
         MERGE (h:Holiday {id: $id})
         SET h.name = $name,
@@ -1422,7 +1547,8 @@ class Neo4jLoader:
         MERGE (c)-[:BLOCKS_ON]->(h)
         RETURN h
         """
-        tx.run(query, **data)
+        tx.run(query, id=node.id, name=node.name, date=node.date,
+               enabled=node.enabled, calendarId=data.get('calendarId'))
     
     # ========================================================================
     # UTILITY METHODS

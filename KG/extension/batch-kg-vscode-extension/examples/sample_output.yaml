@@ -1,0 +1,81 @@
+# Example YAML Output
+# This is what the extension generates when you save a resolution
+
+grey_area_resolutions:
+  description: Manual resolutions for UNKNOWN/DYNAMIC/PARAMETERIZED operations
+  generated_by: Batch KG Gap Analyzer VS Code Extension
+  generated_at: '2026-03-24T12:00:00.000Z'
+  
+  steps:
+    # Example Step 1: Database and Shell gaps
+    customerProcessingStep:
+      db_operations:
+        # Non-generic DB operation
+        - method_fqn: com.example.dao.CustomerDAO.updateCustomer
+          original: 'UPDATE: DYNAMIC_TABLE'
+          resolution:
+            generic: false
+            operation: UPDATE
+            table_name: CUSTOMER_TABLE
+            schema_name: CUSTOMER_SCHEMA
+            catalog_name: CUSTOMER_DB
+        
+        # Generic DB operation (dynamic reader/writer)
+        - method_fqn: com.example.reader.DynamicReader.read
+          original: 'SELECT: DYNAMIC_TABLE'
+          resolution:
+            generic: true
+            bean_id: customerDynamicReader
+            reader_fqn: com.example.reader.CustomerJdbcReader
+            writer_fqn: com.example.writer.CustomerJdbcWriter
+      
+      shell_executions:
+        # Non-generic shell execution
+        - method_fqn: com.example.tasklet.FileProcessorTasklet.execute
+          original: 'Runtime.exec: UNKNOWN_SCRIPT'
+          resolution:
+            generic: false
+            script_name: process_customer_files.sh
+            script_path: /opt/batch/scripts/
+            command: process_customer_files.sh --input /data/input --output /data/output
+            execution_type: Runtime.exec
+    
+    # Example Step 2: Procedure calls
+    accountProcessingStep:
+      procedure_calls:
+        # Non-generic procedure call
+        - method_fqn: com.example.dao.AccountDAO.callUpdateProc
+          original: 'CALL: DYNAMIC_PROCEDURE'
+          resolution:
+            generic: false
+            procedure_name: UPDATE_ACCOUNT_PROC
+            schema_name: ACCOUNT_SCHEMA
+            package_name: PKG_ACCOUNT
+        
+        # Generic procedure call
+        - method_fqn: com.example.tasklet.GenericProcTasklet.execute
+          original: 'CALL: UNKNOWN'
+          resolution:
+            generic: true
+            bean_id: accountProcTasklet
+            tasklet_fqn: com.example.tasklet.AccountProcedureTasklet
+    
+    # Example Step 3: Mixed categories
+    reportGenerationStep:
+      db_operations:
+        - method_fqn: com.example.dao.ReportDAO.generateReport
+          original: 'SELECT: PARAMETERIZED_TABLE'
+          resolution:
+            generic: false
+            operation: SELECT
+            table_name: REPORT_DATA
+            schema_name: REPORT_SCHEMA
+      
+      shell_executions:
+        - method_fqn: com.example.tasklet.ReportTasklet.executeReport
+          original: 'SSH: REMOTE_EXECUTION'
+          resolution:
+            generic: false
+            script_name: generate_report.sh
+            script_path: /usr/local/batch/reports/
+            execution_type: SSH

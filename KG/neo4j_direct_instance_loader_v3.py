@@ -26,6 +26,9 @@ import yaml
 import os
 from dotenv import load_dotenv
 from execution_cpm_analyzer_v3 import ExecutionCPMAnalyzer
+from classes.KGNodeDefs import (
+    JobGroupExecutionNodeDef, JobContextExecutionNodeDef, ResourceAvailabilityEventNodeDef
+)
 
 
 # Configure logging
@@ -155,6 +158,11 @@ class Neo4jInstanceLoaderV2:
     @staticmethod
     def _create_job_group_execution(tx, data: Dict):
         """Create JobGroupExecution and link to JobContext, Job, and JobGroupExecution"""
+        node = JobGroupExecutionNodeDef(
+            id=str(data.get('id', '')),
+            startTime=str(data.get('startTime', '')),
+            businessDate=str(data.get('businessDate', ''))
+        )
         query = """
         MERGE (jge:JobGroupExecution {id: $id})
         SET jge.businessDate = date($businessDate),
@@ -172,11 +180,12 @@ class Neo4jInstanceLoaderV2:
                     MATCH (tg:Tag {{id: "{tagIdStrip}"}})
                     MERGE (jge)-[:HAS_TAG]->(tg)
                 """
-                #query += " RETURN jge, jg, tg"
-                tx.run(query, **data)
+                tx.run(query, id=node.id, businessDate=node.businessDate,
+                       startTime=node.startTime, jobGroupId=data.get('jobGroupId'))
         else:
             query += " RETURN jge, jg"
-            tx.run(query, **data)
+            tx.run(query, id=node.id, businessDate=node.businessDate,
+                   startTime=node.startTime, jobGroupId=data.get('jobGroupId'))
         
     def _load_jobcontext_executions(self, excel_file):
         """Load JobContextExecution nodes"""
@@ -194,6 +203,19 @@ class Neo4jInstanceLoaderV2:
     @staticmethod
     def _create_jobcontext_execution(tx, data: Dict):
         """Create JobContextExecution and link to JobContext, Job, and JobGroupExecution"""
+        node = JobContextExecutionNodeDef(
+            id=str(data.get('id', '')),
+            status=str(data.get('status', '')),
+            startTime=str(data.get('startTime', '')),
+            endTime=str(data.get('endTime', '')),
+            businessDate=str(data.get('businessDate', '')),
+            durationMs=int(data.get('durationMs', 0)),
+            volume=int(data.get('volume', 0)),
+            exitCode=str(data.get('exitCode', '')),
+            exitMessage=str(data.get('exitMessage', '')),
+            retryCount=int(data.get('retryCount', 0)),
+            expectedStartTime=str(data.get('expectedStartTime', ''))
+        )
         query = """
         MERGE (jce:JobContextExecution {id: $id})
         SET jce.businessDate = date($businessDate),
@@ -201,7 +223,7 @@ class Neo4jInstanceLoaderV2:
             jce.endTime = time($endTime),
             jce.durationMs = $durationMs,
             jce.volume = $volume,
-            jce.status = $status,            
+            jce.status = $status,
             jce.exitCode = $exitCode,
             jce.exitMessage = $exitMessage,
             jce.retryCount = $retryCount,
@@ -217,8 +239,12 @@ class Neo4jInstanceLoaderV2:
         MERGE (jge)-[:EXECUTES_JOB_CONTEXT]->(jce)
         RETURN jce
         """
-        
-        tx.run(query, **data)
+        tx.run(query,
+               id=node.id, businessDate=node.businessDate, startTime=node.startTime,
+               endTime=node.endTime, durationMs=node.durationMs, volume=node.volume,
+               status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
+               retryCount=node.retryCount, expectedStartTime=node.expectedStartTime,
+               jobContextId=data.get('jobContextId'), jobGroupExecId=data.get('jobGroupExecId'))
     
     def _load_resource_events(self, excel_file):
         """Load ResourceAvailabilityEvent nodes"""
@@ -238,6 +264,14 @@ class Neo4jInstanceLoaderV2:
     @staticmethod
     def _create_resource_event(tx, data: Dict):
         """Create ResourceAvailabilityEvent and link to Resource and JobContext"""
+        node = ResourceAvailabilityEventNodeDef(
+            id=str(data.get('id', '')),
+            businessDate=str(data.get('businessDate', '')),
+            sizemb=float(data.get('sizemb', 0.0)),
+            checksum=str(data.get('checksum', '')),
+            detectedBy=str(data.get('detectedBy', '')),
+            availabilityTime=str(data.get('availabilityTime', ''))
+        )
         query = """
         MERGE (rae:ResourceAvailabilityEvent {id: $id})
         SET rae.businessDate = date($businessDate),
@@ -245,18 +279,17 @@ class Neo4jInstanceLoaderV2:
             rae.checksum = $checksum,
             rae.detectedBy = $detectedBy
         """
-        
-        if 'availabilityTime' in data:
+        if node.availabilityTime:
             query += ", rae.availabilityTime = time($availabilityTime)"
-        
         query += """
         WITH rae
         MATCH (r:Resource {id: $resourceId})
         MERGE (rae)-[:FOR_RESOURCE]->(r)
         RETURN rae
         """
-        
-        tx.run(query, **data)
+        tx.run(query, id=node.id, businessDate=node.businessDate, sizemb=node.sizemb,
+               checksum=node.checksum, detectedBy=node.detectedBy,
+               availabilityTime=node.availabilityTime, resourceId=data.get('resourceId'))
 
     @staticmethod
     def _associate_resource_event_with_jobgroup(tx, data: Dict):

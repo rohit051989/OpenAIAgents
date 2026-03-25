@@ -52,13 +52,6 @@ with open(config_path, 'r') as f:
     DB_SKIP_KEYWORDS = grey_area.get('db_operations', ['DYNAMIC_TABLE', 'DYNAMIC_CATALOG', 'DYNAMIC_SCHEMA']) + grey_area.get('core', ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED'])
 
 
-def escape_cypher_string(s: str) -> str:
-    """Escape string for Cypher query"""
-    if not s:
-        return ""
-    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
-
-
 class MultiAgentLLMAnalyzer:
     """Multi-agent LLM analyzer with context gathering capabilities"""
     
@@ -551,8 +544,22 @@ class DBOperationEnricher:
         if not operations:
             return
         
-        escaped_method_fqn = escape_cypher_string(method_fqn)
-        
+        resource_query = """
+        MERGE (r:Resource {name: $name, type: 'TABLE'})
+        ON CREATE SET r.id = $id,
+                      r.enabled = true,
+                      r.schemaName = $schemaName,
+                      r.foundInRepo = false,
+                      r.notFoundInRepo = true
+        ON MATCH SET r.schemaName = COALESCE(r.schemaName, $schemaName)
+        """
+
+        relationship_query = """
+        MATCH (m:JavaMethod {fqn: $method_fqn})
+        MATCH (r:Resource {name: $name, type: 'TABLE'})
+        MERGE (m)-[:DB_OPERATION {operationType: $operationType, confidence: $confidence}]->(r)
+        """
+
         with self.driver.session(database=self.database) as session:
             for op in operations:
                 # Extract operation details
@@ -560,61 +567,37 @@ class DBOperationEnricher:
                     table_name = op.get('table_name', 'UNKNOWN')
                     operation_type = op.get('operation_type', 'UNKNOWN')
                     confidence = op.get('confidence', 'MEDIUM')
-                    entity_type = op.get('entity_type', 'UNKNOWN')
                     schema_name = op.get('schema_name', 'UNKNOWN')
                 else:
                     table_name = op.table_name if hasattr(op, 'table_name') else 'UNKNOWN'
                     operation_type = op.operation_type if hasattr(op, 'operation_type') else 'UNKNOWN'
                     confidence = op.confidence if hasattr(op, 'confidence') else 'MEDIUM'
-                    entity_type = op.entity_type if hasattr(op, 'entity_type') else 'UNKNOWN'
                     schema_name = op.schema_name if hasattr(op, 'schema_name') else 'UNKNOWN'
                 
-                # Normalize and escape values
-                table_name = table_name.upper() if table_name else "UNKNOWN"
-                schema_name = schema_name.upper() if schema_name else "UNKNOWN"
+                # Normalize values
+                table_name = (table_name or 'UNKNOWN').upper()
+                schema_name = (schema_name or 'UNKNOWN').upper()
                 
                 # Skip Resource creation for DYNAMIC/UNKNOWN table names
                 # These need manual resolution before Resource association
-                skip_keywords = DB_SKIP_KEYWORDS
-                if any(keyword in table_name for keyword in skip_keywords):
+                if any(keyword in table_name for keyword in DB_SKIP_KEYWORDS):
                     logger.info(f"  Skipping Resource creation for {table_name} (requires manual resolution)")
                     continue
                 
-                escaped_table_name = escape_cypher_string(table_name)
-                escaped_schema_name = escape_cypher_string(schema_name)
-                escaped_entity_type = escape_cypher_string(entity_type if entity_type else "UNKNOWN")
-                escaped_operation_type = escape_cypher_string(operation_type)
-                escaped_confidence = escape_cypher_string(confidence)
-                
-                # Generate unique ID for new resources
                 unique_id = f"RES_TABLE_{uuid.uuid4().hex[:8].upper()}"
-                escaped_resource_id = escape_cypher_string(unique_id)
                 
                 try:
-                    # Create or update Resource node
-                    # If creating new Resource (not from db_repo), mark as notFoundInRepo
-                    resource_query = f"""
-                    MERGE (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
-                    ON CREATE SET r.id = '{escaped_resource_id}',
-                                  r.enabled = true,
-                                  r.schemaName = '{escaped_schema_name}',
-                                  r.foundInRepo = false,
-                                  r.notFoundInRepo = true
-                    ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}')
-                    """
-                    session.run(resource_query)
-                    
-                    # Create relationship between JavaMethod and Resource
-                    relationship_query = f"""
-                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                    MATCH (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
-                    MERGE (m)-[:DB_OPERATION {{
-                        operationType: '{escaped_operation_type}',
-                        confidence: '{escaped_confidence}'
-                    }}]->(r)
-                    """
-                    session.run(relationship_query)
-                    
+                    session.run(resource_query,
+                        name=table_name,
+                        id=unique_id,
+                        schemaName=schema_name
+                    )
+                    session.run(relationship_query,
+                        method_fqn=method_fqn,
+                        name=table_name,
+                        operationType=operation_type,
+                        confidence=confidence
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to create Resource relationship for {table_name}: {e}")
     

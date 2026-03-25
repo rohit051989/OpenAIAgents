@@ -59,13 +59,6 @@ SCRIPT_QUALITY_KEYWORDS = GREY_AREA_KEYWORDS.get('script_quality', [])
 SHELL_SKIP_KEYWORDS = GREY_AREA_KEYWORDS.get('shell_executions', [])
 
 
-def escape_cypher_string(s: str) -> str:
-    """Escape string for Cypher query"""
-    if not s:
-        return ""
-    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
-
-
 class ShellExecutionEnricher:
     """
     Enriches JavaMethod nodes with shell script execution information.
@@ -434,21 +427,24 @@ class ShellExecutionEnricher:
                 further_analysis_reasons.append(exec_info['grey_area_reason'])
         
         further_analysis_required = any(e['further_analysis'] for e in executions)
-        
-        escaped_method_fqn = escape_cypher_string(method_fqn)
-        
-        query = f"""
-        MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-        SET m.shellExecutions = {execution_strs},
-            m.shellExecutionCount = {len(executions)},
-            m.furtherAnalysisRequired = {str(further_analysis_required).lower()},
-            m.furtherAnalysisReasons = {further_analysis_reasons if further_analysis_reasons else []}
+
+        query = """
+        MATCH (m:JavaMethod {fqn: $fqn})
+        SET m.shellExecutions = $shellExecutions,
+            m.shellExecutionCount = $shellExecutionCount,
+            m.furtherAnalysisRequired = $furtherAnalysisRequired,
+            m.furtherAnalysisReasons = $furtherAnalysisReasons
         RETURN m.methodName AS methodName
         """
-        
+
         try:
             with self.driver.session(database=self.database) as session:
-                result = session.run(query)
+                result = session.run(query,
+                    fqn=method_fqn,
+                    shellExecutions=execution_strs,
+                    shellExecutionCount=len(executions),
+                    furtherAnalysisRequired=further_analysis_required,
+                    furtherAnalysisReasons=further_analysis_reasons if further_analysis_reasons else [])
                 return result.single() is not None
         except Exception as e:
             logger.error(f"  Error updating method {method_fqn}: {e}")
@@ -461,21 +457,17 @@ class ShellExecutionEnricher:
         if not script_name or script_name in SHELL_SKIP_KEYWORDS:
             return  # Don't create resources for grey areas
         
-        escaped_name = escape_cypher_string(script_name)
-        escaped_type = escape_cypher_string(script_type)
-        escaped_confidence = escape_cypher_string(confidence)
-        
-        query = f"""
-        MERGE (r:Resource {{name: '{escaped_name}', type: 'SHELL_SCRIPT'}})
-        ON CREATE SET r.scriptType = '{escaped_type}',
-                      r.confidence = '{escaped_confidence}',
+        query = """
+        MERGE (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
+        ON CREATE SET r.scriptType = $scriptType,
+                      r.confidence = $confidence,
                       r.enabled = true
         RETURN r.name AS name
         """
-        
+
         try:
             with self.driver.session(database=self.database) as session:
-                session.run(query)
+                session.run(query, name=script_name, scriptType=script_type, confidence=confidence)
         except Exception as e:
             logger.error(f"  Error creating resource for {script_name}: {e}")
     

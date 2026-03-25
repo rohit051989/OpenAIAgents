@@ -15,7 +15,13 @@
         "CriticalPathSignature": "Unique critical path pattern library for a JobGroup",
         "Tag": "Categorization label for Jobs, Steps, Resources, or other entities",
         "Resource": "External dependency such as FILE or TABLE that Jobs/Steps require",
-        "JobGroup": "Group of related Jobs that execute together as a unit"
+        "JobGroup": "Group of related Jobs that execute together as a unit",
+        "Block": "A FLOW or PARALLEL block grouping multiple Steps or nested Blocks within a Job execution graph",
+        "Decision": "A decision point in the Job execution flow that routes to different Steps based on exit status",
+        "Listener": "A Spring Batch listener (JobExecutionListener or StepExecutionListener) attached to a Job or Step for lifecycle callbacks",
+        "JavaClass": "A Java source file representing a class or interface from the application codebase, with full lineage and analysis metadata",
+        "JavaMethod": "A method within a JavaClass, including detected DB operations, procedure calls, and shell executions",
+        "Bean": "A Spring bean definition from XML configuration linking a bean ID to a class and its dependencies"
     },
     "nodes_properties": {
         "Job": {
@@ -25,7 +31,15 @@
             "enabled": "Whether the Job is enabled (boolean)",
             "createdAt": "Timestamp when the Job was created",
             "restartable": "Whether the Job is restartable (boolean)",
-            "sourceFile": "Source Spring XML configuration file path"
+            "sourceFile": "Source Spring XML configuration file path",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
         },
         "ScheduleInstanceContext": {
             "id": "Unique identifier for the ScheduleInstanceContext",
@@ -51,7 +65,15 @@
             "stepDbOperationCount": "Property 'stepDbOperationCount' of node 'Step'",
             "className": "Java class name implementing the Step",
             "classSourcePath": "Property 'classSourcePath' of node 'Step'",
-            "implBean": "Spring bean name for Step implementation"
+            "implBean": "Spring bean name for Step implementation",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
         },
         "SLA": {
             "id": "Unique identifier for the SLA",
@@ -86,7 +108,15 @@
             "description": "Description of the data operation",
             "enabled": "Whether the DataAsset is enabled (boolean)",
             "method": "Method name performing the operation",
-            "methodReference": "Fully qualified method reference"
+            "methodReference": "Fully qualified method reference",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
         },
         "JobGroupExecution": {
             "id": "Unique execution identifier for JobGroupExecution",
@@ -153,12 +183,29 @@
         },
         "Resource": {
             "id": "Unique identifier for the Resource",
-            "name": "Name of the Resource",
-            "enabled": "Whether the Resource is enabled (boolean)",
-            "type": "Resource type: FILE, TABLE, etc.",
-            "checkInterval": "Interval in minutes to check resource availability",
-            "resourceLocation": "File path for FILE type resources",
-            "schemaName": "Database schema name for TABLE type resources"
+            "name": "Name of the DB object or file resource (always upper-cased for DB objects)",
+            "enabled": "Whether the Resource is active (boolean)",
+            "type": "Resource type: TABLE, VIEW, PROCEDURE, FUNCTION, PACKAGE, TRIGGER, SYNONYM, SEQUENCE, DATABASE_LINK, FILE, INDEX, TYPE",
+            "schemaName": "Database schema that owns this object (e.g. APMDATA)",
+            "packageName": "Oracle package name (for procedures/functions declared inside a package)",
+            "foundInRepo": "True if discovered from a db_repo git scan (has full file-tree + git metadata); False if loaded from Excel/manual config",
+            "repoName": "Git repository name the DDL/SQL definition file belongs to (set when foundInRepo=True)",
+            "repoFilePath": "Absolute path to the SQL/DDL definition file in the repository (set when foundInRepo=True)",
+            "path": "IG file-tree path — same as repoFilePath (set when foundInRepo=True)",
+            "node_type": "IG node type label (always 'Resource')",
+            "extension": "File extension of the definition file, e.g. .sql (set when foundInRepo=True)",
+            "size": "Size in bytes of the definition file (set when foundInRepo=True)",
+            "file_types": "Comma-separated IG file-type labels (set when foundInRepo=True)",
+            "checkInterval": "Minutes between availability checks (set when foundInRepo=False, from Excel)",
+            "resourceLocation": "File-system path for FILE type resources (set when foundInRepo=False, from Excel)",
+            "gitRepoName": "Git repository name (set when foundInRepo=True)",
+            "gitBranchName": "Branch on which this file was last touched (set when foundInRepo=True)",
+            "gitCreatedBy": "Author who first committed the definition file (set when foundInRepo=True)",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit (set when foundInRepo=True)",
+            "gitUpdatedBy": "Author of the most recent commit (set when foundInRepo=True)",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit (set when foundInRepo=True)",
+            "gitLastCommitId": "Full SHA of the last commit touching the definition file (set when foundInRepo=True)",
+            "gitFileExists": "Soft-delete flag — False if the definition file was removed in the target branch (set when foundInRepo=True)"
         },
         "JobGroup": {
             "id": "Unique identifier for the JobGroup",
@@ -167,6 +214,110 @@
             "enabled": "Whether the JobGroup is enabled (boolean)",
             "createdAt": "Timestamp when the JobGroup was created",
             "priority": "Priority level of the JobGroup"
+        },
+        "Block": {
+            "id": "Unique identifier for the Block",
+            "block_type": "Block type: FLOW or PARALLEL",
+            "entry_node": "ID of the first node inside the block",
+            "contains_steps": "List of Step names directly inside this block",
+            "contains_blocks": "List of nested Block IDs inside this block",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
+        },
+        "Decision": {
+            "name": "Name of the Decision node",
+            "decider_bean": "Spring bean name of the JobExecutionDecider implementation",
+            "class_name": "Java class implementing the decider",
+            "class_source_path": "Source file path for the decider class",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
+        },
+        "Listener": {
+            "name": "Name of the Listener",
+            "scope": "Listener scope: JOB, STEP, or CHUNK",
+            "impl_bean": "Spring bean reference for the listener implementation",
+            "source_path": "Source file path for the listener class",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
+        },
+        "JavaClass": {
+            "fqn": "Fully qualified class name (unique key, e.g. com.example.batch.MyTasklet)",
+            "className": "Simple (unqualified) class name",
+            "package": "Java package of the class",
+            "path": "Absolute path to the Java source file",
+            "extends": "FQN of the parent class (empty if none)",
+            "implements": "List of FQNs of implemented interfaces",
+            "imports": "List of import statements in the class",
+            "fields": "JSON-serialized map of field_name to type",
+            "method_count": "Number of methods defined in the class",
+            "isInterface": "True if this is an interface rather than a class",
+            "isDAOClass": "True if static analysis identified this as a DAO / repository class",
+            "isShellExecutorClass": "True if static analysis identified this as a shell-executor class",
+            "isTestClass": "True if the class resides in a test source directory",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
+        },
+        "JavaMethod": {
+            "fqn": "Fully qualified method name (className.methodName, unique key)",
+            "methodName": "Simple method name",
+            "classFqn": "FQN of the containing JavaClass",
+            "returnType": "Return type of the method",
+            "signature": "Full method signature including parameters",
+            "modifiers": "Comma-separated modifiers: public, static, final, etc.",
+            "dbOperationCount": "Number of DB operations detected in this method",
+            "procedureCallCount": "Number of stored procedure calls detected in this method",
+            "shellExecutionCount": "Number of shell script executions detected in this method",
+            "dbOperations": "List of DB operations in format TYPE:TABLE:CONFIDENCE",
+            "procedureCalls": "List of procedure calls in format PROC_NAME:DB_TYPE",
+            "shellExecutions": "List of shell executions in format SCRIPT_TYPE:COMMAND",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
+        },
+        "Bean": {
+            "compositeKey": "Unique key in format beanId___beanClass preventing ID collisions across XML files",
+            "beanId": "Spring bean ID from the XML bean definition",
+            "beanClass": "Fully qualified class name of the bean",
+            "beanClassName": "Simple (unqualified) class name of the bean",
+            "sourcePath": "Absolute path to the Java source file implementing the bean",
+            "xmlFile": "Absolute path to the Spring XML file that defines this bean",
+            "gitRepoName": "Name of the git repository the source file belongs to (consistent for all nodes from the same repo)",
+            "gitBranchName": "Branch on which this file was last touched. First scan: current branch. Incremental: updated for added/modified/deleted files; untouched files retain their existing value",
+            "gitCreatedBy": "Git author identity (Name <email>) who first committed the source file",
+            "gitCreatedAt": "ISO-8601 timestamp of the first commit that introduced the source file",
+            "gitUpdatedBy": "Git author identity (Name <email>) who last modified the source file",
+            "gitUpdatedAt": "ISO-8601 timestamp of the most recent commit that modified the source file",
+            "gitLastCommitId": "Full SHA of the last git commit that added or modified the source file",
+            "gitFileExists": "True if the file exists in the incremental/target branch (active node); False if deleted (soft-deleted node, preserved for audit trail)"
         }
     },
     "relationships_with_descriptions": {
@@ -192,7 +343,13 @@
         "IMPACTED": "Links ResourceAvailabilityEvent to execution instance it impacted",
         "FOR_CONTEXT": "Links CriticalPathInstance to ScheduleInstanceContext it represents",
         "HAS_CRITICAL_PATH_CALCULATED": "Links JobGroupExecution to its CriticalPathCalculated results",
-        "HAS_CRITICAL_PATH_SIGNATURE": "Links JobGroup or JobGroupExecution or CriticalPathCalculated to CriticalPathSignature library pattern"
+        "HAS_CRITICAL_PATH_SIGNATURE": "Links JobGroup or JobGroupExecution or CriticalPathCalculated to CriticalPathSignature library pattern",
+        "HAS_LISTENER": "Links Job or Step to its Listener node",
+        "HAS_METHOD": "Links JavaClass to a JavaMethod it defines",
+        "CALLS": "Links JavaMethod to another JavaMethod it invokes; carries requiresHumanReview and resolvedFromInterface flags for interface resolution",
+        "USES_CLASS": "Links JavaClass to another JavaClass it references or depends on",
+        "IMPLEMENTED_BY": "Links Step to the JavaClass that provides its implementation",
+        "IMPLEMENTS": "Links a concrete JavaClass to the interface JavaClass it implements"
     },
     "relationship_patterns": [
         {
@@ -398,7 +555,62 @@
             "relationship": "Require_Resource",
             "target": "Resource",
             "pattern": "(ScheduleInstanceContext)-[:Require_Resource]->(Resource)"
+        },
+        {
+            "source": "Job",
+            "relationship": "HAS_LISTENER",
+            "target": "Listener",
+            "pattern": "(Job)-[:HAS_LISTENER]->(Listener)"
+        },
+        {
+            "source": "Step",
+            "relationship": "HAS_LISTENER",
+            "target": "Listener",
+            "pattern": "(Step)-[:HAS_LISTENER]->(Listener)"
+        },
+        {
+            "source": "Step",
+            "relationship": "IMPLEMENTED_BY",
+            "target": "JavaClass",
+            "pattern": "(Step)-[:IMPLEMENTED_BY]->(JavaClass)"
+        },
+        {
+            "source": "JavaClass",
+            "relationship": "HAS_METHOD",
+            "target": "JavaMethod",
+            "pattern": "(JavaClass)-[:HAS_METHOD]->(JavaMethod)"
+        },
+        {
+            "source": "JavaMethod",
+            "relationship": "CALLS",
+            "target": "JavaMethod",
+            "pattern": "(JavaMethod)-[:CALLS {lineNumber, requiresHumanReview, resolvedFromInterface}]->(JavaMethod)"
+        },
+        {
+            "source": "JavaClass",
+            "relationship": "USES_CLASS",
+            "target": "JavaClass",
+            "pattern": "(JavaClass)-[:USES_CLASS]->(JavaClass)"
+        },
+        {
+            "source": "JavaClass",
+            "relationship": "IMPLEMENTS",
+            "target": "JavaClass",
+            "pattern": "(JavaClass)-[:IMPLEMENTS]->(JavaClass)"
         }
     ],
-    "description": "Spring Batch Knowledge Graph with class-level definitions, execution instances, Java code lineage, and CPM critical path analysis"
+    "git_metadata_properties": {
+        "description": "These 8 properties are present on nodes whose source lives in a git repository: Job, Step, Block, Decision, Listener, Bean, JavaClass, JavaMethod, DataAsset in the KG; File-type nodes (File, SpringConfig, PomFile, PropertyFile, Resource, JavaClass) in the IG. Folder/container nodes (Repository, Project, Folder, Package, Directory) do NOT carry git metadata because git tracks files, not directories. Properties are populated on initial graph construction and refreshed on incremental runs.",
+        "properties": {
+            "gitRepoName": "Name of the git repository the source file belongs to. Consistent for all nodes whose source files live in the same repository.",
+            "gitBranchName": "Branch on which this file was last touched (added, modified, or deleted). First scan: set to the current/release branch. Incremental scans: updated to the new branch for added/modified/deleted files; unchanged files retain the branch value from their previous scan.",
+            "gitCreatedBy": "Git author identity string (format: 'Name <email>') from the first commit that introduced the source file.",
+            "gitCreatedAt": "ISO-8601 datetime of the first commit that introduced the source file.",
+            "gitUpdatedBy": "Git author identity string (format: 'Name <email>') from the most recent commit that touched the source file.",
+            "gitUpdatedAt": "ISO-8601 datetime of the most recent commit that modified the source file.",
+            "gitLastCommitId": "Full 40-character SHA of the last git commit that added or modified the source file.",
+            "gitFileExists": "Soft-delete flag. True = file is present in the incremental/target branch (node is active). False = file was deleted in the target branch; node is archived in the graph for audit purposes and NOT physically removed."
+        }
+    },
+    "description": "Spring Batch Knowledge Graph with class-level definitions, execution instances, Java code lineage, CPM critical path analysis, and git-based incremental versioning support"
 }

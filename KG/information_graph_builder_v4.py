@@ -23,6 +23,12 @@ import logging
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
 from classes.DataClasses import BeanDef, ClassInfo, JobDef
+from classes.KGNodeDefs import (
+    IGDirectoryNodeDef, IGRepositoryNodeDef, IGProjectNodeDef, IGFolderNodeDef,
+    IGPackageNodeDef,
+    IGFileNodeDef, IGSpringConfigNodeDef, IGPomFileNodeDef,
+    IGPropertyFileNodeDef, ResourceNodeDef
+)
 from classes.DAOAnalyzer import DAOAnalyzer
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from neo4j_direct_step_loader import parse_directory
@@ -38,7 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def generate_cypher_for_hierarchy(job: JobDef) -> str:
+def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
     """
     Generate Cypher statements to load Java call hierarchy into Neo4j.
     
@@ -56,13 +62,13 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         job: Enriched JobDef with enrichment data containing step_classes, all_classes_cache, and interface_registry
         
     Returns:
-        Cypher statements as a single string
+        Cypher statements as a list of (query, params) tuples for parameterized execution.
     """
     if not hasattr(job, 'enrichment') or not job.enrichment:
         logger.warning(f"Job '{job.name}' has no enrichment data. Skipping hierarchy generation.")
-        return ""
+        return []
     
-    lines: List[str] = []
+    lines: List[Tuple[str, dict]] = []
     processed_classes = set()
     processed_methods = set()
     processed_class_relationships = set()
@@ -86,17 +92,11 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
     
     if not step_classes:
         logger.warning(f"Job '{job.name}' has no step_classes in enrichment. Skipping.")
-        return ""
+        return []
     
     logger.info(f"Generating call hierarchy for job '{job.name}' with {len(step_classes)} step classes")
     if interface_registry:
         logger.info(f"  Interface registry available: {len(interface_registry)} interfaces")
-    
-    def escape_cypher_string(s: str) -> str:
-        """Escape string for Cypher query"""
-        if not s:
-            return ""
-        return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
     
     def find_method_in_class_hierarchy(class_fqn: str, method_name: str, all_classes_cache: Dict[str, ClassInfo], max_depth: int = 10) -> Optional[Tuple[str, ClassInfo]]:
         """
@@ -151,31 +151,27 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         
         # Determine if this is a DAO class
         is_dao_class = dao_analyzer._is_dao_class(class_info)
-        is_dao_class_value = "true" if is_dao_class else "false"
         
         # Determine if this is a Shell Executor class
         is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
-        is_shell_executor_value = "true" if is_shell_executor else "false"
-        
-        # Determine if this is an interface
-        is_interface_value = "true" if class_info.is_interface else "false"
         
         # Create JavaClass node
-        escaped_fqn = escape_cypher_string(class_fqn)
-        escaped_class_name = escape_cypher_string(class_info.class_name)
-        escaped_package = escape_cypher_string(class_info.package)
-        
-        lines.append(
-            f"MERGE (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-            f"ON CREATE SET c.className = '{escaped_class_name}', "
-            f"c.package = '{escaped_package}', "
-            f"c.isInterface = {is_interface_value}, "
-            f"c.isDAOClass = {is_dao_class_value}, "
-            f"c.isShellExecutorClass = {is_shell_executor_value} "
-            f"ON MATCH SET c.isInterface = {is_interface_value}, "
-            f"c.isDAOClass = {is_dao_class_value}, "
-            f"c.isShellExecutorClass = {is_shell_executor_value};"
-        )
+        lines.append((
+            "MERGE (c:JavaClass {fqn: $fqn})"
+            " ON CREATE SET c.className = $className, c.package = $package,"
+            " c.isInterface = $isInterface, c.isDAOClass = $isDAOClass,"
+            " c.isShellExecutorClass = $isShellExecutorClass"
+            " ON MATCH SET c.isInterface = $isInterface, c.isDAOClass = $isDAOClass,"
+            " c.isShellExecutorClass = $isShellExecutorClass",
+            {
+                "fqn": class_fqn,
+                "className": class_info.class_name,
+                "package": class_info.package,
+                "isInterface": class_info.is_interface,
+                "isDAOClass": is_dao_class,
+                "isShellExecutorClass": is_shell_executor,
+            }
+        ))
         
         # Process each method in the class
         for method_name, method_def in class_info.methods.items():
@@ -184,34 +180,32 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             if method_fqn not in processed_methods:
                 processed_methods.add(method_fqn)
                 
-                # Create JavaMethod node
-                escaped_method_fqn = escape_cypher_string(method_fqn)
-                escaped_method_name = escape_cypher_string(method_name)
-                escaped_return_type = escape_cypher_string(method_def.return_type)
-                escaped_signature = escape_cypher_string(method_def.signature)
-                modifiers_str = escape_cypher_string(",".join(method_def.modifiers))
+                modifiers_str = ",".join(method_def.modifiers)
                 
-                # Build cypher statement - use MERGE to find existing JavaMethod from Shot 1
+                # Build parameterized statement - use MERGE to find existing JavaMethod from Shot 1
                 # Properties should already be set from Shot 1, so only set ON CREATE (as fallback)
-                cypher_stmt = (
-                    f"MERGE (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                    f"ON CREATE SET m.methodName = '{escaped_method_name}', "
-                    f"m.returnType = '{escaped_return_type}', "
-                    f"m.signature = '{escaped_signature}', "
-                    f"m.modifiers = '{modifiers_str}', "
-                    f"m.classFqn = '{escaped_fqn}', "
-                    f"m.dbOperationCount = 0, "
-                    f"m.procedureCallCount = 0, "
-                    f"m.shellExecutionCount = 0;"
-                )
-                lines.append(cypher_stmt)
+                lines.append((
+                    "MERGE (m:JavaMethod {fqn: $method_fqn})"
+                    " ON CREATE SET m.methodName = $method_name, m.returnType = $return_type,"
+                    " m.signature = $signature, m.modifiers = $modifiers, m.classFqn = $class_fqn,"
+                    " m.dbOperationCount = 0, m.procedureCallCount = 0, m.shellExecutionCount = 0",
+                    {
+                        "method_fqn": method_fqn,
+                        "method_name": method_name,
+                        "return_type": method_def.return_type,
+                        "signature": method_def.signature,
+                        "modifiers": modifiers_str,
+                        "class_fqn": class_fqn,
+                    }
+                ))
 
                 # Create HAS_METHOD relationship
-                lines.append(
-                    f"MATCH (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-                    f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                    f"MERGE (c)-[:HAS_METHOD]->(m);"
-                )
+                lines.append((
+                    "MATCH (c:JavaClass {fqn: $class_fqn})"
+                    " MATCH (m:JavaMethod {fqn: $method_fqn})"
+                    " MERGE (c)-[:HAS_METHOD]->(m)",
+                    {"class_fqn": class_fqn, "method_fqn": method_fqn}
+                ))
                 
                 # Process method calls
                 # Track previous method calls within this method for chained call resolution
@@ -339,50 +333,45 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                             if call.method_name in called_class_info.methods:
                                 called_method_def = called_class_info.methods[call.method_name]
                                 
-                                escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
-                                escaped_called_method_name = escape_cypher_string(call.method_name)
-                                escaped_called_return_type = escape_cypher_string(called_method_def.return_type)
-                                escaped_called_signature = escape_cypher_string(called_method_def.signature)
-                                called_modifiers_str = escape_cypher_string(",".join(called_method_def.modifiers))
-                                escaped_called_class_fqn = escape_cypher_string(called_class_fqn)
-                                
-                                # Build cypher statement for called method - use ON CREATE SET to avoid overwriting
-                                called_cypher_stmt = (
-                                    f"MERGE (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"ON CREATE SET cm.methodName = '{escaped_called_method_name}', "
-                                    f"cm.returnType = '{escaped_called_return_type}', "
-                                    f"cm.signature = '{escaped_called_signature}', "
-                                    f"cm.modifiers = '{called_modifiers_str}', "
-                                    f"cm.classFqn = '{escaped_called_class_fqn}', "
-                                    f"cm.dbOperationCount = 0, "
-                                    f"cm.procedureCallCount = 0, "
-                                    f"cm.shellExecutionCount = 0;"
-                                )
-                                lines.append(called_cypher_stmt)                                    
+                                # Parameterized statement for called method — ON CREATE only to avoid overwriting
+                                lines.append((
+                                    "MERGE (cm:JavaMethod {fqn: $called_method_fqn})"
+                                    " ON CREATE SET cm.methodName = $called_method_name,"
+                                    " cm.returnType = $called_return_type, cm.signature = $called_signature,"
+                                    " cm.modifiers = $called_modifiers, cm.classFqn = $called_class_fqn,"
+                                    " cm.dbOperationCount = 0, cm.procedureCallCount = 0, cm.shellExecutionCount = 0",
+                                    {
+                                        "called_method_fqn": called_method_fqn,
+                                        "called_method_name": call.method_name,
+                                        "called_return_type": called_method_def.return_type,
+                                        "called_signature": called_method_def.signature,
+                                        "called_modifiers": ",".join(called_method_def.modifiers),
+                                        "called_class_fqn": called_class_fqn,
+                                    }
+                                ))
                                 
                                 # Create CALLS relationship with human review flags
-                                escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
-                                escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
-                                escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
-                                
-                                calls_rel = (
-                                    f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                                    f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"MERGE (m)-[r:CALLS]->(cm) "
-                                    f"SET r.lineNumber = {call.line_number}, "
-                                    f"r.requiresHumanReview = {str(requires_human_review).lower()}, "
-                                    f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
-                                )
-                                
-                                if escaped_original_interface:
-                                    calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
-                                if escaped_review_reason:
-                                    calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
-                                if escaped_candidates:
-                                    calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
-                                
-                                calls_rel += ";"
-                                lines.append(calls_rel)
+                                lines.append((
+                                    "MATCH (m:JavaMethod {fqn: $method_fqn})"
+                                    " MATCH (cm:JavaMethod {fqn: $called_method_fqn})"
+                                    " MERGE (m)-[r:CALLS]->(cm)"
+                                    " SET r.lineNumber = $lineNumber,"
+                                    " r.requiresHumanReview = $requiresHumanReview,"
+                                    " r.resolvedFromInterface = $resolvedFromInterface,"
+                                    " r.originalInterface = $originalInterface,"
+                                    " r.reviewReason = $reviewReason,"
+                                    " r.candidateImplementations = $candidateImplementations",
+                                    {
+                                        "method_fqn": method_fqn,
+                                        "called_method_fqn": called_method_fqn,
+                                        "lineNumber": call.line_number,
+                                        "requiresHumanReview": requires_human_review,
+                                        "resolvedFromInterface": resolved_to_implementation,
+                                        "originalInterface": original_called_class_fqn if original_called_class_fqn != called_class_fqn else "",
+                                        "reviewReason": review_reason or "",
+                                        "candidateImplementations": ",".join(candidate_implementations) if candidate_implementations else "",
+                                    }
+                                ))
                                 
                                 # CRITICAL: Recursively process the called class to extract its method calls
                                 # This is especially important for interface-resolved implementations that weren't
@@ -391,64 +380,52 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                                     process_class_recursive(called_class_fqn, depth + 1, max_depth)
                             else:
                                 # Method not found in class, but still create CALLS relationship if target method exists
-                                escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
                                 logger.debug(f"Method {call.method_name} not found in class {called_class_fqn}, checking if method node exists")
                                 
-                                # Add human review flags
-                                escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
-                                escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
-                                escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
-                                
-                                calls_rel = (
-                                    f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                                    f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                    f"MERGE (m)-[r:CALLS]->(cm) "
-                                    f"SET r.lineNumber = {call.line_number}, "
-                                    f"r.requiresHumanReview = true, "  # Always true when method not found
-                                    f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
-                                )
-                                
-                                if escaped_original_interface:
-                                    calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
-                                if escaped_review_reason:
-                                    calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
-                                else:
-                                    calls_rel += f", r.reviewReason = 'method_not_found'"
-                                if escaped_candidates:
-                                    calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
-                                
-                                calls_rel += ";"
-                                lines.append(calls_rel)
+                                lines.append((
+                                    "MATCH (m:JavaMethod {fqn: $method_fqn})"
+                                    " MATCH (cm:JavaMethod {fqn: $called_method_fqn})"
+                                    " MERGE (m)-[r:CALLS]->(cm)"
+                                    " SET r.lineNumber = $lineNumber,"
+                                    " r.requiresHumanReview = true,"
+                                    " r.resolvedFromInterface = $resolvedFromInterface,"
+                                    " r.originalInterface = $originalInterface,"
+                                    " r.reviewReason = $reviewReason,"
+                                    " r.candidateImplementations = $candidateImplementations",
+                                    {
+                                        "method_fqn": method_fqn,
+                                        "called_method_fqn": called_method_fqn,
+                                        "lineNumber": call.line_number,
+                                        "resolvedFromInterface": resolved_to_implementation,
+                                        "originalInterface": original_called_class_fqn if original_called_class_fqn != called_class_fqn else "",
+                                        "reviewReason": review_reason or "method_not_found",
+                                        "candidateImplementations": ",".join(candidate_implementations) if candidate_implementations else "",
+                                    }
+                                ))
                         else:
                             # Class not in cache, but still try to create relationship if both methods exist
-                            escaped_called_method_fqn = escape_cypher_string(called_method_fqn)
                             logger.debug(f"Class {called_class_fqn} not in cache, attempting to link existing method nodes")
                             
-                            # Add human review flags
-                            escaped_original_interface = escape_cypher_string(original_called_class_fqn) if original_called_class_fqn != called_class_fqn else ""
-                            escaped_review_reason = escape_cypher_string(review_reason) if review_reason else ""
-                            escaped_candidates = escape_cypher_string(",".join(candidate_implementations)) if candidate_implementations else ""
-                            
-                            calls_rel = (
-                                f"MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}}) "
-                                f"MATCH (cm:JavaMethod {{fqn: '{escaped_called_method_fqn}'}}) "
-                                f"MERGE (m)-[r:CALLS]->(cm) "
-                                f"SET r.lineNumber = {call.line_number}, "
-                                f"r.requiresHumanReview = true, "  # Always true when class not in cache
-                                f"r.resolvedFromInterface = {str(resolved_to_implementation).lower()}"
-                            )
-                            
-                            if escaped_original_interface:
-                                calls_rel += f", r.originalInterface = '{escaped_original_interface}'"
-                            if escaped_review_reason:
-                                calls_rel += f", r.reviewReason = '{escaped_review_reason}'"
-                            else:
-                                calls_rel += f", r.reviewReason = 'class_not_in_cache'"
-                            if escaped_candidates:
-                                calls_rel += f", r.candidateImplementations = '{escaped_candidates}'"
-                            
-                            calls_rel += ";"
-                            lines.append(calls_rel)
+                            lines.append((
+                                "MATCH (m:JavaMethod {fqn: $method_fqn})"
+                                " MATCH (cm:JavaMethod {fqn: $called_method_fqn})"
+                                " MERGE (m)-[r:CALLS]->(cm)"
+                                " SET r.lineNumber = $lineNumber,"
+                                " r.requiresHumanReview = true,"
+                                " r.resolvedFromInterface = $resolvedFromInterface,"
+                                " r.originalInterface = $originalInterface,"
+                                " r.reviewReason = $reviewReason,"
+                                " r.candidateImplementations = $candidateImplementations",
+                                {
+                                    "method_fqn": method_fqn,
+                                    "called_method_fqn": called_method_fqn,
+                                    "lineNumber": call.line_number,
+                                    "resolvedFromInterface": resolved_to_implementation,
+                                    "originalInterface": original_called_class_fqn if original_called_class_fqn != called_class_fqn else "",
+                                    "reviewReason": review_reason or "class_not_in_cache",
+                                    "candidateImplementations": ",".join(candidate_implementations) if candidate_implementations else "",
+                                }
+                            ))
         
         # Process called_classes relationships
         for called_class_fqn in class_info.called_classes:
@@ -456,45 +433,42 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             if class_rel_key not in processed_class_relationships:
                 processed_class_relationships.add(class_rel_key)
                 
-                escaped_called_class_fqn = escape_cypher_string(called_class_fqn)
-                
                 # Ensure called class node exists
                 if called_class_fqn in all_classes_cache:
                     called_class_info = all_classes_cache[called_class_fqn]
-                    escaped_called_class_name = escape_cypher_string(called_class_info.class_name)
-                    escaped_called_package = escape_cypher_string(called_class_info.package)
                     
                     # Determine if this is a DAO class
-                    dao_analyzer_called = DAOAnalyzer()
-                    is_dao_class_called = dao_analyzer_called._is_dao_class(called_class_info)
-                    is_dao_class_called_value = "true" if is_dao_class_called else "false"
+                    is_dao_class_called = DAOAnalyzer()._is_dao_class(called_class_info)
                     
                     # Determine if this is a Shell Executor class
-                    shell_analyzer_called = ShellScriptAnalyzer()
-                    is_shell_executor_called = shell_analyzer_called.is_shell_executor_class(called_class_info)
-                    is_shell_executor_called_value = "true" if is_shell_executor_called else "false"
+                    is_shell_executor_called = ShellScriptAnalyzer().is_shell_executor_class(called_class_info)
                     
                     # Determine if this is an interface
-                    is_interface_called_value = "true" if called_class_info.is_interface else "false"
                     
-                    lines.append(
-                        f"MERGE (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
-                        f"ON CREATE SET cc.className = '{escaped_called_class_name}', "
-                        f"cc.package = '{escaped_called_package}', "
-                        f"cc.isInterface = {is_interface_called_value}, "
-                        f"cc.isDAOClass = {is_dao_class_called_value}, "
-                        f"cc.isShellExecutorClass = {is_shell_executor_called_value} "
-                        f"ON MATCH SET cc.isInterface = {is_interface_called_value}, "
-                        f"cc.isDAOClass = {is_dao_class_called_value}, "
-                        f"cc.isShellExecutorClass = {is_shell_executor_called_value};"
-                    )
+                    lines.append((
+                        "MERGE (cc:JavaClass {fqn: $fqn})"
+                        " ON CREATE SET cc.className = $className, cc.package = $package,"
+                        " cc.isInterface = $isInterface, cc.isDAOClass = $isDAOClass,"
+                        " cc.isShellExecutorClass = $isShellExecutorClass"
+                        " ON MATCH SET cc.isInterface = $isInterface, cc.isDAOClass = $isDAOClass,"
+                        " cc.isShellExecutorClass = $isShellExecutorClass",
+                        {
+                            "fqn": called_class_fqn,
+                            "className": called_class_info.class_name,
+                            "package": called_class_info.package,
+                            "isInterface": called_class_info.is_interface,
+                            "isDAOClass": is_dao_class_called,
+                            "isShellExecutorClass": is_shell_executor_called,
+                        }
+                    ))
                     
                     # Create USES_CLASS relationship
-                    lines.append(
-                        f"MATCH (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-                        f"MATCH (cc:JavaClass {{fqn: '{escaped_called_class_fqn}'}}) "
-                        f"MERGE (c)-[:USES_CLASS]->(cc);"
-                    )
+                    lines.append((
+                        "MATCH (c:JavaClass {fqn: $class_fqn})"
+                        " MATCH (cc:JavaClass {fqn: $called_class_fqn})"
+                        " MERGE (c)-[:USES_CLASS]->(cc)",
+                        {"class_fqn": class_fqn, "called_class_fqn": called_class_fqn}
+                    ))
                     
                     # Recursively process the called class
                     process_class_recursive(called_class_fqn, depth + 1, max_depth)
@@ -524,31 +498,26 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
                             # Process this class recursively FIRST to ensure it exists
                             process_class_recursive(fqn)
                             
-                            escaped_step_name = escape_cypher_string(step_name)
-                            escaped_class_fqn = escape_cypher_string(fqn)
-                            
-                            lines.append(
-                                f"MATCH (s:Step {{name: '{escaped_step_name}'}}) "
-                                f"MERGE (c:JavaClass {{fqn: '{escaped_class_fqn}'}}) "
-                                f"MERGE (s)-[:IMPLEMENTED_BY]->(c);"
-                            )
+                            lines.append((
+                                "MATCH (s:Step {name: $step_name})"
+                                " MERGE (c:JavaClass {fqn: $class_fqn})"
+                                " MERGE (s)-[:IMPLEMENTED_BY]->(c)",
+                                {"step_name": step_name, "class_fqn": fqn}
+                            ))
         
         if step_class_fqn:
             # Process this class and its call hierarchy recursively FIRST to ensure it exists
             process_class_recursive(step_class_fqn)
             
-            escaped_step_name = escape_cypher_string(step_name)
-            escaped_class_fqn = escape_cypher_string(step_class_fqn)
-            
-            lines.append(
-                f"MATCH (s:Step {{name: '{escaped_step_name}'}}) "
-                f"MERGE (c:JavaClass {{fqn: '{escaped_class_fqn}'}}) "
-                f"MERGE (s)-[:IMPLEMENTED_BY]->(c);"
-            )
+            lines.append((
+                "MATCH (s:Step {name: $step_name})"
+                " MERGE (c:JavaClass {fqn: $class_fqn})"
+                " MERGE (s)-[:IMPLEMENTED_BY]->(c)",
+                {"step_name": step_name, "class_fqn": step_class_fqn}
+            ))
     
     # Set isDAOClass and isShellExecutorClass properties using Analyzers
     logger.info(f"Setting isDAOClass and isShellExecutorClass properties for {len(processed_classes)} classes")
-    #dao_analyzer = DAOAnalyzer()
     dao_class_count = 0
     shell_executor_count = 0
     for class_fqn in processed_classes:
@@ -562,22 +531,18 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
             # Use ShellScriptAnalyzer to determine if this is a shell executor class
             is_shell_exec = shell_analyzer.is_shell_executor_class(class_info)
             
-            escaped_fqn = escape_cypher_string(class_fqn)
-            is_dao_class_value = "true" if is_dao else "false"
-            is_shell_executor_value = "true" if is_shell_exec else "false"
-            
-            lines.append(
-                f"MATCH (c:JavaClass {{fqn: '{escaped_fqn}'}}) "
-                f"SET c.isDAOClass = {is_dao_class_value}, "
-                f"c.isShellExecutorClass = {is_shell_executor_value};"
-            )
+            lines.append((
+                "MATCH (c:JavaClass {fqn: $fqn})"
+                " SET c.isDAOClass = $isDAOClass, c.isShellExecutorClass = $isShellExecutorClass",
+                {"fqn": class_fqn, "isDAOClass": is_dao, "isShellExecutorClass": is_shell_exec}
+            ))
             
             if is_dao:
                 dao_class_count += 1
             if is_shell_exec:
                 shell_executor_count += 1
     
-    logger.info(f"Generated {len(lines)} Cypher statements for job '{job.name}' call hierarchy")
+    logger.info(f"Generated {len(lines)} parameterized statements for job '{job.name}' call hierarchy")
     logger.info(f"  - Processed {len(processed_classes)} classes")
     logger.info(f"  - Processed {len(processed_methods)} methods")
     logger.info(f"  - Processed {len(processed_method_calls)} method calls")
@@ -601,7 +566,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> str:
         if total_needs_review > 0:
             logger.warning(f"  ⚠️  {total_needs_review} calls marked for HUMAN REVIEW - check CALLS relationships with requiresHumanReview=true")
     
-    return "\n".join(lines)
+    return lines
 
 
 def build_simple_interface_registry(all_classes_cache: Dict[str, ClassInfo]) -> Dict[str, List[str]]:
@@ -954,19 +919,24 @@ class InformationGraphBuilder:
         
         # Create root directory node
         root_path_str = str(root)
+        dir_node = IGDirectoryNodeDef(
+            path=root_path_str,
+            name=root.name
+        )
         query = """
         MERGE (n:Node:Directory {path: $path})
         ON CREATE SET 
             n.name = $name,
-            n.node_type = 'Directory',
+            n.node_type = $node_type,
             n.created_at = datetime()
         RETURN n
         """
         
         with self.driver.session(database=self.database) as session:
             session.run(query,
-                path=root_path_str,
-                name=root.name
+                path=dir_node.path,
+                name=dir_node.name,
+                node_type=dir_node.node_type
             )
         
         self.created_nodes.add(root_path_str)
@@ -1046,17 +1016,17 @@ class InformationGraphBuilder:
         # Use absolute path consistently
         path_str = str(folder_path.absolute())
         
-        # Determine folder type
+        # Determine folder type and build the appropriate dataclass node
         if path_str in self.repos_map or str(folder_path) in self.repos_map:
-            folder_type = "Repository"
+            node = IGRepositoryNodeDef(path=path_str, name=folder_path.name, node_type="Repository")
             label = "Node:Repository"
             stats['repositories'] += 1
         elif (folder_path / 'pom.xml').exists() or (folder_path / 'build.gradle').exists():
-            folder_type = "Project"
+            node = IGProjectNodeDef(path=path_str, name=folder_path.name, node_type="Project")
             label = "Node:Project"
             stats['projects'] += 1
         else:
-            folder_type = "Folder"
+            node = IGFolderNodeDef(path=path_str, name=folder_path.name, node_type="Folder")
             label = "Node:Folder"
             stats['folders'] += 1
         
@@ -1073,9 +1043,9 @@ class InformationGraphBuilder:
         """
         
         session.run(query,
-            path=path_str,
-            name=folder_path.name,
-            node_type=folder_type,
+            path=node.path,
+            name=node.name,
+            node_type=node.node_type,
             parent_path=parent_path
         )
     
@@ -1121,17 +1091,32 @@ class InformationGraphBuilder:
         except:
             file_size = 0
         
-        # Check if SpringConfig is in test or main directory
-        is_spring_config = 'SpringConfig' in file_types
-        is_main_config = not self._is_test_path(file_path) if is_spring_config else None
-        
-        # Build the query with conditional properties
-        if is_spring_config:
+        file_types_str = ','.join(file_types)
+        common = dict(path=path_str, name=file_path.name, node_type='File',
+                      extension=file_path.suffix, size=file_size, file_types=file_types_str)
+
+        # Build the appropriate dataclass node based on file type
+        if 'SpringConfig' in file_types:
+            node = IGSpringConfigNodeDef(**common, isMainConfig=not self._is_test_path(file_path))
+        elif 'PomFile' in file_types:
+            node = IGPomFileNodeDef(**common)
+        elif 'PropertyFile' in file_types:
+            node = IGPropertyFileNodeDef(**common)
+        elif 'Resource' in file_types:
+            node = ResourceNodeDef(path=path_str, name=file_path.name,
+                                   node_type='Resource', extension=file_path.suffix,
+                                   size=file_size, file_types=file_types_str,
+                                   foundInRepo=True, repoFilePath=path_str)
+        else:
+            node = IGFileNodeDef(**common)
+
+        # SpringConfig has an extra isMainConfig property; all others share the same query
+        if isinstance(node, IGSpringConfigNodeDef):
             query = f"""
             MERGE (n:{labels} {{path: $path}})
             ON CREATE SET 
                 n.name = $name,
-                n.node_type = 'File',
+                n.node_type = $node_type,
                 n.extension = $extension,
                 n.size = $size,
                 n.file_types = $file_types,
@@ -1142,22 +1127,17 @@ class InformationGraphBuilder:
             MERGE (parent)-[:CONTAINS]->(n)
             RETURN n
             """
-            
             session.run(query,
-                path=path_str,
-                name=file_path.name,
-                extension=file_path.suffix,
-                size=file_size,
-                file_types=','.join(file_types),
-                isMainConfig=is_main_config,
-                parent_path=parent_path
+                path=node.path, name=node.name, node_type=node.node_type,
+                extension=node.extension, size=node.size, file_types=node.file_types,
+                isMainConfig=node.isMainConfig, parent_path=parent_path
             )
         else:
             query = f"""
             MERGE (n:{labels} {{path: $path}})
             ON CREATE SET 
                 n.name = $name,
-                n.node_type = 'File',
+                n.node_type = $node_type,
                 n.extension = $extension,
                 n.size = $size,
                 n.file_types = $file_types,
@@ -1167,13 +1147,9 @@ class InformationGraphBuilder:
             MERGE (parent)-[:CONTAINS]->(n)
             RETURN n
             """
-            
             session.run(query,
-                path=path_str,
-                name=file_path.name,
-                extension=file_path.suffix,
-                size=file_size,
-                file_types=','.join(file_types),
+                path=node.path, name=node.name, node_type=node.node_type,
+                extension=node.extension, size=node.size, file_types=node.file_types,
                 parent_path=parent_path
             )
         
@@ -1643,8 +1619,7 @@ class InformationGraphBuilder:
                         composite_key = f"{bean_id}___{bean_class}"
                         
                         if composite_key in global_bean_map:
-                            logger.info(f"  Warning: Duplicate bean definition found. "
-                                  f"Bean ID: '{bean_id}', Class: '{bean_class}', XML File: '{xml_file}' ")
+                            logger.info(f"  Warning: Duplicate bean definition found. Bean ID: '{bean_id}', Class: '{bean_class}', XML File: '{xml_file}' ")
                         
                         global_bean_map[composite_key] = (bean_class, source_path, xml_file)
                 
@@ -2019,7 +1994,10 @@ class InformationGraphBuilder:
                     tx = session.begin_transaction()
                     try:
                         for stmt in batch:
-                            tx.run(stmt)
+                            if isinstance(stmt, tuple):
+                                tx.run(stmt[0], **stmt[1])
+                            else:
+                                tx.run(stmt)
                         tx.commit()
                         success_count += len(batch)
                     except Exception as e:
@@ -2239,9 +2217,8 @@ class InformationGraphBuilder:
             all_step_statements.extend(statements)
             
             # Collect hierarchy statements
-            hierarchy_cypher = generate_cypher_for_hierarchy(job_def)
-            if hierarchy_cypher:
-                hierarchy_statements = [s.strip() for s in hierarchy_cypher.split(";") if s.strip()]
+            hierarchy_statements = generate_cypher_for_hierarchy(job_def)
+            if hierarchy_statements:
                 all_hierarchy_statements.extend(hierarchy_statements)
         
         collection_time = time.time() - phase_start
@@ -2292,29 +2269,38 @@ class InformationGraphBuilder:
 
     def _convert_folder_to_package(self, folder_path: str, package_parts: List[str]):
         """Convert a Folder node to a Package node."""
-        package_name = '.'.join(package_parts)
-        
-        # Determine if source or test based on path
+        full_package_name = '.'.join(package_parts)
         is_test = '\\test\\' in folder_path or '/test/' in folder_path
-        
+
+        pkg_node = IGPackageNodeDef(
+            path=folder_path,
+            name=package_parts[-1],
+            node_type='Package',
+            package_name=package_parts[-1],
+            full_package_name=full_package_name,
+            available_to_scan=not is_test,
+            package_type='test' if is_test else 'source'
+        )
+
         query = """
         MATCH (n:Folder {path: $path})
         SET n:Package
-        SET n.node_type = 'Package'
+        SET n.node_type = $node_type
         SET n.package_name = $package_name
         SET n.full_package_name = $full_package_name
         SET n.available_to_scan = $available_to_scan
         SET n.package_type = $package_type
         RETURN n
         """
-        
+
         with self.driver.session(database=self.database) as session:
             session.run(query,
-                path=folder_path,
-                package_name=package_parts[-1],  # Just the last segment
-                full_package_name=package_name,
-                available_to_scan=not is_test,
-                package_type='test' if is_test else 'source'
+                path=pkg_node.path,
+                node_type=pkg_node.node_type,
+                package_name=pkg_node.package_name,
+                full_package_name=pkg_node.full_package_name,
+                available_to_scan=pkg_node.available_to_scan,
+                package_type=pkg_node.package_type
             )
 
 

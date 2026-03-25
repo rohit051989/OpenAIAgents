@@ -53,13 +53,6 @@ GREY_AREA_KEYWORDS = _config.get('grey_area_keywords', {})
 PROC_SKIP_KEYWORDS = GREY_AREA_KEYWORDS.get('procedure_calls', []) + GREY_AREA_KEYWORDS.get('core', [])
 
 
-def escape_cypher_string(s: str) -> str:
-    """Escape string for Cypher query"""
-    if not s:
-        return ""
-    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
-
-
 class ProcedureCallEnricher:
     """
     Enriches JavaMethod nodes with stored procedure call information.
@@ -273,58 +266,55 @@ class ProcedureCallEnricher:
             logger.info(f"  Skipping Resource creation for {schema_name}.{package_name}.{proc_name} (dynamic package requires manual resolution)")
             return
         
-        escaped_method_fqn = escape_cypher_string(method_fqn)
-        escaped_proc_name = escape_cypher_string(proc_name)
-        escaped_schema_name = escape_cypher_string(schema_name)
-        escaped_db_type = escape_cypher_string(procedure_call.database_type)
-        
         resource_type = 'FUNCTION' if procedure_call.is_function else 'PROCEDURE'
         unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
-        escaped_resource_id = escape_cypher_string(unique_id)
-        
+
         try:
             with self.driver.session(database=self.database) as session:
-                # Create or update Resource node with schema and package information
-                # If creating new Resource (not from db_repo), mark as notFoundInRepo
+                # Create or update Resource node
                 if package_name:
-                    escaped_package_name = escape_cypher_string(package_name)
-                    resource_query = f"""
-                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                    ON CREATE SET r.id = '{escaped_resource_id}',
+                    resource_query = """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id = $id,
                                   r.enabled = true,
-                                  r.databaseType = '{escaped_db_type}',
-                                  r.schemaName = '{escaped_schema_name}',
-                                  r.packageName = '{escaped_package_name}',
+                                  r.databaseType = $dbType,
+                                  r.schemaName = $schemaName,
+                                  r.packageName = $packageName,
                                   r.foundInRepo = false,
                                   r.notFoundInRepo = true
-                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
-                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
-                                 r.packageName = COALESCE(r.packageName, '{escaped_package_name}')
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
+                                 r.schemaName = COALESCE(r.schemaName, $schemaName),
+                                 r.packageName = COALESCE(r.packageName, $packageName)
                     """
+                    session.run(resource_query,
+                        name=proc_name, rtype=resource_type, id=unique_id,
+                        dbType=procedure_call.database_type,
+                        schemaName=schema_name, packageName=package_name)
                 else:
-                    resource_query = f"""
-                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                    ON CREATE SET r.id = '{escaped_resource_id}',
+                    resource_query = """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id = $id,
                                   r.enabled = true,
-                                  r.databaseType = '{escaped_db_type}',
-                                  r.schemaName = '{escaped_schema_name}',
+                                  r.databaseType = $dbType,
+                                  r.schemaName = $schemaName,
                                   r.foundInRepo = false,
                                   r.notFoundInRepo = true
-                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
-                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}')
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
+                                 r.schemaName = COALESCE(r.schemaName, $schemaName)
                     """
-                session.run(resource_query)
-                
+                    session.run(resource_query,
+                        name=proc_name, rtype=resource_type, id=unique_id,
+                        dbType=procedure_call.database_type, schemaName=schema_name)
+
                 # Create INVOKES relationship
-                relationship_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                MATCH (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                MERGE (m)-[:INVOKES {{
-                    databaseType: '{escaped_db_type}',
-                    confidence: '{procedure_call.confidence}'
-                }}]->(r)
+                relationship_query = """
+                MATCH (m:JavaMethod {fqn: $method_fqn})
+                MATCH (r:Resource {name: $name, type: $rtype})
+                MERGE (m)-[:INVOKES {databaseType: $dbType, confidence: $confidence}]->(r)
                 """
-                session.run(relationship_query)
+                session.run(relationship_query,
+                    method_fqn=method_fqn, name=proc_name, rtype=resource_type,
+                    dbType=procedure_call.database_type, confidence=procedure_call.confidence)
                 
         except Exception as e:
             logger.warning(f"  Failed to create Resource relationship for {proc_name}: {e}")

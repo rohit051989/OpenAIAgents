@@ -1,0 +1,34 @@
+<div id="dbFields" class="resolution-fields" style="display: none;">
+    <div class="form-row">
+        <div class="form-group">
+            <label for="dbOperation">Operation Type:</label>
+            <select id="dbOperation" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="SELECT">SELECT</option>
+                <option value="INSERT">INSERT</option>
+                <option value="UPDATE">UPDATE</option>
+                <option value="DELETE">DELETE</option>
+                <option value="MERGE">MERGE</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="dbTable">Table Name:</label>
+            <input type="text" id="dbTable" class="form-control" placeholder="e.g., CUSTOMER_TABLE">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="dbSchema">Schema Name:</label>
+            <input type="text" id="dbSchema" class="form-control" placeholder="e.g., CUSTOMER_SCHEMA">
+        </div>
+        <div class="form-group">
+            <label for="dbConfidence">Confidence:</label>
+            <select id="dbConfidence" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="LOW">LOW</option>
+            </select>
+        </div>
+    </div>
+</div>

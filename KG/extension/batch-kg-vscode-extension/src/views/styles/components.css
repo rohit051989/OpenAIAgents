@@ -1,0 +1,103 @@
+/* Button Styles */
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    font-weight: 500;
+    transition: opacity 0.2s;
+}
+
+.btn:hover {
+    opacity: 0.8;
+}
+
+.btn-primary {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+
+.btn-secondary {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.btn-toggle {
+    background: var(--vscode-button-background);
+    border: 1px solid var(--vscode-panel-border);
+    color: var(--vscode-button-foreground);
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 16px;
+    font-weight: bold;
+    flex-shrink: 0;
+    min-width: 40px;
+    transition: all 0.2s ease;
+}
+
+.btn-toggle:hover {
+    background-color: var(--vscode-button-hoverBackground);
+    transform: scale(1.1);
+}
+
+.btn-toggle:active {
+    transform: scale(0.95);
+}
+
+.button-group {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+/* Status Message */
+.status-message {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 12px 24px;
+    border-radius: 4px;
+    text-align: center;
+    font-weight: 500;
+    z-index: 1000;
+    min-width: 300px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.status-message.success {
+    background-color: var(--vscode-testing-iconPassed);
+    color: var(--vscode-editor-background);
+}
+
+.status-message.error {
+    background-color: var(--vscode-testing-iconFailed);
+    color: var(--vscode-editor-background);
+}
+
+/* Inline save status (shown under Save/Cancel buttons) */
+.save-status {
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+}
+.save-status.success {
+    background-color: var(--vscode-diffEditor-insertedTextBackground, #1a3a1a);
+    color: var(--vscode-gitDecoration-addedResourceForeground, #4ec94e);
+    border: 1px solid var(--vscode-gitDecoration-addedResourceForeground, #4ec94e);
+}
+.save-status.error {
+    background-color: var(--vscode-inputValidation-errorBackground, #3a1a1a);
+    color: var(--vscode-inputValidation-errorForeground, #f48771);
+    border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+}
+.save-status.info {
+    background-color: var(--vscode-inputValidation-infoBackground, #1a2a3a);
+    color: var(--vscode-inputValidation-infoForeground, #75beff);
+    border: 1px solid var(--vscode-inputValidation-infoBorder, #007acc);
+}

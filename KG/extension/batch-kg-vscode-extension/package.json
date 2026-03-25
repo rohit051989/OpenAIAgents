@@ -1,0 +1,78 @@
+{
+  "name": "batch-kg-gap-analyzer",
+  "displayName": "Batch KG Gap Analyzer",
+  "description": "VS Code extension for analyzing and resolving Spring Batch Knowledge Graph gaps",
+  "version": "0.1.0",
+  "publisher": "batch-kg",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "batchKg.openGapAnalyzer",
+        "title": "Batch KG: Open Gap Analyzer",
+        "category": "Batch KG"
+      }
+    ],
+    "configuration": {
+      "title": "Batch KG Gap Analyzer",
+      "properties": {
+        "batchKg.neo4jUri": {
+          "type": "string",
+          "default": "bolt://localhost:7687",
+          "description": "Neo4j database URI"
+        },
+        "batchKg.neo4jUser": {
+          "type": "string",
+          "default": "neo4j",
+          "description": "Neo4j username"
+        },
+        "batchKg.neo4jPassword": {
+          "type": "string",
+          "default": "",
+          "description": "Neo4j password"
+        },
+        "batchKg.neo4jDatabase": {
+          "type": "string",
+          "default": "information_graph",
+          "description": "Neo4j database name"
+        },
+        "batchKg.configPath": {
+          "type": "string",
+          "default": "../Batch_KG/config/information_graph_config.yaml",
+          "description": "Path to information_graph_config.yaml (relative to workspace root)"
+        },
+        "batchKg.yamlOutputPath": {
+          "type": "string",
+          "default": "config/grey_area_resolution.yaml",
+          "description": "Output path for generated YAML files"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "neo4j-driver": "^5.15.0",
+    "js-yaml": "^4.1.0"
+  }
+}

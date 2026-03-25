@@ -1,0 +1,51 @@
+<div id="procFields" class="resolution-fields" style="display: none;">
+    <div class="form-row">
+        <div class="form-group">
+            <label for="procOracleType">Oracle Object Type:</label>
+            <select id="procOracleType" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="PROCEDURE">Procedure</option>
+                <option value="FUNCTION">Function</option>
+                <option value="TRIGGER">Trigger</option>
+                <option value="VIEW">View</option>
+                <option value="PACKAGE">Package</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="procName">Object Name:</label>
+            <input type="text" id="procName" class="form-control" placeholder="e.g., UPDATE_CUSTOMER_PROC">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="procSchema">Schema Name:</label>
+            <input type="text" id="procSchema" class="form-control" placeholder="e.g., CUSTOMER_SCHEMA">
+        </div>
+        <div class="form-group">
+            <label for="procPackage">Package Name (optional):</label>
+            <input type="text" id="procPackage" class="form-control" placeholder="e.g., PKG_CUSTOMER">
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label for="procDatabaseType">Database Type:</label>
+            <select id="procDatabaseType" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="ORACLE">Oracle</option>
+                <option value="POSTGRESQL">PostgreSQL</option>
+                <option value="MYSQL">MySQL</option>
+                <option value="SQLSERVER">SQL Server</option>
+                <option value="DB2">DB2</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="procConfidence">Confidence:</label>
+            <select id="procConfidence" class="form-control">
+                <option value="">-- Select --</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="LOW">LOW</option>
+            </select>
+        </div>
+    </div>
+</div>

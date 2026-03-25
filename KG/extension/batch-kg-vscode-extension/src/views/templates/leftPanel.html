@@ -1,0 +1,56 @@
+<div class="left-panel" id="leftPanel">
+    <div class="panel-header">
+        <h2>📊 Gap Browser</h2>
+        <button id="leftPanelToggle" class="btn-toggle" title="Hide left panel">◀</button>
+    </div>
+    
+    <section class="section">
+        <h2>Gap Visualization</h2>
+        
+        <div class="form-row">
+            <div class="form-group">
+                <label for="jobSelect">Select Job:</label>
+                <input type="text" id="jobSelect" class="form-control" list="jobList" placeholder="Type to search jobs..." autocomplete="off">
+                <datalist id="jobList"></datalist>
+                <small class="help-text">Start typing to filter jobs</small>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="stepSelect">Select Step:</label>
+                <input type="text" id="stepSelect" class="form-control" list="stepList" placeholder="Type to search steps..." autocomplete="off" disabled>
+                <datalist id="stepList"></datalist>
+                <small class="help-text">Start typing to filter steps</small>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="categorySelect">Select Category:</label>
+                <select id="categorySelect" class="form-control" disabled>
+                    <option value="">-- Select a Category --</option>
+                    <option value="db">Database Operations</option>
+                    <option value="procedure">Procedure Calls</option>
+                    <option value="shell">Shell Executions</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="gapSelect">Select Gap:</label>
+                <select id="gapSelect" class="form-control" disabled>
+                    <option value="">-- Select a Gap --</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="gapInfo" class="info-box" style="display: none;">
+            <h3>Gap Details</h3>
+            <p><strong>Operation:</strong> <span id="gapOperation"></span></p>
+            <p><strong>Method:</strong> <span id="gapMethod"></span></p>
+            <p><strong>Needs Analysis:</strong> <span id="gapAnalysis"></span></p>
+        </div>
+    </section>
+</div>

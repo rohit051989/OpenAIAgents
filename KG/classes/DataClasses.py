@@ -23,6 +23,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+
+@dataclass(kw_only=True)
+class GitMetadataNode:
+    """
+    Base class for nodes whose data originates from a git repository.
+    All fields are keyword-only so subclasses can freely declare positional
+    required fields without triggering a field-ordering TypeError.
+
+    git_repo_name      — repository name; same for all nodes from the same repo
+    git_branch_name    — branch of the first commit (or last update if modified)
+    git_created_by     — 'Name <email>' of the author who introduced the file
+    git_created_at     — ISO-8601 datetime of that first commit
+    git_updated_by     — 'Name <email>' of the author of the most recent commit
+    git_updated_at     — ISO-8601 datetime of the most recent commit
+    git_last_commit_id — full 40-char SHA of the last commit touching the file
+    git_file_exists    — soft-delete flag: False = file removed in target branch
+                         (node kept in graph for audit trail)
+    """
+    git_repo_name: Optional[str] = field(default=None)
+    git_branch_name: Optional[str] = field(default=None)
+    git_created_by: Optional[str] = field(default=None)
+    git_created_at: Optional[str] = field(default=None)
+    git_updated_by: Optional[str] = field(default=None)
+    git_updated_at: Optional[str] = field(default=None)
+    git_last_commit_id: Optional[str] = field(default=None)
+    git_file_exists: bool = field(default=True)
+
+
 @dataclass
 class MethodCall:
     """Method invocation within a method"""
@@ -55,10 +83,22 @@ class MethodDef:
     def fqn(self) -> str:
         return f"{self.class_fqn}.{self.method_name}"
 
+    @property
+    def dbOperationCount(self) -> int:
+        return len(self.db_operations)
+
+    @property
+    def procedureCallCount(self) -> int:
+        return len(self.procedure_calls)
+
+    @property
+    def shellExecutionCount(self) -> int:
+        return len(self.shell_executions)
+
 
 @dataclass
-class ClassInfo:
-    """Java class information"""
+class ClassInfo(GitMetadataNode):
+    """Java class information — git metadata tracks the .java source file in the repo"""
     package: str
     class_name: str
     fqn: str
@@ -70,6 +110,19 @@ class ClassInfo:
     methods: Dict[str, MethodDef] = field(default_factory=dict)  # method_name -> MethodDef
     imports: List[str] = field(default_factory=list)
     called_classes: Set[str] = field(default_factory=set)  # FQNs of classes this class calls
+
+    # IG graph node properties (used when writing the JavaClass node to Neo4j)
+    node_type: str = "JavaClass"        # Node type label in the IG
+    extension: str = ".java"            # Always .java for Java source files
+    size: int = 0                       # Source file size in bytes
+    file_types: str = ""                # Comma-separated IG file-type labels
+    isDAOClass: bool = False            # True if identified as a DAO/repository class
+    isShellExecutorClass: bool = False  # True if identified as a shell-executor class
+    isTestClass: bool = False           # True if in a test source directory
+
+    @property
+    def method_count(self) -> int:
+        return len(self.methods)
 
 
 @dataclass
@@ -109,8 +162,8 @@ class ShellScriptExecution:
 
 
 @dataclass
-class BeanDef:
-    """Comprehensive bean definition with all metadata"""
+class BeanDef(GitMetadataNode):
+    """Comprehensive bean definition — git metadata tracks the Spring XML file and its Java class"""
     bean_id: str
     bean_class: str  # Fully qualified class name
     bean_class_name: str  # Simple class name (no package)
@@ -147,7 +200,8 @@ class BeanDef:
 
 
 @dataclass
-class ListenerDef:
+class ListenerDef(GitMetadataNode):
+    """Listener definition — git metadata tracks the Spring XML file that declares it"""
     name: str
     scope: str          # "JOB", "STEP", "CHUNK", ...
     impl_bean: str      # class name (if available)
@@ -155,7 +209,8 @@ class ListenerDef:
 
 
 @dataclass
-class StepDef:
+class StepDef(GitMetadataNode):
+    """Step definition — git metadata tracks the Spring XML file that declares it"""
     name: str
     step_kind: str      # "TASKLET", "CHUNK", etc.
     impl_bean: str      # tasklet ref bean name (for TASKLET steps)
@@ -187,7 +242,8 @@ class BlockDef:
 
 
 @dataclass
-class DecisionDef:
+class DecisionDef(GitMetadataNode):
+    """Decision definition — git metadata tracks the Spring XML file that declares it"""
     name: str
     decider_bean: str
     class_name: str = ""  # Class name for the decider bean (if available)
@@ -203,9 +259,16 @@ class PrecedesEdge:
 
 
 @dataclass
-class JobDef:
+class JobDef(GitMetadataNode):
+    """Job definition — git metadata tracks the Spring XML file that declares it"""
     name: str
     source_file: str = ""  # Path to the XML file this job was parsed from
+
+    # KG graph node properties
+    id: str = ""
+    description: str = ""
+    enabled: bool = True
+    restartable: bool = True
 
     steps: Dict[str, StepDef] = field(default_factory=dict)
     blocks: Dict[str, BlockDef] = field(default_factory=dict)

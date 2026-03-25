@@ -434,6 +434,7 @@ class JavaCallHierarchyParser:
                     else:
                         target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
                 
+                logger.info(f" Inside ts_extract_method_calls   Adding method call: {method_name}, target_class: {target_class}, class_fqn: {class_info.fqn}")
                 # Add the method call
                 calls.append(MethodCall(
                     target_class=target_class,
@@ -711,7 +712,8 @@ class JavaCallHierarchyParser:
                                     logger.info(f"    Method {method_name} not in {return_type}")
                             else:
                                 logger.info(f"    {return_type} not in cache or None")
-
+                
+                logger.info(f"    Inside extract_method_calls: Adding method call: {method_name}, target_class: {target_class}, class_fqn: {class_info.fqn}")
                 calls.append(MethodCall(
                     target_class=target_class,
                     method_name=method_name,

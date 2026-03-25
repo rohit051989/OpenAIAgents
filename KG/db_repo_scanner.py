@@ -48,6 +48,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
+from classes.KGNodeDefs import IGRepositoryNodeDef, IGFolderNodeDef, IGFileNodeDef, ResourceNodeDef
 from neo4j import GraphDatabase
 import uuid
 import sqlparse
@@ -101,6 +102,10 @@ class DBRepoScanner:
         # Key: (name, type) -> List of (schema, package_name, file_path)
         self.resource_registry: Dict[Tuple[str, str], List[Tuple[Optional[str], Optional[str], str]]] = {}
         
+        # Directories to skip during scanning (from config)
+        self.skip_dirs: Set[str] = set(self.config.get('skip_directories', []))
+        self.skip_files: List[str] = self.config.get('skip_files', [])
+
         # Track created nodes to prevent duplicates
         self.created_nodes: Set[str] = set()
         
@@ -179,9 +184,14 @@ class DBRepoScanner:
         """
         
         try:
-            session.run(query,
+            repo_node = IGRepositoryNodeDef(
                 path=repo_path_str,
-                name=repo_path_obj.name
+                name=repo_path_obj.name,
+                node_type='Repository'
+            )
+            session.run(query,
+                path=repo_node.path,
+                name=repo_node.name
             )
             self.created_nodes.add(repo_path_str)
             logger.info(f"      Repository node ensured: {repo_name}")
@@ -221,6 +231,14 @@ class DBRepoScanner:
             if item_path_str in self.created_nodes:
                 continue
             
+            # Skip ignored directories
+            if item.is_dir() and item.name in self.skip_dirs:
+                continue
+
+            # Skip ignored files
+            if item.is_file() and self._should_skip_file(item):
+                continue
+
             if item.is_file():
                 # Create file node
                 self._create_file_node(item, parent_path_str, repo_name, session)
@@ -250,12 +268,18 @@ class DBRepoScanner:
             session: Neo4j session
         """
         path_str = str(folder_path.absolute())
-        
+
+        folder_node = IGFolderNodeDef(
+            path=path_str,
+            name=folder_path.name,
+            node_type='Folder'
+        )
+
         query = """
         MERGE (n:Node:Folder {path: $path})
         ON CREATE SET 
             n.name = $name,
-            n.node_type = 'Folder',
+            n.node_type = $node_type,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -265,8 +289,9 @@ class DBRepoScanner:
         
         try:
             session.run(query,
-                path=path_str,
-                name=folder_path.name,
+                path=folder_node.path,
+                name=folder_node.name,
+                node_type=folder_node.node_type,
                 parent_path=parent_path
             )
         except Exception as e:
@@ -290,11 +315,19 @@ class DBRepoScanner:
         except:
             file_size = 0
         
+        file_node = IGFileNodeDef(
+            path=path_str,
+            name=file_path.name,
+            node_type='File',
+            extension=file_path.suffix,
+            size=file_size
+        )
+
         query = """
         MERGE (n:Node:File {path: $path})
         ON CREATE SET 
             n.name = $name,
-            n.node_type = 'File',
+            n.node_type = $node_type,
             n.extension = $extension,
             n.size = $size,
             n.created_at = datetime()
@@ -306,16 +339,28 @@ class DBRepoScanner:
         
         try:
             session.run(query,
-                path=path_str,
-                name=file_path.name,
-                extension=file_path.suffix,
-                size=file_size,
+                path=file_node.path,
+                name=file_node.name,
+                node_type=file_node.node_type,
+                extension=file_node.extension,
+                size=file_node.size,
                 parent_path=parent_path
             )
         except Exception as e:
             logger.warning(f"      Failed to create file node {file_path.name}: {e}")
             self.stats['errors'] += 1
     
+    def _should_skip_file(self, file_path: Path) -> bool:
+        """Check if file should be skipped based on skip_files configuration."""
+        import fnmatch
+        file_name = file_path.name
+        for skip_pattern in self.skip_files:
+            if skip_pattern == file_name:
+                return True
+            if '*' in skip_pattern and fnmatch.fnmatch(file_name, skip_pattern):
+                return True
+        return False
+
     def _split_create_statements(self, sql_content: str) -> List[str]:
         """
         Split SQL content into individual CREATE statements to avoid sqlparse token limits.
@@ -413,14 +458,25 @@ class DBRepoScanner:
                 
                 # Collect resource for bulk creation (instead of creating one by one)
                 unique_id = f"RES_{resource_type}_{uuid.uuid4().hex[:8].upper()}"
+                res_node = ResourceNodeDef(
+                    id=unique_id,
+                    name=object_name.upper(),
+                    type=resource_type,
+                    schemaName=schema_name.upper() if schema_name else 'UNKNOWN',
+                    packageName=package_name.upper() if package_name else '',
+                    foundInRepo=True,
+                    repoName=repo_name,
+                    repoFilePath=file_path_str,
+                    enabled=True
+                )
                 resource_data = {
-                    'id': unique_id,
-                    'name': object_name.upper(),
-                    'type': resource_type,
-                    'schema': schema_name.upper() if schema_name else 'UNKNOWN',
-                    'package': package_name.upper() if package_name else None,
-                    'filePath': file_path_str,
-                    'repoName': repo_name
+                    'id': res_node.id,
+                    'name': res_node.name,
+                    'type': res_node.type,
+                    'schemaName': res_node.schemaName,
+                    'packageName': res_node.packageName,
+                    'repoFilePath': res_node.repoFilePath,
+                    'repoName': res_node.repoName,
                 }
                 self.collected_resources.append(resource_data)
                 resources_found += 1
@@ -533,25 +589,25 @@ class DBRepoScanner:
                 
                 try:
                     # Separate resources with and without packages for different queries
-                    resources_with_package = [r for r in batch if r['package']]
-                    resources_without_package = [r for r in batch if not r['package']]
+                    resources_with_package = [r for r in batch if r['packageName']]
+                    resources_without_package = [r for r in batch if not r['packageName']]
                     
                     # Bulk create resources WITH package
                     if resources_with_package:
                         query_with_pkg = """
                         UNWIND $resources AS res
-                        MERGE (r:Resource {name: res.name, type: res.type, schemaName: res.schema, packageName: res.package})
+                        MERGE (r:Resource {name: res.name, type: res.type, schemaName: res.schemaName, packageName: res.packageName})
                         ON CREATE SET r.id = res.id,
                                       r.enabled = true,
                                       r.foundInRepo = true,
                                       r.repoName = res.repoName,
-                                      r.repoFilePath = res.filePath,
+                                      r.repoFilePath = res.repoFilePath,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,
                                      r.repoName = COALESCE(r.repoName, res.repoName),
-                                     r.repoFilePath = COALESCE(r.repoFilePath, res.filePath)
+                                     r.repoFilePath = COALESCE(r.repoFilePath, res.repoFilePath)
                         WITH r, res
-                        MATCH (f:File {path: res.filePath})
+                        MATCH (f:File {path: res.repoFilePath})
                         MERGE (f)-[rel:DB_OPERATION]->(r)
                         ON CREATE SET rel.operationType = 'CREATE',
                                       rel.statementType = res.type
@@ -565,19 +621,19 @@ class DBRepoScanner:
                     if resources_without_package:
                         query_without_pkg = """
                         UNWIND $resources AS res
-                        MERGE (r:Resource {name: res.name, type: res.type, schemaName: res.schema})
+                        MERGE (r:Resource {name: res.name, type: res.type, schemaName: res.schemaName})
                         ON CREATE SET r.id = res.id,
                                       r.enabled = true,
                                       r.foundInRepo = true,
                                       r.repoName = res.repoName,
-                                      r.repoFilePath = res.filePath,
+                                      r.repoFilePath = res.repoFilePath,
                                       r.packageName = null,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,
                                      r.repoName = COALESCE(r.repoName, res.repoName),
-                                     r.repoFilePath = COALESCE(r.repoFilePath, res.filePath)
+                                     r.repoFilePath = COALESCE(r.repoFilePath, res.repoFilePath)
                         WITH r, res
-                        MATCH (f:File {path: res.filePath})
+                        MATCH (f:File {path: res.repoFilePath})
                         MERGE (f)-[rel:DB_OPERATION]->(r)
                         ON CREATE SET rel.operationType = 'CREATE',
                                       rel.statementType = res.type

@@ -107,13 +107,6 @@ SHELL_KEYWORDS = GREY_AREA_KEYWORDS.get('shell_executions', [])
 ENRICHER_PREFIXES = GREY_AREA_KEYWORDS.get('enricher_prefixes', [])
 
 
-def escape_cypher_string(s: str) -> str:
-    """Escape single quotes in Cypher string literals"""
-    if s is None:
-        return ""
-    return str(s).replace("'", "\\\\'")
-
-
 class ManualResourceAssociator:
     """
     Associates manually resolved Resource names with JavaMethod nodes.
@@ -176,52 +169,44 @@ class ManualResourceAssociator:
                 # Normalize values
                 table_name = table_name.upper()
                 operation_type = operation_type.upper()
-                
-                escaped_method_fqn = escape_cypher_string(method_fqn)
-                escaped_table_name = escape_cypher_string(table_name)
-                escaped_operation_type = escape_cypher_string(operation_type)
-                escaped_confidence = escape_cypher_string(confidence)
-                escaped_schema_name = escape_cypher_string(schema_name if schema_name else "UNKNOWN")
+                schema_name_norm = (schema_name or 'UNKNOWN').upper()
                 
                 # Generate unique ID for new resources
                 unique_id = f"RES_TABLE_{uuid.uuid4().hex[:8].upper()}"
-                escaped_resource_id = escape_cypher_string(unique_id)
                 
                 # Create or update Resource node
-                # If creating new Resource (not from db_repo), mark as notFoundInRepo
-                resource_query = f"""
-                MERGE (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
-                ON CREATE SET r.id = '{escaped_resource_id}',
+                resource_query = """
+                MERGE (r:Resource {name: $name, type: 'TABLE'})
+                ON CREATE SET r.id = $id,
                               r.enabled = true,
-                              r.schemaName = '{escaped_schema_name}',
+                              r.schemaName = $schemaName,
                               r.foundInRepo = false,
                               r.notFoundInRepo = true,
                               r.manuallyResolved = true
-                ON MATCH SET r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
+                ON MATCH SET r.schemaName = COALESCE(r.schemaName, $schemaName),
                              r.manuallyResolved = true
                 RETURN r.id as resourceId
                 """
-                result = session.run(resource_query)
+                result = session.run(resource_query,
+                    name=table_name, id=unique_id, schemaName=schema_name_norm)
                 if result.single():
                     logger.info(f"     Resource created/updated: {table_name}")
                     self.stats['resources_created'] += 1
                 
                 # Create relationship between JavaMethod and Resource
-                relationship_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                MATCH (r:Resource {{name: '{escaped_table_name}', type: 'TABLE'}})
-                MERGE (m)-[:DB_OPERATION {{
-                    operationType: '{escaped_operation_type}',
-                    confidence: '{escaped_confidence}',
-                    manuallyResolved: true
-                }}]->(r)
+                relationship_query = """
+                MATCH (m:JavaMethod {fqn: $method_fqn})
+                MATCH (r:Resource {name: $name, type: 'TABLE'})
+                MERGE (m)-[:DB_OPERATION {operationType: $operationType, confidence: $confidence, manuallyResolved: true}]->(r)
                 """
-                session.run(relationship_query)
+                session.run(relationship_query,
+                    method_fqn=method_fqn, name=table_name,
+                    operationType=operation_type, confidence=confidence)
                 logger.info(f"     Relationship created: {method_fqn} -[DB_OPERATION:{operation_type}]-> {table_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Build db operation value
-                db_op_value = f"{escaped_operation_type}:{escaped_table_name}:{escaped_confidence}"
+                db_op_value = f"{operation_type}:{table_name}:{confidence}"
                 
                 # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
@@ -233,7 +218,6 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with dbOperations
-                    escaped_bean_id = escape_cypher_string(bean_id)
                     
                     # Find Step by bean_id (stored in implBean property)
                     check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
@@ -244,16 +228,16 @@ class ManualResourceAssociator:
                         self.stats['errors'] += 1
                         return False
                     
-                    update_step_query = f"""
-                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    update_step_query = """
+                    MATCH (s:Step {implBean: $beanId})
                     SET s.stepDbOperations = CASE
-                        WHEN s.stepDbOperations IS NULL THEN ['{db_op_value}']
-                        ELSE s.stepDbOperations + ['{db_op_value}']
+                        WHEN s.stepDbOperations IS NULL THEN [$opValue]
+                        ELSE s.stepDbOperations + [$opValue]
                     END,
                     s.stepDbOperationCount = size(s.stepDbOperations),
                     s.manuallyResolvedDbOps = true
                     """
-                    session.run(update_step_query)
+                    session.run(update_step_query, beanId=bean_id, opValue=db_op_value)
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {db_op_value}")
                     # Track this method + bean combo as class-level configured (generic method)
@@ -261,18 +245,21 @@ class ManualResourceAssociator:
                     self.class_level_methods.add(composite_key)
                 else:
                     # Original behavior: Update JavaMethod
-                    update_method_query = f"""
-                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    update_method_query = """
+                    MATCH (m:JavaMethod {fqn: $fqn})  
                     SET m.dbOperations = [op IN m.dbOperations | 
                         CASE 
-                            WHEN op STARTS WITH '{escaped_operation_type}:' AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
-                            THEN '{db_op_value}'
+                            WHEN op STARTS WITH $opType AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
+                            THEN $opValue
                             ELSE op
                         END
                     ],
                     m.furtherAnalysisRequired = false
                     """
-                    session.run(update_method_query)
+                    session.run(update_method_query,
+                        fqn=method_fqn,
+                        opType=f"{operation_type}:",
+                        opValue=db_op_value)
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 self.stats['db_operations_processed'] += 1
                 return True
@@ -318,73 +305,72 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     return False
                 
-                escaped_method_fqn = escape_cypher_string(method_fqn)
-                escaped_proc_name = escape_cypher_string(procedure_name)
-                escaped_db_type = escape_cypher_string(database_type)
-                escaped_schema_name = escape_cypher_string(schema_name if schema_name else 'UNKNOWN')
-                
                 resource_type = 'FUNCTION' if is_function else 'PROCEDURE'
                 unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
-                escaped_resource_id = escape_cypher_string(unique_id)
                 
                 # Create or update Resource node with schema and package information
                 # If creating new Resource (not from db_repo), mark as notFoundInRepo
                 if package_name:
-                    escaped_package_name = escape_cypher_string(package_name)
-                    resource_query = f"""
-                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                    ON CREATE SET r.id = '{escaped_resource_id}',
+                    resource_query = """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id = $id,
                                   r.enabled = true,
-                                  r.databaseType = '{escaped_db_type}',
-                                  r.schemaName = '{escaped_schema_name}',
-                                  r.packageName = '{escaped_package_name}',
+                                  r.databaseType = $dbType,
+                                  r.schemaName = $schemaName,
+                                  r.packageName = $packageName,
                                   r.foundInRepo = false,
                                   r.notFoundInRepo = true,
                                   r.manuallyResolved = true
-                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
-                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
-                                 r.packageName = COALESCE(r.packageName, '{escaped_package_name}'),
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
+                                 r.schemaName = COALESCE(r.schemaName, $schemaName),
+                                 r.packageName = COALESCE(r.packageName, $packageName),
                                  r.manuallyResolved = true
                     RETURN r.id as resourceId
                     """
+                    result = session.run(resource_query,
+                        name=procedure_name, rtype=resource_type, id=unique_id,
+                        dbType=database_type,
+                        schemaName=(schema_name or 'UNKNOWN').upper(),
+                        packageName=package_name)
                 else:
-                    resource_query = f"""
-                    MERGE (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                    ON CREATE SET r.id = '{escaped_resource_id}',
+                    resource_query = """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id = $id,
                                   r.enabled = true,
-                                  r.databaseType = '{escaped_db_type}',
-                                  r.schemaName = '{escaped_schema_name}',
+                                  r.databaseType = $dbType,
+                                  r.schemaName = $schemaName,
                                   r.foundInRepo = false,
                                   r.notFoundInRepo = true,
                                   r.manuallyResolved = true
-                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, '{escaped_db_type}'),
-                                 r.schemaName = COALESCE(r.schemaName, '{escaped_schema_name}'),
+                    ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
+                                 r.schemaName = COALESCE(r.schemaName, $schemaName),
                                  r.manuallyResolved = true
                     RETURN r.id as resourceId
                     """
-                result = session.run(resource_query)
+                    result = session.run(resource_query,
+                        name=procedure_name, rtype=resource_type, id=unique_id,
+                        dbType=database_type,
+                        schemaName=(schema_name or 'UNKNOWN').upper())
                 if result.single():
                     logger.info(f"     Resource created/updated: {procedure_name} ({resource_type})")
                     self.stats['resources_created'] += 1
                 
                 # Create INVOKES relationship
-                relationship_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                MATCH (r:Resource {{name: '{escaped_proc_name}', type: '{resource_type}'}})
-                MERGE (m)-[:INVOKES {{
-                    databaseType: '{escaped_db_type}',
-                    confidence: 'HIGH',
-                    manuallyResolved: true
-                }}]->(r)
+                relationship_query = """
+                MATCH (m:JavaMethod {fqn: $method_fqn})
+                MATCH (r:Resource {name: $name, type: $rtype})
+                MERGE (m)-[:INVOKES {databaseType: $dbType, confidence: 'HIGH', manuallyResolved: true}]->(r)
                 """
-                session.run(relationship_query)
+                session.run(relationship_query,
+                    method_fqn=method_fqn, name=procedure_name, rtype=resource_type,
+                    dbType=database_type)
                 logger.info(f"     Relationship created: {method_fqn} -[INVOKES]-> {procedure_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Build procedure call value
-                schema_part = escaped_schema_name
-                package_part = escape_cypher_string(package_name) if package_name else 'NONE'
-                proc_value = f"{schema_part}:{package_part}:{escaped_proc_name}:{escaped_db_type}:{resource_type}:HIGH"
+                schema_part = (schema_name or 'UNKNOWN').upper()
+                package_part = package_name if package_name else 'NONE'
+                proc_value = f"{schema_part}:{package_part}:{procedure_name}:{database_type}:{resource_type}:HIGH"
                 
                 # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
@@ -396,7 +382,6 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with procedureCalls
-                    escaped_bean_id = escape_cypher_string(bean_id)
                     
                     # Find Step by bean_id (stored in implBean property)
                     check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
@@ -407,16 +392,16 @@ class ManualResourceAssociator:
                         self.stats['errors'] += 1
                         return False
                     
-                    update_step_query = f"""
-                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    update_step_query = """
+                    MATCH (s:Step {implBean: $beanId})
                     SET s.stepProcedureCalls = CASE
-                        WHEN s.stepProcedureCalls IS NULL THEN ['{proc_value}']
-                        ELSE s.stepProcedureCalls + ['{proc_value}']
+                        WHEN s.stepProcedureCalls IS NULL THEN [$procValue]
+                        ELSE s.stepProcedureCalls + [$procValue]
                     END,
                     s.stepProcedureCallCount = size(s.stepProcedureCalls),
                     s.manuallyResolvedProcCalls = true
                     """
-                    session.run(update_step_query)
+                    session.run(update_step_query, beanId=bean_id, procValue=proc_value)
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {proc_value}")
                     # Track this method + bean combo as class-level configured (generic method)
@@ -424,19 +409,23 @@ class ManualResourceAssociator:
                     self.class_level_methods.add(composite_key)
                 else:
                     # Original behavior: Update JavaMethod
-                    update_method_query = f"""
-                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    update_method_query = """
+                    MATCH (m:JavaMethod {fqn: $fqn})  
                     SET m.procedureCalls = [proc IN m.procedureCalls | 
                         CASE 
                             WHEN (proc CONTAINS 'DYNAMIC_PROCEDURE' OR 
-                                  (proc CONTAINS 'UNKNOWN' AND proc CONTAINS ':{escaped_db_type}:' AND proc CONTAINS ':{resource_type}:'))
-                            THEN '{proc_value}'
+                                  (proc CONTAINS 'UNKNOWN' AND proc CONTAINS $dbTypeToken AND proc CONTAINS $rtypeToken))
+                            THEN $procValue
                             ELSE proc
                         END
                     ],
                     m.furtherAnalysisRequired = false
                     """
-                    session.run(update_method_query)
+                    session.run(update_method_query,
+                        fqn=method_fqn,
+                        dbTypeToken=f":{database_type}:",
+                        rtypeToken=f":{resource_type}:",
+                        procValue=proc_value)
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 
                 self.stats['procedure_calls_processed'] += 1
@@ -489,53 +478,50 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     return False
                 
-                escaped_method_fqn = escape_cypher_string(method_fqn)
-                escaped_script_name = escape_cypher_string(script_name)
-                escaped_script_path = escape_cypher_string(script_path if script_path else script_name)
-                escaped_script_type = escape_cypher_string(script_type)
-                escaped_confidence = escape_cypher_string(confidence)
-                escaped_description = escape_cypher_string(description if description else "")
-                
                 # Generate unique ID for new resources
                 unique_id = f"RES_SCRIPT_{uuid.uuid4().hex[:8].upper()}"
-                escaped_resource_id = escape_cypher_string(unique_id)
                 
                 # Determine execution type
                 is_remote = remote_host is not None
                 execution_type = "REMOTE" if is_remote else "LOCAL"
                 
-                # Create or update Resource node
-                resource_props = {
-                    'id': escaped_resource_id,
-                    'enabled': 'true',
-                    'scriptType': escaped_script_type,
-                    'scriptPath': escaped_script_path,
+                # Build parameterized resource props
+                res_params = {
+                    'name': script_name,
+                    'id': unique_id,
+                    'scriptType': script_type,
+                    'scriptPath': script_path if script_path else script_name,
                     'executionType': execution_type,
-                    'manuallyResolved': 'true',
-                    'description': escaped_description
+                    'description': description or '',
                 }
-                
                 if is_remote:
-                    resource_props['remoteHost'] = escape_cypher_string(remote_host)
+                    res_params['remoteHost'] = remote_host
                     if remote_user:
-                        resource_props['remoteUser'] = escape_cypher_string(remote_user)
+                        res_params['remoteUser'] = remote_user
                     if remote_port:
-                        resource_props['remotePort'] = remote_port
+                        res_params['remotePort'] = remote_port
                     if ssh_key_location:
-                        resource_props['sshKeyLocation'] = escape_cypher_string(ssh_key_location)
+                        res_params['sshKeyLocation'] = ssh_key_location
                 
-                # Build SET clause for resource properties
-                set_clauses = ', '.join([f"r.{k} = '{v}'" if isinstance(v, str) else f"r.{k} = {v}" 
-                                         for k, v in resource_props.items()])
+                # Build SET clauses that reference parameters by name
+                static_sets = (
+                    "r.id = $id, r.enabled = true, r.scriptType = $scriptType,"
+                    " r.scriptPath = $scriptPath, r.executionType = $executionType,"
+                    " r.manuallyResolved = true, r.description = $description"
+                )
+                if is_remote:
+                    static_sets += ", r.remoteHost = $remoteHost"
+                    if remote_user:  static_sets += ", r.remoteUser = $remoteUser"
+                    if remote_port:  static_sets += ", r.remotePort = $remotePort"
+                    if ssh_key_location: static_sets += ", r.sshKeyLocation = $sshKeyLocation"
                 
                 resource_query = f"""
-                MERGE (r:Resource {{name: '{escaped_script_name}', type: 'SHELL_SCRIPT'}})
-                ON CREATE SET {set_clauses}
-                ON MATCH SET r.scriptPath = '{escaped_script_path}',
-                             r.manuallyResolved = true
+                MERGE (r:Resource {{name: $name, type: 'SHELL_SCRIPT'}})
+                ON CREATE SET {static_sets}
+                ON MATCH SET r.scriptPath = $scriptPath, r.manuallyResolved = true
                 RETURN r.id as resourceId
                 """
-                result = session.run(resource_query)
+                result = session.run(resource_query, **res_params)
                 if result.single():
                     logger.info(f"     Resource created/updated: {script_name} ({script_type})")
                     if is_remote:
@@ -545,26 +531,20 @@ class ManualResourceAssociator:
                     self.stats['resources_created'] += 1
                 
                 # Create EXECUTES relationship
-                rel_props = {
-                    'scriptType': escaped_script_type,
-                    'confidence': escaped_confidence,
-                    'executionType': execution_type,
-                    'manuallyResolved': 'true'
-                }
-                
-                rel_set_clauses = ', '.join([f"{k}: '{v}'" for k, v in rel_props.items()])
-                
-                relationship_query = f"""
-                MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})
-                MATCH (r:Resource {{name: '{escaped_script_name}', type: 'SHELL_SCRIPT'}})
-                MERGE (m)-[:EXECUTES {{{rel_set_clauses}}}]->(r)
+                relationship_query = """
+                MATCH (m:JavaMethod {fqn: $method_fqn})
+                MATCH (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
+                MERGE (m)-[:EXECUTES {scriptType: $scriptType, confidence: $confidence, executionType: $executionType, manuallyResolved: true}]->(r)
                 """
-                session.run(relationship_query)
+                session.run(relationship_query,
+                    method_fqn=method_fqn, name=script_name,
+                    scriptType=script_type, confidence=confidence,
+                    executionType=execution_type)
                 logger.info(f"     Relationship created: {method_fqn} -[EXECUTES]-> {script_name}")
                 self.stats['relationships_created'] += 1
                 
                 # Build shell execution value
-                shell_exec_value = f"RESOLVED:{escaped_script_name}:{escaped_confidence}"
+                shell_exec_value = f"RESOLVED:{script_name}:{confidence}"
                 
                 # If tasklet/reader/writer/processor FQN specified, update Step directly
                 class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
@@ -576,7 +556,6 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with shellExecutions
-                    escaped_bean_id = escape_cypher_string(bean_id)
                     
                     # Find Step by bean_id (stored in implBean property)
                     check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
@@ -587,16 +566,16 @@ class ManualResourceAssociator:
                         self.stats['errors'] += 1
                         return False
                     
-                    update_step_query = f"""
-                    MATCH (s:Step {{implBean: '{escaped_bean_id}'}})
+                    update_step_query = """
+                    MATCH (s:Step {implBean: $beanId})
                     SET s.stepShellExecutions = CASE
-                        WHEN s.stepShellExecutions IS NULL THEN ['{shell_exec_value}']
-                        ELSE s.stepShellExecutions + ['{shell_exec_value}']
+                        WHEN s.stepShellExecutions IS NULL THEN [$shellValue]
+                        ELSE s.stepShellExecutions + [$shellValue]
                     END,
                     s.stepShellExecutionCount = size(s.stepShellExecutions),
                     s.manuallyResolvedShellExecs = true
                     """
-                    session.run(update_step_query)
+                    session.run(update_step_query, beanId=bean_id, shellValue=shell_exec_value)
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {shell_exec_value}")
                     # Track this method + bean combo as class-level configured (generic method)
@@ -606,23 +585,17 @@ class ManualResourceAssociator:
                     # Original behavior: Update JavaMethod
                     # Strategy: Replace grey area entries with RESOLVED entry (idempotent)
                     # A grey area entry is one that doesn't start with "RESOLVED:" and contains incomplete/error info
-                    update_method_query = f"""
-                    MATCH (m:JavaMethod {{fqn: '{escaped_method_fqn}'}})  
+                    update_method_query = """
+                    MATCH (m:JavaMethod {fqn: $fqn})  
                     SET m.shellExecutions = CASE
-                        // If the RESOLVED entry already exists, keep existing (idempotent)
-                        WHEN '{shell_exec_value}' IN m.shellExecutions THEN m.shellExecutions
-                        
-                        // If only one entry and it's not RESOLVED, replace it
+                        WHEN $shellValue IN m.shellExecutions THEN m.shellExecutions
                         WHEN size(m.shellExecutions) = 1 AND NOT m.shellExecutions[0] STARTS WITH 'RESOLVED:' 
-                        THEN ['{shell_exec_value}']
-                        
-                        // Otherwise, keep RESOLVED entries and add new one
-                        ELSE [exec IN m.shellExecutions WHERE exec STARTS WITH 'RESOLVED:'] + 
-                             ['{shell_exec_value}']
+                        THEN [$shellValue]
+                        ELSE [exec IN m.shellExecutions WHERE exec STARTS WITH 'RESOLVED:'] + [$shellValue]
                     END,
                     m.furtherAnalysisRequired = false
                     """
-                    session.run(update_method_query)
+                    session.run(update_method_query, fqn=method_fqn, shellValue=shell_exec_value)
                     logger.info(f"     Method updated: shellExecutions updated with RESOLVED entry")
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
         except Exception as e:

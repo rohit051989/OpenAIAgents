@@ -1,0 +1,70 @@
+<div class="right-panel" id="rightPanel">
+    <div class="panel-header">
+        <h2>✏️ Gap Resolution</h2>
+        <button id="rightPanelToggle" class="btn-toggle" title="Hide right panel">▶</button>
+    </div>
+    
+    <section class="section" id="resolutionSection" style="display: none;">
+        
+        <!-- Common Fields -->
+        <div class="form-row">
+            <div class="form-group">
+                <label for="methodFqn">Method FQN:</label>
+                <input type="text" id="methodFqn" class="form-control" readonly style="background-color: var(--vscode-input-background); opacity: 0.7;">
+                <small class="help-text">Fully Qualified Name of the method (auto-filled)</small>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="genericCheckbox">
+                    Generic Resolution
+                </label>
+                <small class="help-text">Check if this is a generic dynamic operation</small>
+            </div>
+        </div>
+
+        <!-- Non-Generic Fields -->
+        <div id="nonGenericFields">
+            {{dbFields}}
+            {{procedureFields}}
+            {{shellFields}}
+        </div>
+
+        <!-- Generic Fields -->
+        <div id="genericFields" style="display: none;">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="beanId">Bean ID:</label>
+                    <input type="text" id="beanId" class="form-control" placeholder="e.g., customerItemReader">
+                    <small class="help-text">Spring bean ID for dynamic resolution</small>
+                </div>
+                <div class="form-group">
+                    <label for="beanType">Bean Type:</label>
+                    <select id="beanType" class="form-control">
+                        <option value="">-- Select --</option>
+                        <option value="Tasklet">Tasklet</option>
+                        <option value="Reader">Reader</option>
+                        <option value="Writer">Writer</option>
+                        <option value="Processor">Processor</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="beanFqn">Bean FQN:</label>
+                    <input type="text" id="beanFqn" class="form-control" placeholder="e.g., com.example.CustomerTasklet">
+                    <small class="help-text">Fully Qualified Name for selected bean type</small>
+                </div>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button id="saveBtn" class="btn btn-primary">💾 Save Resolution</button>
+            <button id="cancelBtn" class="btn btn-secondary">❌ Cancel</button>
+        </div>
+
+        <div id="saveStatus" class="save-status" style="display: none;"></div>
+    </section>
+</div>

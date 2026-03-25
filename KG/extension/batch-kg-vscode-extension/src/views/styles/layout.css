@@ -1,0 +1,84 @@
+/* Header Styles */
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background-color: var(--vscode-sideBar-background);
+    flex-shrink: 0;
+}
+
+/* Panel Layout */
+.main-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.left-panel, .right-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.left-panel {
+    flex: 1 1 45%;
+    border-right: 1px solid var(--vscode-panel-border);
+    min-width: 0;
+}
+
+.right-panel {
+    flex: 1 1 55%;
+    min-width: 0;
+}
+
+.left-panel.collapsed {
+    flex: 0 0 50px;
+    min-width: 50px;
+}
+
+.right-panel.collapsed {
+    flex: 0 0 50px;
+    min-width: 50px;
+}
+
+.left-panel.collapsed .section,
+.right-panel.collapsed .section {
+    display: none;
+}
+
+.left-panel.collapsed .panel-header h2,
+.right-panel.collapsed .panel-header h2 {
+    display: none;
+}
+
+.left-panel.collapsed .panel-header,
+.right-panel.collapsed .panel-header {
+    justify-content: center;
+    padding: 10px 5px;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    background-color: var(--vscode-sideBarSectionHeader-background);
+    border-bottom: 1px solid var(--vscode-panel-border);
+    flex-shrink: 0;
+}
+
+.panel-header h2 {
+    margin: 0;
+    font-size: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.left-panel .section,
+.right-panel .section {
+    height: 100%;
+}
