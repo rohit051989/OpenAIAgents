@@ -9,6 +9,8 @@ repositories:
   - name: "Test_Code_repo"
     path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_Code_repo"
     type: "code_repo"
+    has_batch_configuration: true  # Indicates this repo contains batch configuration files for helping which SpringConfig files to include during scanning
+    batch_configuration_file_path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_Code_repo\\batch\\TestSpringProject\\src\\main\\resources\\batch-configuration.xml"
     
   - name: "Test_DB_Repo"
     path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_DB_Repo"
@@ -131,6 +133,8 @@ scan_options:
   # Smaller batches minimize transaction failures and maintain high throughput
   skip_initial_phases: false  # Set to true to skip DB clearing, constraints, and DB repo scanning (start directly at SHOT 1)
   
+  
+
   # Job filtering for faster testing
   build_all_jobs: false  # Set to false to build only specific jobs
   jobs_to_build: ["customerProcessingJob","customerExportJob"]  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]

@@ -227,6 +227,7 @@ class EventHandlers {
         const typeSpecific = gap.type_specific_info ? 
             `<p><strong>Details:</strong> ${JSON.stringify(gap.type_specific_info, null, 2)}</p>` : '';
 
+        // Sanitise method_fqn for use as a data attribute (no quotes needed — stored in JS closure)
         gapInfoDiv.innerHTML = `
             <h3>Gap Information</h3>
             <p><strong>Category:</strong> ${gap.category}</p>
@@ -234,8 +235,18 @@ class EventHandlers {
             <p><strong>Confidence:</strong> ${gap.confidence}</p>
             <p><strong>Description:</strong> ${gap.description || 'N/A'}</p>
             ${typeSpecific}
+            <p><a id="viewCodeLink" class="view-code-link" href="#">🔍 Click to view code</a></p>
         `;
         gapInfoDiv.style.display = 'block';
+
+        // Wire click after innerHTML is set (setTimeout 0 ensures DOM is ready)
+        const link = document.getElementById('viewCodeLink');
+        if (link) {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.stateManager.sendMessage('openSourceFile', { methodFqn: gap.method_fqn });
+            });
+        }
     }
 
     showSaveStatus(message: string, type: 'success' | 'error' | 'info'): void {

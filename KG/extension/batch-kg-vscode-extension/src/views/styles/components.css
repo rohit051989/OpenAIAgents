@@ -78,6 +78,22 @@
     color: var(--vscode-editor-background);
 }
 
+/* View code link inside gap info box */
+.view-code-link {
+    color: var(--vscode-textLink-foreground, #4ea6ff);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+}
+.view-code-link:hover {
+    text-decoration: underline;
+    color: var(--vscode-textLink-activeForeground, #6cb6ff);
+}
+
 /* Inline save status (shown under Save/Cancel buttons) */
 .save-status {
     margin-top: 8px;

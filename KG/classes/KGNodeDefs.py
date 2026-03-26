@@ -378,6 +378,7 @@ class IGFileNodeDef(IGNodeDef, GitMetadataNode):
 class IGSpringConfigNodeDef(IGFileNodeDef):
     """IG node: a Spring XML configuration file (labels: Node:File:SpringConfig)."""
     isMainConfig: bool = True       # True → src/main, False → src/test
+    allowedInImport: bool = True    # False → excluded from bean loading (not listed in batch-configuration.xml)
 
 
 @dataclass

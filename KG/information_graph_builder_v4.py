@@ -669,6 +669,66 @@ class InformationGraphBuilder:
         # Track created nodes
         self.created_nodes = set()
         
+        # Allowed Spring config import patterns per repo
+        # Maps repo_path -> set of resource path suffixes (e.g. {"config/spring-beans.xml"})
+        # Only populated for repos with has_batch_configuration: true
+        self.allowed_spring_config_patterns_by_repo: Dict[str, Set[str]] = {}
+        self._load_batch_configuration_imports()
+        
+    def _load_batch_configuration_imports(self):
+        """Parse batch-configuration.xml files for repos with has_batch_configuration: true.
+        Builds self.allowed_spring_config_patterns_by_repo with allowed resource path suffixes."""
+        for repo in self.config.get('repositories', []):
+            if not repo.get('has_batch_configuration', False):
+                continue
+            config_file = repo.get('batch_configuration_file_path', '')
+            if not config_file or not Path(config_file).is_file():
+                logger.warning(f"  batch_configuration_file_path not found for repo '{repo.get('name')}': {config_file}")
+                continue
+            
+            repo_path = repo['path']
+            allowed_patterns: Set[str] = set()
+            try:
+                tree = ET.parse(config_file)
+                root = tree.getroot()
+                # Handle both namespaced and non-namespaced <import> elements
+                import_elements = root.findall('{http://www.springframework.org/schema/beans}import') \
+                                 + root.findall('import')
+                for imp in import_elements:
+                    resource = imp.get('resource', '')
+                    # Strip classpath: / classpath*: prefix
+                    for prefix in ('classpath*:', 'classpath:'):
+                        if resource.startswith(prefix):
+                            resource = resource[len(prefix):]
+                            break
+                    resource = resource.strip().lstrip('/').replace('/', os.sep)
+                    if resource:
+                        allowed_patterns.add(resource)
+                self.allowed_spring_config_patterns_by_repo[repo_path] = allowed_patterns
+                logger.info(f"  Loaded {len(allowed_patterns)} allowed Spring config import(s) for repo '{repo.get('name')}'")
+                for p in sorted(allowed_patterns):
+                    logger.info(f"    - {p}")
+            except Exception as e:
+                logger.warning(f"  Failed to parse batch_configuration_file for repo '{repo.get('name')}': {e}")
+    
+    def _is_spring_config_allowed(self, file_path: Path) -> bool:
+        """Return True if this SpringConfig file is allowed to be loaded.
+        Files in repos without has_batch_configuration are always allowed (True).
+        Files in repos with has_batch_configuration are allowed only if their path
+        matches one of the imported resource patterns from batch-configuration.xml."""
+        if not self.allowed_spring_config_patterns_by_repo:
+            return True
+        file_str = str(file_path)
+        for repo_path, allowed_patterns in self.allowed_spring_config_patterns_by_repo.items():
+            # Check if this file belongs to this restricted repo
+            if file_str.startswith(repo_path) or file_str.startswith(repo_path.rstrip(os.sep)):
+                # File is in a restricted repo — check if it matches any allowed pattern
+                for pattern in allowed_patterns:
+                    if file_str.endswith(pattern):
+                        return True
+                return False  # In restricted repo but not in allowed list
+        return True  # Not in any restricted repo — always allowed
+        
     def _check_neo4j_memory(self):
         """Check Neo4j memory configuration and warn if inadequate."""
         try:
@@ -1097,7 +1157,9 @@ class InformationGraphBuilder:
 
         # Build the appropriate dataclass node based on file type
         if 'SpringConfig' in file_types:
-            node = IGSpringConfigNodeDef(**common, isMainConfig=not self._is_test_path(file_path))
+            allowed_in_import = self._is_spring_config_allowed(file_path)
+            node = IGSpringConfigNodeDef(**common, isMainConfig=not self._is_test_path(file_path),
+                                         allowedInImport=allowed_in_import)
         elif 'PomFile' in file_types:
             node = IGPomFileNodeDef(**common)
         elif 'PropertyFile' in file_types:
@@ -1110,7 +1172,7 @@ class InformationGraphBuilder:
         else:
             node = IGFileNodeDef(**common)
 
-        # SpringConfig has an extra isMainConfig property; all others share the same query
+        # SpringConfig has extra isMainConfig and allowedInImport properties; all others share the same query
         if isinstance(node, IGSpringConfigNodeDef):
             query = f"""
             MERGE (n:{labels} {{path: $path}})
@@ -1122,6 +1184,7 @@ class InformationGraphBuilder:
                 n.file_types = $file_types,
                 n.isMainConfig = $isMainConfig,
                 n.created_at = datetime()
+            SET n.allowedInImport = $allowedInImport
             WITH n
             MATCH (parent:Node {{path: $parent_path}})
             MERGE (parent)-[:CONTAINS]->(n)
@@ -1130,7 +1193,8 @@ class InformationGraphBuilder:
             session.run(query,
                 path=node.path, name=node.name, node_type=node.node_type,
                 extension=node.extension, size=node.size, file_types=node.file_types,
-                isMainConfig=node.isMainConfig, parent_path=parent_path
+                isMainConfig=node.isMainConfig, allowedInImport=node.allowedInImport,
+                parent_path=parent_path
             )
         else:
             query = f"""
@@ -1517,6 +1581,7 @@ class InformationGraphBuilder:
         query = """
         MATCH (f:SpringConfig)
         WHERE f.path IS NOT NULL AND f.isMainConfig = true
+          AND (f.allowedInImport IS NULL OR f.allowedInImport = true)
         RETURN f.path as path, f.name as name
         ORDER BY f.path
         """

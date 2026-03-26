@@ -88,9 +88,60 @@ export class GapAnalyzerPanel {
             case 'saveResolution':
                 await this.handleSaveResolution(message.gap, message.resolution);
                 break;
+            case 'openSourceFile':
+                await this.handleOpenSourceFile(message.methodFqn);
+                break;
             case 'testConnection':
                 await this.handleTestConnection();
                 break;
+        }
+    }
+
+    private async handleOpenSourceFile(methodFqn: string) {
+        try {
+            const result = await this.neo4jService.getJavaFileForMethod(methodFqn);
+            if (!result) {
+                vscode.window.showWarningMessage(
+                    `Could not find source file for method: ${methodFqn}\nThe JavaClass node may not have a 'path' property stored in the graph.`
+                );
+                return;
+            }
+
+            const fileUri = vscode.Uri.file(result.filePath);
+
+            // Check the file actually exists on disk before trying to open it
+            if (!fs.existsSync(result.filePath)) {
+                vscode.window.showWarningMessage(
+                    `Source file not found on disk: ${result.filePath}\nThe graph path may point to a different machine or the file was moved.`
+                );
+                return;
+            }
+
+            const doc = await vscode.workspace.openTextDocument(fileUri);
+            const editor = await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+
+            // Derive the simple method name from the FQN and scroll to it
+            const methodName = methodFqn.split('.').pop() ?? '';
+            console.info(`Opening file ${result.filePath} for method ${methodFqn} (simple name: ${methodName})`);
+            if (methodName) {
+                const text = doc.getText();
+                const lines = text.split('\n');
+                // Find the first line that declares this method (looks for the method name followed by '(')
+                const methodLine = lines.findIndex(line => {
+                    const trimmed = line.trim();
+                    return trimmed.includes(methodName + '(') &&
+                           !trimmed.startsWith('//') &&
+                           !trimmed.startsWith('*');
+                });
+                if (methodLine >= 0) {
+                    const pos = new vscode.Position(methodLine, 0);
+                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.AtTop);
+                    editor.selection = new vscode.Selection(pos, pos);
+                }
+            }
+        } catch (error: any) {
+            console.error('Error opening source file:', error);
+            vscode.window.showErrorMessage(`Error opening source file: ${error.message}`);
         }
     }
 

@@ -343,6 +343,32 @@ export class Neo4jService {
         }
     }
 
+    /**
+     * Given a method FQN (e.g. com.example.Foo.myMethod), return the absolute
+     * file-system path of the owning JavaClass and its FQN.
+     * Returns null when the class / path is not found in the graph.
+     */
+    async getJavaFileForMethod(methodFqn: string): Promise<{ filePath: string; classFqn: string } | null> {
+        const session = this.getSession();
+        console.log(`Querying graph for Java file of method: ${methodFqn}`);
+        try {
+            const result = await session.run(
+                `MATCH (jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod {fqn: $methodFqn})
+                 RETURN jc.path AS filePath, jc.fqn AS classFqn
+                 LIMIT 1`,
+                { methodFqn }
+            );
+            if (result.records.length === 0) { return null; }
+            const record = result.records[0];
+            const filePath = record.get('filePath');
+            const classFqn  = record.get('classFqn');
+            if (!filePath) { return null; }
+            return { filePath, classFqn };
+        } finally {
+            await session.close();
+        }
+    }
+
     async close(): Promise<void> {
         if (this.driver) {
             await this.driver.close();
