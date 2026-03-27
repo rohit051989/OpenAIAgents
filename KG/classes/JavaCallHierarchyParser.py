@@ -122,7 +122,7 @@ class JavaCallHierarchyParser:
                 for item in node.body:
                     if isinstance(item, javalang.tree.MethodDeclaration):
                         method_def = self._parse_method(item, class_info, source)
-                        class_info.methods[method_def.method_name] = method_def
+                        class_info.methods[method_def.method_key] = method_def
 
             self.classes[fqn] = class_info
             return class_info
@@ -274,19 +274,53 @@ class JavaCallHierarchyParser:
                     if type_node:
                         return_type = self._ts_get_text(type_node, source)
                     
+                    # Extract modifiers
+                    modifiers = []
+                    modifiers_node = self._ts_find_child_by_type(method_node, "modifiers")
+                    if modifiers_node:
+                        for mod_child in modifiers_node.children:
+                            mod_text = self._ts_get_text(mod_child, source).strip()
+                            if mod_text:
+                                modifiers.append(mod_text)
+
+                    # Extract parameters (formal_parameters > formal_parameter)
+                    parameters = []
+                    formal_params_node = self._ts_find_child_by_type(method_node, "formal_parameters")
+                    if formal_params_node:
+                        for param_node in self._ts_find_children_by_type(formal_params_node, "formal_parameter"):
+                            param_type_node = None
+                            param_name_node = None
+                            for child in param_node.children:
+                                if child.type == "identifier":
+                                    param_name_node = child
+                                elif child.type in (
+                                    "type_identifier", "generic_type", "array_type",
+                                    "integral_type", "floating_point_type", "boolean_type",
+                                    "void_type", "scoped_type_identifier"
+                                ):
+                                    param_type_node = child
+                            if param_type_node and param_name_node:
+                                param_type = self._ts_get_text(param_type_node, source)
+                                param_name = self._ts_get_text(param_name_node, source)
+                                parameters.append((param_type, param_name))
+
                     # Extract method calls from method body
-                    method_calls = self._ts_extract_method_calls(method_node, class_info, source)
+                    # Build param_types map from the extracted parameters so the
+                    # tree-sitter path can infer argument types at call sites.
+                    ts_param_types = {pname: ptype for ptype, pname in parameters}
+                    method_calls = self._ts_extract_method_calls(
+                        method_node, class_info, source, ts_param_types)
                     
                     # Create MethodDef WITH calls
                     method_def = MethodDef(
                         class_fqn=fqn,
                         method_name=method_name,
                         return_type=return_type,
-                        parameters=[],
-                        modifiers=[],
+                        parameters=parameters,
+                        modifiers=modifiers,
                         calls=method_calls
                     )
-                    class_info.methods[method_name] = method_def
+                    class_info.methods[method_def.method_key] = method_def
         
         # Extract fields (simplified)
         if class_body:
@@ -323,14 +357,17 @@ class JavaCallHierarchyParser:
         """Extract text from tree-sitter node"""
         return source[node.start_byte:node.end_byte]
     
-    def _ts_extract_method_calls(self, method_node, class_info: ClassInfo, source: str) -> List[MethodCall]:
+    def _ts_extract_method_calls(self, method_node, class_info: ClassInfo, source: str,
+                                  param_types: dict = None) -> List[MethodCall]:
         """
         Extract method invocations from method body using tree-sitter.
         Recursively searches for method_invocation nodes in the method body.
         """
         
         calls = []
-        
+        if param_types is None:
+            param_types = {}
+
         # Find method body
         method_body = self._ts_find_child_by_type(method_node, "block")
         if not method_body:
@@ -414,9 +451,10 @@ class JavaCallHierarchyParser:
                                 logger.info(f"      Available classes in cache: {len(self.classes)} (checking if {chained_target_class} is present: {chained_target_class in self.classes})")
                                 if chained_target_class in self.classes:
                                     chained_class_info = self.classes[chained_target_class]
-                                    logger.info(f"      Methods in {chained_target_class}: {list(chained_class_info.methods.keys())}")
-                                    if chained_method_name in chained_class_info.methods:
-                                        chained_method = chained_class_info.methods[chained_method_name]
+                                    logger.info(f"      Methods in {chained_target_class}: {[m.method_name for m in chained_class_info.methods.values()]}")
+                                    if chained_class_info.has_method_name(chained_method_name):
+                                        chained_method = chained_class_info.get_method_by_name_and_params(
+                                            chained_method_name, None)
                                         target_class = chained_method.return_type
                                         logger.info(f"      Found method! Return type: {target_class}")
                                         # Resolve return type to FQN
@@ -435,11 +473,14 @@ class JavaCallHierarchyParser:
                         target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
                 
                 logger.info(f" Inside ts_extract_method_calls   Adding method call: {method_name}, target_class: {target_class}, class_fqn: {class_info.fqn}")
+                # Extract argument types from the argument_list node
+                arg_types = self._infer_arg_types_ts(arg_list_node, source, param_types)
                 # Add the method call
                 calls.append(MethodCall(
                     target_class=target_class,
                     method_name=method_name,
-                    line_number=0
+                    line_number=0,
+                    argument_types=arg_types
                 ))
             
             # Recursively search children
@@ -547,16 +588,22 @@ class JavaCallHierarchyParser:
                     # Look up method and get return type
                     if target_class and target_class in self.classes:
                         target_class_info = self.classes[target_class]
-                        if method_name in target_class_info.methods:
-                            method_def = target_class_info.methods[method_name]
+                        if target_class_info.has_method_name(method_name):
+                            tracked_arg_types = self._infer_arg_types_javalang(
+                                node.arguments, param_types, local_var_types)
+                            method_def = target_class_info.get_method_by_name_and_params(
+                                method_name, tracked_arg_types)
                             return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
                             # Store with unique key (node object id)
                             method_return_types[id(node)] = return_type
                             logger.info(f"    Tracked: {qualifier}.{method_name}() returns {return_type}")
                 else:
                     # Method called on self
-                    if method_name in class_info.methods:
-                        method_def = class_info.methods[method_name]
+                    if class_info.has_method_name(method_name):
+                        tracked_arg_types = self._infer_arg_types_javalang(
+                            node.arguments, param_types, local_var_types)
+                        method_def = class_info.get_method_by_name_and_params(
+                            method_name, tracked_arg_types)
                         return_type = self._resolve_type(method_def.return_type, class_info.imports, class_info.package)
                         method_return_types[id(node)] = return_type
                         logger.info(f"    Tracked: {method_name}() returns {return_type}")
@@ -637,9 +684,10 @@ class JavaCallHierarchyParser:
                             logger.info(f"      Looking for method '{chained_method_name}' in '{chained_target_class}'")
                             if chained_target_class in self.classes:
                                 chained_class_info = self.classes[chained_target_class]
-                                logger.info(f"      Methods available: {list(chained_class_info.methods.keys())}")
-                                if chained_method_name in chained_class_info.methods:
-                                    chained_method = chained_class_info.methods[chained_method_name]
+                                logger.info(f"      Methods available: {[m.method_name for m in chained_class_info.methods.values()]}")
+                                if chained_class_info.has_method_name(chained_method_name):
+                                    chained_method = chained_class_info.get_method_by_name_and_params(
+                                        chained_method_name, None)
                                     target_class = chained_method.return_type
                                     logger.info(f"      Found! Return type: {target_class}")
                                     # Resolve return type to FQN
@@ -678,9 +726,12 @@ class JavaCallHierarchyParser:
                         logger.info(f"    Checking if we can track: method={method_name}, target_class={target_class}, in_cache={target_class in self.classes if target_class else 'N/A'}")
                         if target_class and target_class in self.classes:
                             target_class_info = self.classes[target_class]
-                            logger.info(f"    Target class has methods: {list(target_class_info.methods.keys())}")
-                            if method_name in target_class_info.methods:
-                                method_def = target_class_info.methods[method_name]
+                            logger.info(f"    Target class has methods: {[m.method_name for m in target_class_info.methods.values()]}")
+                            if target_class_info.has_method_name(method_name):
+                                call_arg_types = self._infer_arg_types_javalang(
+                                    node.arguments, param_types, local_var_types)
+                                method_def = target_class_info.get_method_by_name_and_params(
+                                    method_name, call_arg_types)
                                 return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
                                 last_method_with_qualifier[qualifier] = {
                                     'method_name': method_name,
@@ -703,8 +754,8 @@ class JavaCallHierarchyParser:
                             logger.info(f"    Checking if {return_type} has method {method_name}")
                             if return_type and return_type in self.classes:
                                 return_class_info = self.classes[return_type]
-                                logger.info(f"    {return_type} has methods: {list(return_class_info.methods.keys())}")
-                                if method_name in return_class_info.methods:
+                                logger.info(f"    {return_type} has methods: {[m.method_name for m in return_class_info.methods.values()]}")
+                                if return_class_info.has_method_name(method_name):
                                     target_class = return_type
                                     logger.info(f"    ✓ Chained call detected: {info['full_call']}.{method_name}() -> target: {target_class}")
                                     break
@@ -714,10 +765,13 @@ class JavaCallHierarchyParser:
                                 logger.info(f"    {return_type} not in cache or None")
                 
                 logger.info(f"    Inside extract_method_calls: Adding method call: {method_name}, target_class: {target_class}, class_fqn: {class_info.fqn}")
+                arg_types = self._infer_arg_types_javalang(
+                    node.arguments, param_types, local_var_types)
                 calls.append(MethodCall(
                     target_class=target_class,
                     method_name=method_name,
-                    line_number=0
+                    line_number=0,
+                    argument_types=arg_types
                 ))
 
             # Recursively search children
@@ -770,3 +824,148 @@ class JavaCallHierarchyParser:
             if i >= len(member_path) or member_path[i] != node:
                 return False
         return True
+
+    # ------------------------------------------------------------------
+    # Argument-type inference helpers
+    # ------------------------------------------------------------------
+
+    def _infer_arg_type_javalang(self, arg_node,
+                                  param_types: dict,
+                                  local_var_types: dict) -> Optional[str]:
+        """Best-effort inference of the Java type for a single call-site argument.
+
+        Covers the most common, statically obvious cases:
+          - Literals   → primitive / String type
+          - MemberReference with no qualifier (local var / param)
+          - ClassCreator (new Foo(...)) → class name
+          - Cast → the cast target type
+          - MethodInvocation → return type if resolvable from the parsed cache
+        Returns None when the type cannot be determined without full type inference.
+        """
+        if arg_node is None:
+            return None
+
+        # Literal: "hello", 42, 3.14f, true, null, 'c' …
+        if isinstance(arg_node, javalang.tree.Literal):
+            val = arg_node.value
+            if val == 'null':
+                return None
+            if val.startswith('"'):
+                return 'String'
+            if val.startswith("'"):
+                return 'char'
+            if val in ('true', 'false'):
+                return 'boolean'
+            if val.endswith('L') or val.endswith('l'):
+                return 'long'
+            if val.endswith('f') or val.endswith('F'):
+                return 'float'
+            if val.endswith('d') or val.endswith('D'):
+                return 'double'
+            if '.' in val:
+                return 'double'
+            return 'int'
+
+        # Simple variable / parameter / field reference
+        if isinstance(arg_node, javalang.tree.MemberReference):
+            if not arg_node.qualifier:
+                name = arg_node.member
+                t = param_types.get(name) or local_var_types.get(name)
+                return t  # may be None if not tracked
+            # qualified field access (e.g. this.field) — skip for now
+            return None
+
+        # new Foo(...) → type is Foo
+        if isinstance(arg_node, javalang.tree.ClassCreator):
+            if arg_node.type and hasattr(arg_node.type, 'name'):
+                return arg_node.type.name
+            return None
+
+        # (SomeType) expr → cast type
+        if isinstance(arg_node, javalang.tree.Cast):
+            if arg_node.type:
+                return self._get_type_name(arg_node.type)
+            return None
+
+        return None
+
+    def _infer_arg_types_javalang(self, arguments,
+                                   param_types: dict,
+                                   local_var_types: dict) -> List[Optional[str]]:
+        """Return a list of best-effort types for all call-site arguments."""
+        if not arguments:
+            return []
+        return [self._infer_arg_type_javalang(a, param_types, local_var_types)
+                for a in arguments]
+
+    def _infer_arg_types_ts(self, arg_list_node, source: str,
+                             param_types: dict) -> List[Optional[str]]:
+        """Best-effort argument type inference for tree-sitter call sites.
+
+        Recognises:
+          - string_literal                   → String
+          - decimal_integer_literal / integer_literal → int
+          - decimal_floating_point_literal   → double
+          - true / false                     → boolean
+          - null_literal                     → None
+          - identifier in param_types        → looked-up type
+          - object_creation_expression       → constructed class name
+          - cast_expression                  → cast target type
+          Everything else → None.
+        """
+        if arg_list_node is None:
+            return []
+
+        arg_types: List[Optional[str]] = []
+        for child in arg_list_node.children:
+            # Skip punctuation (, ) and whitespace nodes
+            if child.type in (',', '(', ')'):
+                continue
+            t = self._infer_single_arg_type_ts(child, source, param_types)
+            if child.type not in (',', '(', ')'):
+                arg_types.append(t)
+        return arg_types
+
+    def _infer_single_arg_type_ts(self, node, source: str,
+                                   param_types: dict) -> Optional[str]:
+        """Infer the type of a single tree-sitter argument expression node."""
+        ntype = node.type
+        if ntype == 'string_literal':
+            return 'String'
+        if ntype in ('decimal_integer_literal', 'integer_literal', 'hex_integer_literal',
+                     'octal_integer_literal', 'binary_integer_literal'):
+            return 'int'
+        if ntype in ('decimal_floating_point_literal', 'hex_floating_point_literal'):
+            return 'double'
+        if ntype == 'true' or ntype == 'false':
+            return 'boolean'
+        if ntype == 'null_literal':
+            return None
+        if ntype == 'character_literal':
+            return 'char'
+        if ntype == 'long_literal':
+            return 'long'
+        if ntype == 'float_literal':
+            return 'float'
+
+        # Simple name reference → look up in param/local map
+        if ntype == 'identifier':
+            name = self._ts_get_text(node, source)
+            return param_types.get(name)
+
+        # (Type) expr
+        if ntype == 'cast_expression':
+            # first significant child is the type
+            for child in node.children:
+                if child.type not in ('(', ')'):
+                    return self._ts_get_text(child, source).split('<')[0].split('.')[-1]
+
+        # new Foo(...)
+        if ntype == 'object_creation_expression':
+            type_node = self._ts_find_child_by_type(node, 'type_identifier')
+            if not type_node:
+                type_node = self._ts_find_child_by_type(node, 'scoped_type_identifier')
+            if type_node:
+                return self._ts_get_text(type_node, source).split('<')[0].split('.')[-1]
+
+        return None

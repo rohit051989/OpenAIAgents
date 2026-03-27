@@ -1,5 +1,5 @@
 from classes.DataClasses import ClassInfo, MethodDef, ShellScriptExecution
-
+from classes.path_utils import extract_java_method_source as _extract_java_method_source
 
 import re
 import os
@@ -176,7 +176,11 @@ class ShellScriptAnalyzer:
             try:
                 with open(class_info.source_path, 'r', encoding='utf-8') as f:
                     source = f.read()
-                method_source = self._extract_method_source(source, method_def.method_name)
+                method_source = self._extract_method_source(
+                    source,
+                    method_def.method_name,
+                    [ptype for ptype, _ in method_def.parameters],
+                )
             except:
                 return None
 
@@ -263,29 +267,7 @@ class ShellScriptAnalyzer:
             args = [arg.strip().strip('"\'') for arg in args_str.split(',')]
         return args
 
-    def _extract_method_source(self, file_content: str, method_name: str) -> str:
-        """Extract method source from file with improved pattern."""
-        # Simplified pattern that's more permissive with whitespace and modifiers
-        # Matches: [modifiers] returnType methodName(params) [throws ...] {
-        pattern = rf'(public|private|protected)\s+[\w<>,\[\]\s]+\s+{re.escape(method_name)}\s*\([^)]*\)[^{{]*{{'
-        match = re.search(pattern, file_content, re.DOTALL)
-        
-        if not match:
-            return ""
-        
-        # Find the matching closing brace
-        start_pos = match.end() - 1  # Position of opening brace
-        brace_count = 1
-        pos = start_pos + 1
-        
-        while pos < len(file_content) and brace_count > 0:
-            if file_content[pos] == '{':
-                brace_count += 1
-            elif file_content[pos] == '}':
-                brace_count -= 1
-            pos += 1
-        
-        if brace_count == 0:
-            return file_content[match.start():pos]
-        
-        return ""
+    def _extract_method_source(self, file_content: str, method_name: str,
+                                param_types=None) -> str:
+        """Extract method source from file - handles nested braces and overloads."""
+        return _extract_java_method_source(file_content, method_name, param_types)

@@ -49,6 +49,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from classes.KGNodeDefs import IGRepositoryNodeDef, IGFolderNodeDef, IGFileNodeDef, ResourceNodeDef
+from classes.path_utils import to_relative_path
 from neo4j import GraphDatabase
 import uuid
 import sqlparse
@@ -109,8 +110,16 @@ class DBRepoScanner:
         # Track created nodes to prevent duplicates
         self.created_nodes: Set[str] = set()
         
-        # Collect resources for bulk creation (performance optimization)
+        # Collected resources for bulk creation (performance optimization)
         self.collected_resources: List[Dict] = []
+    
+    def _to_relative_path(self, abs_path: Path) -> str:
+        """Convert absolute path to repo-relative graph path."""
+        return to_relative_path(
+            abs_path,
+            self.config.get('repositories', []),
+            self.config.get('root_directory', '')
+        )
     
     def scan_db_repositories(self):
         """
@@ -168,10 +177,16 @@ class DBRepoScanner:
             session: Neo4j session to reuse
         """
         repo_path_obj = Path(repo_path)
-        repo_path_str = str(repo_path_obj.absolute())
+        repo_abs_str = str(repo_path_obj.absolute())
+        repo_rel_str = self._to_relative_path(repo_path_obj)
+        
+        # Get git metadata from config for this repo
+        repo_cfg = next(
+            (r for r in self.config.get('repositories', []) if r['name'] == repo_name),
+            {}
+        )
         
         # Ensure Repository node exists (will be used as parent for children)
-        # This creates the Repository node before shot1_create_tree runs
         logger.info(f"    Building tree structure for db_repo")
         
         query = """
@@ -179,28 +194,32 @@ class DBRepoScanner:
         ON CREATE SET 
             n.name = $name,
             n.node_type = 'Repository',
+            n.repoName = $repoName,
+            n.repoUrl = $repoUrl,
+            n.branchName = $branchName,
+            n.repoType = $repoType,
             n.created_at = datetime()
+        SET n.repoUrl = $repoUrl, n.branchName = $branchName
         RETURN n
         """
         
         try:
-            repo_node = IGRepositoryNodeDef(
-                path=repo_path_str,
-                name=repo_path_obj.name,
-                node_type='Repository'
-            )
             session.run(query,
-                path=repo_node.path,
-                name=repo_node.name
+                path=repo_rel_str,
+                name=repo_path_obj.name,
+                repoName=repo_cfg.get('name', repo_name),
+                repoUrl=repo_cfg.get('repo_url', ''),
+                branchName=repo_cfg.get('branch_name', ''),
+                repoType=repo_cfg.get('type', 'db_repo')
             )
-            self.created_nodes.add(repo_path_str)
+            self.created_nodes.add(repo_rel_str)
             logger.info(f"      Repository node ensured: {repo_name}")
         except Exception as e:
             logger.warning(f"      Failed to create Repository node: {e}")
             return
         
         # Recursively scan and create tree
-        self._scan_recursive(repo_path_obj, repo_path_str, repo_name, session, depth=0)
+        self._scan_recursive(repo_path_obj, repo_rel_str, repo_name, session, depth=0)
     
     def _scan_recursive(self, current_path: Path, parent_path_str: str, repo_name: str, session, depth: int = 0):
         """
@@ -225,10 +244,11 @@ class DBRepoScanner:
             return
         
         for item in items:
-            item_path_str = str(item.absolute())
+            item_abs_str = str(item.absolute())
+            item_rel_str = self._to_relative_path(item)
             
             # Skip if already created
-            if item_path_str in self.created_nodes:
+            if item_rel_str in self.created_nodes:
                 continue
             
             # Skip ignored directories
@@ -252,11 +272,11 @@ class DBRepoScanner:
                 self._create_folder_node(item, parent_path_str, session)
                 self.stats['folders_created'] += 1
                 
-                # Recurse into subfolder
-                self._scan_recursive(item, item_path_str, repo_name, session, depth + 1)
+                # Recurse into subfolder using relative path as parent
+                self._scan_recursive(item, item_rel_str, repo_name, session, depth + 1)
             
-            # Mark as created
-            self.created_nodes.add(item_path_str)
+            # Mark as created (using relative path)
+            self.created_nodes.add(item_rel_str)
     
     def _create_folder_node(self, folder_path: Path, parent_path: str, session):
         """
@@ -267,7 +287,7 @@ class DBRepoScanner:
             parent_path: Parent node path
             session: Neo4j session
         """
-        path_str = str(folder_path.absolute())
+        path_str = self._to_relative_path(folder_path)
 
         folder_node = IGFolderNodeDef(
             path=path_str,
@@ -308,7 +328,7 @@ class DBRepoScanner:
             repo_name: Repository name
             session: Neo4j session
         """
-        path_str = str(file_path.absolute())
+        path_str = self._to_relative_path(file_path)
         
         try:
             file_size = file_path.stat().st_size

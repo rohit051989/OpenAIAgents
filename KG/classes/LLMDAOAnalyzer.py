@@ -132,7 +132,7 @@ class LLMDAOAnalyzer:
 
     def _create_analysis_prompt(self, class_info: ClassInfo, source_code: str) -> str:
         """Create prompt for LLM analysis"""
-        method_list = "\n".join([f"  - {name}: {m.signature}" for name, m in class_info.methods.items()])
+        method_list = "\n".join([f"  - {m.method_name}: {m.signature}" for m in class_info.methods.values()])
 
         prompt = f"""You are a Java code analyzer specializing in database operations. Analyze the following DAO class and identify all database operations.
 

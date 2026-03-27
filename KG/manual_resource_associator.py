@@ -131,7 +131,54 @@ class ManualResourceAssociator:
     
     def close(self):
         self.driver.close()
-    
+
+    def _resolve_method_fqn(self, method_fqn: str) -> Optional[str]:
+        """
+        Resolve a method_fqn from the YAML mapping to the actual FQN stored in Neo4j.
+
+        Tries exact match first.  Falls back to classFqn + methodName lookup when the
+        supplied FQN has no parameter list — this keeps existing mapping files working
+        after the FQN format change (name-only → name(ParamTypes)).
+
+        Returns the resolved FQN string, or None if not found.
+        """
+        with self.driver.session(database=self.database) as session:
+            # 1. Exact match
+            result = session.run(
+                "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.fqn AS fqn LIMIT 1",
+                fqn=method_fqn)
+            record = result.single()
+            if record:
+                return record['fqn']
+
+            # 2. Fallback — only when FQN has no parameter list (old format)
+            if '(' in method_fqn:
+                return None  # Already has signature, exact mismatch is a real error
+
+            last_dot = method_fqn.rfind('.')
+            if last_dot == -1:
+                return None
+            class_fqn_part = method_fqn[:last_dot]
+            method_name_part = method_fqn[last_dot + 1:]
+
+            result = session.run(
+                "MATCH (m:JavaMethod {classFqn: $classFqn, methodName: $methodName}) "
+                "RETURN m.fqn AS fqn",
+                classFqn=class_fqn_part, methodName=method_name_part)
+            records = [r['fqn'] for r in result]
+
+            if len(records) == 1:
+                logger.info(f"     FQN fallback resolved: '{method_fqn}' -> '{records[0]}'")
+                return records[0]
+            elif len(records) > 1:
+                logger.warning(
+                    f"     Ambiguous FQN: '{method_fqn}' matches {len(records)} overloads: {records}")
+                logger.warning(
+                    f"     Hint: update method_fqn to include parameter types, e.g. '{records[0]}'. "
+                    f"Using first match for now.")
+                return records[0]
+            return None
+
     def associate_db_operation(self, method_fqn: str, operation_type: str, table_name: str, 
                                 schema_name: str = None, confidence: str = "HIGH",
                                 tasklet_fqn: str = None, reader_fqn: str = None,
@@ -157,15 +204,14 @@ class ManualResourceAssociator:
             True if successful, False otherwise
         """
         try:
-            # Verify method exists
+            # Resolve method FQN (with fallback for old-format mapping files)
+            method_fqn = self._resolve_method_fqn(method_fqn)
+            if not method_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
             with self.driver.session(database=self.database) as session:
-                check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
-                result = session.run(check_query, fqn=method_fqn)
-                if not result.single():
-                    logger.error(f"   Method not found: {method_fqn}")
-                    self.stats['errors'] += 1
-                    return False
-                
                 # Normalize values
                 table_name = table_name.upper()
                 operation_type = operation_type.upper()
@@ -218,31 +264,55 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with dbOperations
-                    
-                    # Find Step by bean_id (stored in implBean property)
-                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+
+                    # Find Step by bean_id — TASKLET steps use implBean, CHUNK steps use
+                    # readerBean / writerBean / processorBean; check all four.
+                    check_step_query = """
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    RETURN s.name as name
+                    """
                     result = session.run(check_step_query, beanId=bean_id)
                     step_record = result.single()
                     if not step_record:
-                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        logger.error(f"     Step not found with bean_id (implBean/readerBean/writerBean/processorBean): {bean_id}")
                         self.stats['errors'] += 1
                         return False
-                    
+
                     update_step_query = """
-                    MATCH (s:Step {implBean: $beanId})
-                    SET s.stepDbOperations = CASE
-                        WHEN s.stepDbOperations IS NULL THEN [$opValue]
-                        ELSE s.stepDbOperations + [$opValue]
-                    END,
-                    s.stepDbOperationCount = size(s.stepDbOperations),
-                    s.manuallyResolvedDbOps = true
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    WITH s,
+                         CASE
+                           WHEN s.stepDbOperations IS NULL THEN [$opValue]
+                           WHEN any(op IN s.stepDbOperations WHERE
+                                    op STARTS WITH $opType AND
+                                    (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN'))
+                           THEN [op IN s.stepDbOperations |
+                                   CASE WHEN (op STARTS WITH $opType AND
+                                              (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN'))
+                                        THEN $opValue ELSE op END]
+                           ELSE s.stepDbOperations + [$opValue]
+                         END AS newOps
+                    SET s.stepDbOperations = newOps,
+                        s.stepDbOperationCount = size(newOps),
+                        s.manuallyResolvedDbOps = true
                     """
-                    session.run(update_step_query, beanId=bean_id, opValue=db_op_value)
+                    session.run(update_step_query, beanId=bean_id, opValue=db_op_value,
+                                opType=operation_type + ":")
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {db_op_value}")
                     # Track this method + bean combo as class-level configured (generic method)
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
+
+                    # Also update method node so trace no longer reports it as grey area
+                    session.run(
+                        "MATCH (m:JavaMethod {fqn: $fqn}) SET m.furtherAnalysisRequired = false",
+                        fqn=method_fqn)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = """
@@ -296,15 +366,14 @@ class ManualResourceAssociator:
             True if successful, False otherwise
         """
         try:
-            # Verify method exists
+            # Resolve method FQN (with fallback for old-format mapping files)
+            method_fqn = self._resolve_method_fqn(method_fqn)
+            if not method_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
             with self.driver.session(database=self.database) as session:
-                check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
-                result = session.run(check_query, fqn=method_fqn)
-                if not result.single():
-                    logger.error(f"   Method not found: {method_fqn}")
-                    self.stats['errors'] += 1
-                    return False
-                
                 resource_type = 'FUNCTION' if is_function else 'PROCEDURE'
                 unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
                 
@@ -382,31 +451,55 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with procedureCalls
-                    
-                    # Find Step by bean_id (stored in implBean property)
-                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+
+                    # Find Step by bean_id — TASKLET steps use implBean, CHUNK steps use
+                    # readerBean / writerBean / processorBean; check all four.
+                    check_step_query = """
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    RETURN s.name as name
+                    """
                     result = session.run(check_step_query, beanId=bean_id)
                     step_record = result.single()
                     if not step_record:
-                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        logger.error(f"     Step not found with bean_id (implBean/readerBean/writerBean/processorBean): {bean_id}")
                         self.stats['errors'] += 1
                         return False
-                    
+
                     update_step_query = """
-                    MATCH (s:Step {implBean: $beanId})
-                    SET s.stepProcedureCalls = CASE
-                        WHEN s.stepProcedureCalls IS NULL THEN [$procValue]
-                        ELSE s.stepProcedureCalls + [$procValue]
-                    END,
-                    s.stepProcedureCallCount = size(s.stepProcedureCalls),
-                    s.manuallyResolvedProcCalls = true
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    WITH s,
+                         CASE
+                           WHEN s.stepProcedureCalls IS NULL THEN [$procValue]
+                           WHEN any(proc IN s.stepProcedureCalls WHERE
+                                    proc CONTAINS 'DYNAMIC_PROCEDURE' OR
+                                    (proc CONTAINS 'UNKNOWN' AND proc CONTAINS $rtypeToken))
+                           THEN [proc IN s.stepProcedureCalls |
+                                   CASE WHEN (proc CONTAINS 'DYNAMIC_PROCEDURE' OR
+                                              (proc CONTAINS 'UNKNOWN' AND proc CONTAINS $rtypeToken))
+                                        THEN $procValue ELSE proc END]
+                           ELSE s.stepProcedureCalls + [$procValue]
+                         END AS newCalls
+                    SET s.stepProcedureCalls = newCalls,
+                        s.stepProcedureCallCount = size(newCalls),
+                        s.manuallyResolvedProcCalls = true
                     """
-                    session.run(update_step_query, beanId=bean_id, procValue=proc_value)
+                    session.run(update_step_query, beanId=bean_id, procValue=proc_value,
+                                rtypeToken=f":{resource_type}:")
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
                     logger.info(f"     Added: {proc_value}")
                     # Track this method + bean combo as class-level configured (generic method)
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
+
+                    # Also update method node so trace no longer reports it as grey area
+                    session.run(
+                        "MATCH (m:JavaMethod {fqn: $fqn}) SET m.furtherAnalysisRequired = false",
+                        fqn=method_fqn)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = """
@@ -469,15 +562,14 @@ class ManualResourceAssociator:
             True if successful, False otherwise
         """
         try:
-            # Verify method exists
+            # Resolve method FQN (with fallback for old-format mapping files)
+            method_fqn = self._resolve_method_fqn(method_fqn)
+            if not method_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
             with self.driver.session(database=self.database) as session:
-                check_query = "MATCH (m:JavaMethod {fqn: $fqn}) RETURN m.name as name"
-                result = session.run(check_query, fqn=method_fqn)
-                if not result.single():
-                    logger.error(f"   Method not found: {method_fqn}")
-                    self.stats['errors'] += 1
-                    return False
-                
                 # Generate unique ID for new resources
                 unique_id = f"RES_SCRIPT_{uuid.uuid4().hex[:8].upper()}"
                 
@@ -556,24 +648,39 @@ class ManualResourceAssociator:
                         return False
                     
                     # Update Step node with shellExecutions
-                    
-                    # Find Step by bean_id (stored in implBean property)
-                    check_step_query = "MATCH (s:Step {implBean: $beanId}) RETURN s.name as name"
+
+                    # Find Step by bean_id — TASKLET steps use implBean, CHUNK steps use
+                    # readerBean / writerBean / processorBean; check all four.
+                    check_step_query = """
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    RETURN s.name as name
+                    """
                     result = session.run(check_step_query, beanId=bean_id)
                     step_record = result.single()
                     if not step_record:
-                        logger.error(f"     Step not found with implBean: {bean_id}")
+                        logger.error(f"     Step not found with bean_id (implBean/readerBean/writerBean/processorBean): {bean_id}")
                         self.stats['errors'] += 1
                         return False
-                    
+
                     update_step_query = """
-                    MATCH (s:Step {implBean: $beanId})
-                    SET s.stepShellExecutions = CASE
-                        WHEN s.stepShellExecutions IS NULL THEN [$shellValue]
-                        ELSE s.stepShellExecutions + [$shellValue]
-                    END,
-                    s.stepShellExecutionCount = size(s.stepShellExecutions),
-                    s.manuallyResolvedShellExecs = true
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    WITH s,
+                         CASE
+                           WHEN s.stepShellExecutions IS NULL THEN [$shellValue]
+                           WHEN any(exec IN s.stepShellExecutions WHERE
+                                    exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'DYNAMIC')
+                           THEN [exec IN s.stepShellExecutions |
+                                   CASE WHEN (exec CONTAINS 'UNKNOWN' OR exec CONTAINS 'DYNAMIC')
+                                        THEN $shellValue ELSE exec END]
+                           ELSE s.stepShellExecutions + [$shellValue]
+                         END AS newExecs
+                    SET s.stepShellExecutions = newExecs,
+                        s.stepShellExecutionCount = size(newExecs),
+                        s.manuallyResolvedShellExecs = true
                     """
                     session.run(update_step_query, beanId=bean_id, shellValue=shell_exec_value)
                     logger.info(f"     Step updated: {step_record['name']} (beanId: {bean_id})")
@@ -581,6 +688,22 @@ class ManualResourceAssociator:
                     # Track this method + bean combo as class-level configured (generic method)
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
+
+                    # Also update the method node so trace_unknown_operations no longer
+                    # reports it as a grey area (class-level methods stay "unresolved" on
+                    # the node otherwise, causing false alarms after manual resolution).
+                    update_method_query = """
+                    MATCH (m:JavaMethod {fqn: $fqn})
+                    SET m.shellExecutions = CASE
+                        WHEN $shellValue IN m.shellExecutions THEN m.shellExecutions
+                        WHEN size(m.shellExecutions) = 1 AND NOT m.shellExecutions[0] STARTS WITH 'RESOLVED:'
+                        THEN [$shellValue]
+                        ELSE [exec IN m.shellExecutions WHERE exec STARTS WITH 'RESOLVED:'] + [$shellValue]
+                    END,
+                    m.furtherAnalysisRequired = false
+                    """
+                    session.run(update_method_query, fqn=method_fqn, shellValue=shell_exec_value)
+                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     # Strategy: Replace grey area entries with RESOLVED entry (idempotent)
@@ -618,7 +741,10 @@ class ManualResourceAssociator:
         MATCH (s:Step)
         RETURN s.name as stepName, 
                s.stepKind as stepKind,
-               s.implBean as stepBeanId,
+               s.implBean as implBean,
+               s.readerBean as readerBean,
+               s.processorBean as processorBean,
+               s.writerBean as writerBean,
                elementId(s) as stepId,
                s.stepDbOperations as stepDbOps,
                s.stepProcedureCalls as stepProcCalls,
@@ -637,7 +763,14 @@ class ManualResourceAssociator:
             step_name = step_data['stepName']
             step_kind = step_data['stepKind']
             step_id = step_data['stepId']
-            step_bean_id = step_data.get('stepBeanId')
+            # Collect all non-null beans for this step (TASKLET has implBean;
+            # CHUNK has readerBean/processorBean/writerBean)
+            step_bean_ids = {b for b in [
+                step_data.get('implBean'),
+                step_data.get('readerBean'),
+                step_data.get('processorBean'),
+                step_data.get('writerBean'),
+            ] if b}
             
             if not step_kind:
                 continue
@@ -730,11 +863,14 @@ class ManualResourceAssociator:
                 method_fqn = entry_method.get('methodFqn')
                 
                 # Check if this method was configured with class-level update (generic method) for THIS STEP
-                # Use composite key: method_fqn|bean_id
+                # Use composite key: method_fqn|bean_id — check against ALL beans of this step
+                # (CHUNK steps have reader/processor/writer beans, not implBean)
                 # If so, skip its operations (already collected from Step properties)
                 # If not, include ALL operations (even UNKNOWN/DYNAMIC) for human review
-                composite_key = f"{method_fqn}|{step_bean_id}" if method_fqn and step_bean_id else None
-                is_class_level_method = composite_key in self.class_level_methods if composite_key else False
+                is_class_level_method = method_fqn is not None and any(
+                    f"{method_fqn}|{bid}" in self.class_level_methods
+                    for bid in step_bean_ids
+                )
                 
                 if not is_class_level_method:
                     # Add operations from entry method itself (include UNKNOWN/DYNAMIC)
@@ -777,11 +913,13 @@ class ManualResourceAssociator:
                             queue.append(called_id)
                             
                             # Check if this called method was configured with class-level update for THIS STEP
-                            # Use composite key: method_fqn|bean_id
+                            # Use composite key: method_fqn|bean_id — check against ALL beans of this step
                             # If so, skip its operations (already handled at Step level)
                             # If not, include ALL operations (even UNKNOWN/DYNAMIC)
-                            called_composite_key = f"{called_fqn}|{step_bean_id}" if called_fqn and step_bean_id else None
-                            is_class_level_called = called_composite_key in self.class_level_methods if called_composite_key else False
+                            is_class_level_called = called_fqn is not None and any(
+                                f"{called_fqn}|{bid}" in self.class_level_methods
+                                for bid in step_bean_ids
+                            )
                             
                             if not is_class_level_called:
                                 # Collect operations from called method (include UNKNOWN/DYNAMIC)

@@ -22,6 +22,9 @@ Usage:
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -57,6 +60,7 @@ class MethodCall:
     target_class: Optional[str]  # Fully qualified or simple name
     method_name: str
     line_number: int = 0
+    argument_types: List[Optional[str]] = field(default_factory=list)  # Best-effort types of call-site arguments
 
 
 @dataclass
@@ -75,13 +79,23 @@ class MethodDef:
     shell_executions: List['ShellScriptExecution'] = field(default_factory=list)
     
     @property
+    def method_key(self) -> str:
+        """Unique key for this method within its class, incorporating parameter types to
+        support overloaded methods (same name, different signatures).
+        Format: ``methodName(Type1,Type2)``
+        """
+        param_types = ",".join(ptype for ptype, _ in self.parameters)
+        return f"{self.method_name}({param_types})"
+
+    @property
     def signature(self) -> str:
         params = ", ".join([f"{ptype} {pname}" for ptype, pname in self.parameters])
         return f"{self.return_type} {self.method_name}({params})"
     
     @property
     def fqn(self) -> str:
-        return f"{self.class_fqn}.{self.method_name}"
+        """Fully-qualified, overload-unique identifier: ``{class_fqn}.{method_key}``"""
+        return f"{self.class_fqn}.{self.method_key}"
 
     @property
     def dbOperationCount(self) -> int:
@@ -107,7 +121,7 @@ class ClassInfo(GitMetadataNode):
     extends: Optional[str] = None
     is_interface: bool = False  # True if this is an interface, False if it's a class
     fields: Dict[str, str] = field(default_factory=dict)  # field_name -> type
-    methods: Dict[str, MethodDef] = field(default_factory=dict)  # method_name -> MethodDef
+    methods: Dict[str, MethodDef] = field(default_factory=dict)  # method_key -> MethodDef  (key = method_name(ParamType1,ParamType2))
     imports: List[str] = field(default_factory=list)
     called_classes: Set[str] = field(default_factory=set)  # FQNs of classes this class calls
 
@@ -123,6 +137,86 @@ class ClassInfo(GitMetadataNode):
     @property
     def method_count(self) -> int:
         return len(self.methods)
+
+    # ------------------------------------------------------------------
+    # Overload-aware method lookup helpers
+    # ------------------------------------------------------------------
+
+    def has_method_name(self, name: str) -> bool:
+        """Return True if any overload of *name* exists in this class."""
+        return any(m.method_name == name for m in self.methods.values())
+
+    def get_methods_by_name(self, name: str) -> List[MethodDef]:
+        """Return all overloads of *name* (may be empty)."""
+        return [m for m in self.methods.values() if m.method_name == name]
+
+    def get_first_method_by_name(self, name: str) -> Optional[MethodDef]:
+        """Return the first overload of *name*, or None if not found."""
+        for m in self.methods.values():
+            if m.method_name == name:
+                return m
+        return None
+
+    def get_method_by_name_and_params(self, name: str,
+                                      arg_types: Optional[List[Optional[str]]] = None) -> Optional[MethodDef]:
+        """Return the best-matching overload of *name* for the given call-site argument types.
+
+        Matching priority:
+        1. Name + param count + every non-None arg type matches the declared param type
+        2. Name + param count only (when arg types are all None or count doesn't help)
+        3. First overload with that name (last-resort fallback)
+
+        Returns None if no overload with that name exists.
+        """
+        candidates = [m for m in self.methods.values() if m.method_name == name]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # No argument type information – cannot distinguish overloads
+        if not arg_types:
+            logger.debug(f"Overload ambiguity for '{name}' ({len(candidates)} overloads): "
+                         f"no arg types available, using first match")
+            return candidates[0]
+
+        # Narrow by parameter count
+        by_count = [m for m in candidates if len(m.parameters) == len(arg_types)]
+        if not by_count:
+            # No overload matches the call-site arity; fall back
+            logger.debug(f"Overload ambiguity for '{name}': no param-count match "
+                         f"(call has {len(arg_types)} args), using first match")
+            return candidates[0]
+        if len(by_count) == 1:
+            return by_count[0]
+
+        # Score each count-matching candidate: count how many non-None arg types
+        # match the corresponding declared parameter type (simple-name comparison,
+        # ignoring generics and fully-qualified prefixes).
+        def _simple(t: Optional[str]) -> str:
+            """Strip package prefix and generic suffix for loose comparison."""
+            if not t:
+                return ""
+            return t.split('.')[-1].split('<')[0]
+
+        def score(m: MethodDef) -> int:
+            s = 0
+            for (ptype, _), atype in zip(m.parameters, arg_types):
+                if atype is not None and _simple(ptype) == _simple(atype):
+                    s += 1
+            return s
+
+        scores = [(score(m), m) for m in by_count]
+        best_score = max(s for s, _ in scores)
+        best_matches = [m for s, m in scores if s == best_score]
+
+        if len(best_matches) == 1:
+            return best_matches[0]
+
+        # Still ambiguous – log and return the first
+        logger.debug(f"Overload ambiguity for '{name}' unresolved after type scoring "
+                     f"(arg_types={arg_types}), using first match")
+        return best_matches[0]
 
 
 @dataclass

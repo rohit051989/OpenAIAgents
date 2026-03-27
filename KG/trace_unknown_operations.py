@@ -69,7 +69,10 @@ def trace_step_operations(step_name, database):
         MATCH (s:Step {name: $stepName})
         RETURN s.name as name,
                s.stepKind as kind,
-               s.implBean as beanId,
+               s.implBean as implBean,
+               s.readerBean as readerBean,
+               s.writerBean as writerBean,
+               s.processorBean as processorBean,
                elementId(s) as stepId,
                s.stepDbOperations as dbOps,
                s.stepProcedureCalls as procCalls,
@@ -86,7 +89,16 @@ def trace_step_operations(step_name, database):
         step_id = step_record['stepId']
         
         print(f"\nStep Kind: {step_kind}")
-        print(f"Bean ID: {step_record['beanId']}")
+        bean_parts = []
+        if step_record['implBean']:
+            bean_parts.append(f"implBean={step_record['implBean']}")
+        if step_record['readerBean']:
+            bean_parts.append(f"readerBean={step_record['readerBean']}")
+        if step_record['processorBean']:
+            bean_parts.append(f"processorBean={step_record['processorBean']}")
+        if step_record['writerBean']:
+            bean_parts.append(f"writerBean={step_record['writerBean']}")
+        print(f"Bean ID(s): {', '.join(bean_parts) if bean_parts else 'N/A'}")
         
         # Show Step-level operations
         print("\n" + "-"*80)

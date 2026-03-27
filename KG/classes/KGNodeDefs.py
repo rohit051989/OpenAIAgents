@@ -312,7 +312,9 @@ class CriticalPathSignatureNodeDef:
 @dataclass
 class IGNodeDef:
     """IG base: the 'Node' super-label applied to every entry in the IG file tree."""
-    path: str = ""                  # Absolute path — unique key in the graph
+    path: str = ""                  # Repo-relative path — unique key in the graph
+                                    # Format: {repo_name}/{forward/slash/relative/path}
+                                    # e.g.  Test_Code_repo/src/main/java/com/foo/Bar.java
     name: str = ""
     node_type: str = ""             # Repository | Project | Folder | File | Package
 
@@ -320,7 +322,10 @@ class IGNodeDef:
 @dataclass
 class IGRepositoryNodeDef(IGNodeDef):
     """IG node: a git repository root folder (label: Node:Repository)."""
-    pass
+    repoName: str = ""          # Repository name from config
+    repoUrl: str = ""           # Remote git URL (e.g. https://github.com/org/repo.git)
+    branchName: str = ""        # Branch being scanned (e.g. main)
+    repoType: str = ""          # code_repo | db_repo
 
 
 @dataclass

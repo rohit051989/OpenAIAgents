@@ -38,6 +38,8 @@ import re
 # Import analyzers
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from classes.DataClasses import ClassInfo, MethodDef
+from classes.path_utils import param_types_from_method_fqn as _param_types_from_fqn
+from classes.path_utils import to_absolute_path as _path_to_absolute
 
 import logging
 
@@ -95,6 +97,14 @@ class ShellExecutionEnricher:
         if self.driver:
             self.driver.close()
     
+    def _to_absolute_path(self, relative_path: str) -> str:
+        """Convert repo-relative graph path to absolute local filesystem path."""
+        return _path_to_absolute(
+            relative_path,
+            self.config.get('repositories', []),
+            self.config.get('root_directory', '')
+        )
+
     def _get_shell_executor_classes(self) -> List[Dict]:
         """
         Query Neo4j for Shell Executor classes.
@@ -119,7 +129,7 @@ class ShellExecutionEnricher:
                 classes.append({
                     'class_fqn': record['classFqn'],
                     'class_name': record['className'],
-                    'path': record['path'],
+                    'path': self._to_absolute_path(record['path']),
                     'package': record['package']
                 })
             
@@ -187,11 +197,11 @@ class ShellExecutionEnricher:
             method_name = method['name']
             
             # Find method in ClassInfo.methods dict
-            if method_name not in class_info.methods:
+            if not class_info.has_method_name(method_name):
                 logger.warning(f"  Method {method_name} not found in ClassInfo")
                 return []
             
-            method_def = class_info.methods[method_name]
+            method_def = class_info.get_method_by_name_and_params(method_name, None)
             
             # Call analyzer with pre-loaded method source
             shell_exec = self.shell_analyzer.analyze_method(method_def, class_info, method_source)
@@ -215,8 +225,10 @@ class ShellExecutionEnricher:
                 confidence = 'LOW'
             elif self._is_grey_area_script_name(script_name, method_source):
                 # Script name looks suspicious/incomplete - needs manual review
+                # Preserve original name in reason but normalize script_name so trace keywords match
                 further_analysis = True
                 grey_area_reason = f'INCOMPLETE_ANALYSIS:Script name "{script_name}" appears incomplete or dynamic'
+                script_name = 'UNKNOWN_SCRIPT'  # Normalize to recognized grey-area marker
                 confidence = 'LOW'
             
             execution = {
@@ -539,7 +551,11 @@ class ShellExecutionEnricher:
             
             for method in methods:
                 # Extract method source using ShellScriptAnalyzer's improved extraction
-                method_source = self.shell_analyzer._extract_method_source(source_code, method['name'])
+                method_source = self.shell_analyzer._extract_method_source(
+                    source_code,
+                    method['name'],
+                    _param_types_from_fqn(method['fqn']),
+                )
                 
                 if not method_source:
                     continue

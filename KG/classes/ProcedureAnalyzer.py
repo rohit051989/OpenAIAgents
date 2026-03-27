@@ -1,4 +1,5 @@
 from classes.DataClasses import ClassInfo, MethodDef, ProcedureCall
+from classes.path_utils import extract_java_method_source as _extract_java_method_source
 import re
 import yaml
 import logging
@@ -82,7 +83,11 @@ class ProcedureAnalyzer:
         try:
             with open(class_info.source_path, 'r', encoding='utf-8') as f:
                 source = f.read()
-            method_source = self._extract_method_source(source, method_def.method_name)
+            method_source = self._extract_method_source(
+                source,
+                method_def.method_name,
+                [ptype for ptype, _ in method_def.parameters],
+            )
         except Exception as e:
             # Log error but don't fail completely
             
@@ -369,27 +374,7 @@ class ProcedureAnalyzer:
 
         return self.default_database_type
 
-    def _extract_method_source(self, file_content: str, method_name: str) -> str:
-        """Extract method source from file content"""
-        # Find method declaration
-        method_pattern = rf'(public|private|protected)\s+[\w<>,\[\]\s]+\s+{re.escape(method_name)}\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{{'
-        match = re.search(method_pattern, file_content, re.DOTALL)
-        if not match:
-            return ""
-
-        # Find matching closing brace
-        start_pos = match.end() - 1
-        brace_count = 1
-        pos = start_pos + 1
-
-        while pos < len(file_content) and brace_count > 0:
-            if file_content[pos] == '{':
-                brace_count += 1
-            elif file_content[pos] == '}':
-                brace_count -= 1
-            pos += 1
-
-        if brace_count == 0:
-            return file_content[match.start():pos]
-
-        return ""
+    def _extract_method_source(self, file_content: str, method_name: str,
+                                param_types=None) -> str:
+        """Extract method source from file - handles nested braces and overloads."""
+        return _extract_java_method_source(file_content, method_name, param_types)

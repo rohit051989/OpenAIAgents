@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 import xml.etree.ElementTree as ET
 import logging
 from pathlib import Path
@@ -478,7 +478,7 @@ def generate_cypher(job: JobDef) -> str:
     lines: List[str] = []
 
     # Job - Create Job node with source file path
-    source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher
+    source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher  # Escape for Cypher
     #lines.append(f"MERGE (j:Job {{name: '{job.name}'}}) SET j.sourceFile = '{source_file}';")
     lines.append(f"""MERGE (j:Job {{id: '{job.name}', 
                  name: '{job.name}', 
@@ -492,10 +492,10 @@ def generate_cypher(job: JobDef) -> str:
         if step.step_kind == "CHUNK":
             # For chunk-based steps, create step with reader, processor, writer info
             # Escape paths for Cypher
-            reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.reader_source_path else ""
-            processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.processor_source_path else ""
-            writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.writer_source_path else ""
-            
+            reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'")
+            processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'")
+            writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'")
+
             lines.append(
                 "MERGE (:Step {name: '%s', stepKind: '%s', "
                 "readerBean: '%s', readerClass: '%s', readerSourcePath: '%s', "
@@ -509,7 +509,7 @@ def generate_cypher(job: JobDef) -> str:
         else:
             # For tasklet-based steps
             # Escape path for Cypher
-            class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if step.class_source_path else ""
+            class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
             lines.append(
                 "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'});" %
                 (step.name, step.step_kind, step.impl_bean, step.class_name, class_src)
@@ -525,7 +525,7 @@ def generate_cypher(job: JobDef) -> str:
     # Decisions
     for dec in job.decisions.values():
         # Escape path for Cypher
-        dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'") if dec.class_source_path else ""
+        dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
         lines.append(
             "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s', path: '%s'});" %
             (dec.name, dec.decider_bean, dec.class_name, dec_src)
@@ -534,7 +534,7 @@ def generate_cypher(job: JobDef) -> str:
     # Listeners
     for listener in job.listeners.values():
         # Escape path for Cypher
-        listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'") if listener.source_path else ""
+        listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'")
         lines.append(
             "MERGE (:Listener {name: '%s', scope: '%s', implBean: '%s', path: '%s'});" %
             (listener.name, listener.scope, listener.impl_bean, listener_src)

@@ -32,6 +32,7 @@ from pathlib import Path
 
 from classes.ProcedureAnalyzer import ProcedureAnalyzer
 from classes.DataClasses import ClassInfo, MethodDef
+from classes.path_utils import to_absolute_path as _path_to_absolute
 
 
 import logging
@@ -102,6 +103,14 @@ class ProcedureCallEnricher:
         if self.driver:
             self.driver.close()
     
+    def _to_absolute_path(self, relative_path: str) -> str:
+        """Convert repo-relative graph path to absolute local filesystem path."""
+        return _path_to_absolute(
+            relative_path,
+            self.config.get('repositories', []),
+            self.config.get('root_directory', '')
+        )
+    
     def _get_dao_classes(self) -> List[Dict]:
         """
         Query Neo4j for all DAO classes (isDAOClass=true).
@@ -161,7 +170,7 @@ class ProcedureCallEnricher:
             package='.'.join(class_data['fqn'].split('.')[:-1]),
             class_name=class_data['className'],
             fqn=class_data['fqn'],
-            source_path=class_data['path']
+            source_path=self._to_absolute_path(class_data['path'])
         )
     
     def _create_method_def_mock(self, method_data: Dict, class_fqn: str) -> MethodDef:

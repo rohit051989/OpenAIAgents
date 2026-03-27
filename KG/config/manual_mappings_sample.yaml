@@ -2,24 +2,30 @@
 # =========================================
 # This file allows you to manually map grey areas identified during enrichment
 # to their actual resource details (tables, procedures, scripts, etc.)
+#
+# method_fqn format: fully qualified class name + '.' + method name + '(' + comma-separated param types + ')'
+#   e.g.  com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus()
+#         com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
+# Tip: copy the FQN directly from trace_unknown_operations.py output or Neo4j.
+# Old-format FQNs (without parameter list) are accepted but will trigger a warning.
 
 # Database Operations
 # -------------------
 # For methods that were marked with DYNAMIC_TABLE, UNKNOWN, or require further analysis
 db_operations:
-- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus  
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus()
   operation_type: SELECT
   table_name: batch_job
   schema_name: batch_schema
   confidence: HIGH
 
-- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap
+- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap()
   operation_type: SELECT
   table_name: APMS_BATCH_JOB
   schema_name: APMLOAD
   confidence: HIGH
 
-- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap
+- method_fqn: com.companyname.dao.CustomerDAOImpl.getRemoteToLocalFileMap()
   operation_type: SELECT
   table_name: APMS_JOB_FILE_MAPPING
   schema_name: APMLOAD
@@ -30,21 +36,25 @@ db_operations:
 # For methods that call stored procedures or functions
 # Oracle procedures support hierarchy: schema_name.package_name.procedure_name
 procedure_calls:
-- method_fqn: com.companyname.dao.CustomerDAOImpl.uploadLoadStatus
-  procedure_name: UPLOAD_LOAD_STATUS
-  schema_name: APMDATA  # Database schema (optional)
-  package_name: PKG_BATCH  # Oracle package name (optional)
+- method_fqn: com.companyname.dao.CustomerDAOImpl.uploadLoadStatus(String,Map)
+  tasklet_fqn: "com.companyname.batch.tasklet.CustomerProcessingTasklet"
+  bean_id: "customerProcessingTasklet"
+  procedure_name: PINSERTLOADSTATUS
+  schema_name: APMLOAD  # Database schema (optional)
+  package_name: P_CONV_INIT  # Oracle package name (optional)
   database_type: ORACLE
   is_function: false
 
-- method_fqn: com.companyname.dao.ReportDAOImpl.generateMonthlyReport
-  procedure_name: SP_APMS_TO_DATAMART_DAY_END
-  schema_name: DMDATA
-  package_name: null  # No package, just schema.procedure
+- method_fqn: com.companyname.dao.CustomerDAOImpl.uploadLoadStatus(String,Map)
+  writer_fqn: "com.companyname.batch.writer.CustomerItemWriter"
+  bean_id: "customerItemWriter"
+  procedure_name: PINSERTLOADSTATUS6
+  schema_name: APMLOAD  # Database schema (optional)
+  package_name: P_CONV_INIT  # Oracle package name (optional)
   database_type: ORACLE
-  is_function: true
+  is_function: false
 
-- method_fqn: com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure
+- method_fqn: com.companyname.dao.BatchJobDAO.executeStoredProcedure(String,String,String)
   tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
   bean_id: "customerStoredProcedureTasklet"
   procedure_name: P_DATA_RESTORE_PROCESSOR
@@ -57,7 +67,7 @@ procedure_calls:
 # ------------------------
 # For methods that execute shell scripts with dynamic paths or unknown details
 shell_executions:
-- method_fqn: com.companyname.util.BatchUtils.executeAsCommand
+- method_fqn: com.companyname.util.BatchUtils.executeAsCommand(String)
   script_name: customer_export.sh
   script_path: /opt/batch/scripts/customer_export.sh
   script_type: BASH
@@ -68,7 +78,7 @@ shell_executions:
   confidence: HIGH
   description: "Customer export shell script - runs on remote batch server"
   
-- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
   tasklet_fqn: com.companyname.batch.tasklet.CustomerProcessingTasklet
   bean_id: customerProcessingTasklet
   script_name: data_customer_validation.sh
@@ -78,7 +88,7 @@ shell_executions:
   confidence: HIGH
   description: "Local data validation script"
   
-- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
   tasklet_fqn: com.companyname.batch.tasklet.UserProcessingTasklet
   bean_id: userProcessingTasklet
   script_name: data_user_validation.sh
@@ -88,7 +98,17 @@ shell_executions:
   confidence: HIGH
   description: "Local data validation script"
 
-- method_fqn: com.companyname.service.ShellScriptService.executeShellScript
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
+  processor_fqn: com.companyname.batch.processor.CustomerItemProcessor
+  bean_id: customerItemProcessor
+  script_name: data_user_validation.sh
+  script_path: /opt/batch/scripts/data_user_validation.sh
+  script_type: BASH
+  remote_host: null  # null means local execution
+  confidence: HIGH
+  description: "Local data validation script"
+
+- method_fqn: com.companyname.service.ShellScriptService.executeShellScript(String)
   script_name: customer_dump.sh
   script_path: /opt/batch/scripts/customer_dump.sh
   script_type: BASH

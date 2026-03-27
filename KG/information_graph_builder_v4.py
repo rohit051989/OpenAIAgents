@@ -23,12 +23,14 @@ import logging
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
 from classes.DataClasses import BeanDef, ClassInfo, JobDef
+from classes.path_utils import extract_java_method_source as _extract_java_method_source
 from classes.KGNodeDefs import (
     IGDirectoryNodeDef, IGRepositoryNodeDef, IGProjectNodeDef, IGFolderNodeDef,
     IGPackageNodeDef,
     IGFileNodeDef, IGSpringConfigNodeDef, IGPomFileNodeDef,
     IGPropertyFileNodeDef, ResourceNodeDef
 )
+from classes.path_utils import to_relative_path, to_absolute_path
 from classes.DAOAnalyzer import DAOAnalyzer
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
 from neo4j_direct_step_loader import parse_directory
@@ -122,7 +124,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
             current_class_info = all_classes_cache[current_fqn]
             
             # Check if method exists in current class
-            if method_name in current_class_info.methods:
+            if current_class_info.has_method_name(method_name):
                 logger.debug(f"    ✓ Method {method_name} found in {current_fqn} (depth={depth})")
                 return (current_fqn, current_class_info)
             
@@ -174,8 +176,9 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
         ))
         
         # Process each method in the class
-        for method_name, method_def in class_info.methods.items():
-            method_fqn = f"{class_fqn}.{method_name}"
+        for _method_key, method_def in class_info.methods.items():
+            method_fqn = method_def.fqn
+            method_name = method_def.method_name
             
             if method_fqn not in processed_methods:
                 processed_methods.add(method_fqn)
@@ -224,7 +227,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                         for prev_idx, prev_return_type in previous_call_return_types.items():
                             if prev_return_type and prev_return_type in all_classes_cache:
                                 prev_class_info = all_classes_cache[prev_return_type]
-                                if call.method_name in prev_class_info.methods:
+                                if prev_class_info.has_method_name(call.method_name):
                                     logger.info(f"  ✓ Resolved chained call: previous method returned {prev_return_type}, calling {call.method_name}")
                                     called_class_fqn = prev_return_type
                                     break
@@ -232,8 +235,9 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                     # Store this call's return type for potential future chained calls
                     if called_class_fqn and called_class_fqn in all_classes_cache:
                         target_class_info = all_classes_cache[called_class_fqn]
-                        if call.method_name in target_class_info.methods:
-                            target_method = target_class_info.methods[call.method_name]
+                        if target_class_info.has_method_name(call.method_name):
+                            target_method = target_class_info.get_method_by_name_and_params(
+                                call.method_name, call.argument_types)
                             return_type_simple = target_method.return_type
                             # Try to find FQN of return type in all_classes_cache
                             return_type_fqn = None
@@ -330,8 +334,10 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                         # Create called method node (if it exists in cache)
                         if called_class_fqn in all_classes_cache:
                             called_class_info = all_classes_cache[called_class_fqn]
-                            if call.method_name in called_class_info.methods:
-                                called_method_def = called_class_info.methods[call.method_name]
+                            if called_class_info.has_method_name(call.method_name):
+                                called_method_def = called_class_info.get_method_by_name_and_params(
+                                    call.method_name, call.argument_types)
+                                called_method_fqn = called_method_def.fqn
                                 
                                 # Parameterized statement for called method — ON CREATE only to avoid overwriting
                                 lines.append((
@@ -674,7 +680,47 @@ class InformationGraphBuilder:
         # Only populated for repos with has_batch_configuration: true
         self.allowed_spring_config_patterns_by_repo: Dict[str, Set[str]] = {}
         self._load_batch_configuration_imports()
+    
+    # -------------------------------------------------------------------------
+    # Path helpers: convert between absolute local paths and 
+    # repo-relative paths stored in Neo4j.
+    # -------------------------------------------------------------------------
+    def _to_relative_path(self, abs_path: Path) -> str:
+        """Convert absolute filesystem path to repo-relative graph path.
+        Format: {repo_name}/{forward/slash/relative/path} or __root__/... """
+        return to_relative_path(
+            abs_path,
+            self.config.get('repositories', []),
+            self.config['root_directory']
+        )
+
+    def _to_absolute_path(self, relative_path: str) -> str:
+        """Convert repo-relative graph path back to absolute local filesystem path."""
+        return to_absolute_path(
+            relative_path,
+            self.config.get('repositories', []),
+            self.config['root_directory']
+        )
         
+    def _normalize_job_paths(self, job_def) -> None:
+        """Convert absolute source paths in StepDef/DecisionDef/ListenerDef to
+        repo-relative paths (same format as JavaClass.path) before storing to Neo4j."""
+        for step in job_def.steps.values():
+            if step.class_source_path:
+                step.class_source_path = self._to_relative_path(Path(step.class_source_path))
+            if step.reader_source_path:
+                step.reader_source_path = self._to_relative_path(Path(step.reader_source_path))
+            if step.processor_source_path:
+                step.processor_source_path = self._to_relative_path(Path(step.processor_source_path))
+            if step.writer_source_path:
+                step.writer_source_path = self._to_relative_path(Path(step.writer_source_path))
+        for dec in job_def.decisions.values():
+            if dec.class_source_path:
+                dec.class_source_path = self._to_relative_path(Path(dec.class_source_path))
+        for listener in job_def.listeners.values():
+            if listener.source_path:
+                listener.source_path = self._to_relative_path(Path(listener.source_path))
+
     def _load_batch_configuration_imports(self):
         """Parse batch-configuration.xml files for repos with has_batch_configuration: true.
         Builds self.allowed_spring_config_patterns_by_repo with allowed resource path suffixes."""
@@ -978,7 +1024,7 @@ class InformationGraphBuilder:
         }
         
         # Create root directory node
-        root_path_str = str(root)
+        root_path_str = self._to_relative_path(root)
         dir_node = IGDirectoryNodeDef(
             path=root_path_str,
             name=root.name
@@ -1042,11 +1088,12 @@ class InformationGraphBuilder:
             if item.is_file() and self._should_skip_file(item):
                 continue
             
-            # Use absolute path for tracking
-            item_path_str = str(item.absolute())
+            # Use relative path for graph storage; keep absolute for repos_map lookup
+            item_abs_str = str(item.absolute())
+            item_rel_str = self._to_relative_path(item)
             
             # Skip if already created (prevents duplicates)
-            if item_path_str in self.created_nodes:
+            if item_rel_str in self.created_nodes:
                 continue
             
             if item.is_file():
@@ -1054,7 +1101,7 @@ class InformationGraphBuilder:
                 self._create_file_shot1(item, parent_path_str, stats, session)
             else:
                 # Check if this is a db_repo type repository
-                repo_info = self.repos_map.get(item_path_str) or self.repos_map.get(str(item))
+                repo_info = self.repos_map.get(item_abs_str) or self.repos_map.get(str(item))
                 is_db_repo = repo_info and repo_info.get('type') == 'db_repo'
                 
                 # Create folder node and link to parent
@@ -1064,21 +1111,29 @@ class InformationGraphBuilder:
                     # Link db_repo to parent but don't scan its internal structure (Phase 0 handles that)
                     logger.info(f"  Linked db_repo to parent: {item.name} (internal structure handled by Phase 0)")
                 else:
-                    # Recurse into folder
-                    self._scan_recursive_shot1(item, item_path_str, stats, session, depth + 1)
+                    # Recurse into folder using the relative path as the new parent
+                    self._scan_recursive_shot1(item, item_rel_str, stats, session, depth + 1)
             
             # Mark as created after successful creation
-            self.created_nodes.add(item_path_str)
+            self.created_nodes.add(item_rel_str)
     
     def _create_folder_shot1(self, folder_path: Path, parent_path: str, stats: Dict, session):
         """Create a folder node - mark as Repository or Project if applicable.
         OPTIMIZED: Reuses provided session instead of opening new one."""
-        # Use absolute path consistently
-        path_str = str(folder_path.absolute())
+        # Repo-relative path stored in graph; absolute path for repos_map lookup
+        path_str = self._to_relative_path(folder_path)
+        abs_str = str(folder_path.absolute())
         
         # Determine folder type and build the appropriate dataclass node
-        if path_str in self.repos_map or str(folder_path) in self.repos_map:
-            node = IGRepositoryNodeDef(path=path_str, name=folder_path.name, node_type="Repository")
+        if abs_str in self.repos_map or str(folder_path) in self.repos_map:
+            repo_cfg = self.repos_map.get(abs_str) or self.repos_map.get(str(folder_path), {})
+            node = IGRepositoryNodeDef(
+                path=path_str, name=folder_path.name, node_type="Repository",
+                repoName=repo_cfg.get('name', folder_path.name),
+                repoUrl=repo_cfg.get('repo_url', ''),
+                branchName=repo_cfg.get('branch_name', ''),
+                repoType=repo_cfg.get('type', '')
+            )
             label = "Node:Repository"
             stats['repositories'] += 1
         elif (folder_path / 'pom.xml').exists() or (folder_path / 'build.gradle').exists():
@@ -1090,24 +1145,47 @@ class InformationGraphBuilder:
             label = "Node:Folder"
             stats['folders'] += 1
         
-        query = f"""
-        MERGE (n:{label} {{path: $path}})
-        ON CREATE SET 
-            n.name = $name,
-            n.node_type = $node_type,
-            n.created_at = datetime()
-        WITH n
-        MATCH (parent:Node {{path: $parent_path}})
-        MERGE (parent)-[:CONTAINS]->(n)
-        RETURN n
-        """
-        
-        session.run(query,
-            path=node.path,
-            name=node.name,
-            node_type=node.node_type,
-            parent_path=parent_path
-        )
+        if isinstance(node, IGRepositoryNodeDef):
+            query = f"""
+            MERGE (n:{label} {{path: $path}})
+            ON CREATE SET 
+                n.name = $name,
+                n.node_type = $node_type,
+                n.repoName = $repoName,
+                n.repoUrl = $repoUrl,
+                n.branchName = $branchName,
+                n.repoType = $repoType,
+                n.created_at = datetime()
+            SET n.repoUrl = $repoUrl, n.branchName = $branchName
+            WITH n
+            MATCH (parent:Node {{path: $parent_path}})
+            MERGE (parent)-[:CONTAINS]->(n)
+            RETURN n
+            """
+            session.run(query,
+                path=node.path, name=node.name, node_type=node.node_type,
+                repoName=node.repoName, repoUrl=node.repoUrl,
+                branchName=node.branchName, repoType=node.repoType,
+                parent_path=parent_path
+            )
+        else:
+            query = f"""
+            MERGE (n:{label} {{path: $path}})
+            ON CREATE SET 
+                n.name = $name,
+                n.node_type = $node_type,
+                n.created_at = datetime()
+            WITH n
+            MATCH (parent:Node {{path: $parent_path}})
+            MERGE (parent)-[:CONTAINS]->(n)
+            RETURN n
+            """
+            session.run(query,
+                path=node.path,
+                name=node.name,
+                node_type=node.node_type,
+                parent_path=parent_path
+            )
     
     def _create_file_shot1(self, file_path: Path, parent_path: str, stats: Dict, session):
         """Create a file node.
@@ -1143,8 +1221,8 @@ class InformationGraphBuilder:
         safe_types = [ft.replace(' ', '').replace('-', '') for ft in file_types if ft]
         labels = 'Node:File:' + ':'.join(safe_types) if safe_types else 'Node:File'
         
-        # Use absolute path consistently
-        path_str = str(file_path.absolute())
+        # Store repo-relative path in graph
+        path_str = self._to_relative_path(file_path)
         
         try:
             file_size = file_path.stat().st_size
@@ -1264,7 +1342,7 @@ class InformationGraphBuilder:
         
         try:
             result = session.run(query,
-                path=class_info.source_path,
+                path=self._to_relative_path(Path(class_info.source_path)),
                 name=Path(class_info.source_path).name,
                 className=class_info.class_name,
                 fqn=class_info.fqn,
@@ -1288,14 +1366,30 @@ class InformationGraphBuilder:
                 return
             
             # Create JavaMethod nodes and HAS_METHOD relationships for all methods
-            self._create_methods_for_class(class_info, session)
+            # Read source file once here so individual method extraction can use it
+            try:
+                with open(class_info.source_path, 'r', encoding='utf-8', errors='ignore') as _sf:
+                    _source_content = _sf.read()
+            except Exception:
+                _source_content = ""
+            self._create_methods_for_class(class_info, session, _source_content)
         except Exception as e:
             logger.warning(f"Failed to create JavaClass node for {class_info.fqn}: {str(e)[:200]}")
     
-    def _create_methods_for_class(self, class_info: ClassInfo, session):
+    def _extract_method_source_snippet(self, file_content: str, method_name: str,
+                                        param_types=None, max_lines: int = 30) -> str:
+        """Extract method source from file content and cap at max_lines lines.
+        Supports overload disambiguation via param_types.
+        Returns empty string if method cannot be found."""
+        if not file_content or not method_name:
+            return ""
+        return _extract_java_method_source(file_content, method_name, param_types, max_lines)
+
+    def _create_methods_for_class(self, class_info: ClassInfo, session, source_content: str = ""):
         """Create JavaMethod nodes and HAS_METHOD relationships for all methods in a class."""
-        for method_name, method_def in class_info.methods.items():
-            method_fqn = f"{class_info.fqn}.{method_name}"
+        for _method_key, method_def in class_info.methods.items():
+            method_fqn = method_def.fqn
+            method_name = method_def.method_name
             
             # Prepare method properties
             modifiers_str = ",".join(method_def.modifiers)
@@ -1313,6 +1407,13 @@ class InformationGraphBuilder:
             shell_executions = [f"{se.script_type}:{se.command}" 
                               for se in method_def.shell_executions] if hasattr(method_def, 'shell_executions') else []
             
+            # Extract method source code (full source or first 30 lines, whichever is less)
+            method_source = self._extract_method_source_snippet(
+                source_content,
+                method_name,
+                [ptype for ptype, _ in method_def.parameters],
+            )
+            
             query_method = """
             MATCH (c:JavaClass {fqn: $class_fqn})
             MERGE (m:JavaMethod {fqn: $method_fqn})
@@ -1326,7 +1427,8 @@ class InformationGraphBuilder:
                 m.shellExecutionCount = $shell_execution_count,
                 m.dbOperations = $db_operations,
                 m.procedureCalls = $procedure_calls,
-                m.shellExecutions = $shell_executions
+                m.shellExecutions = $shell_executions,
+                m.sourceCode = $source_code
             MERGE (c)-[:HAS_METHOD]->(m)
             RETURN m
             """
@@ -1343,7 +1445,8 @@ class InformationGraphBuilder:
                        shell_execution_count=shell_execution_count,
                        db_operations=db_operations,
                        procedure_calls=procedure_calls,
-                       shell_executions=shell_executions
+                       shell_executions=shell_executions,
+                       source_code=method_source
                        )
     
     # =====================================================================
@@ -1374,9 +1477,10 @@ class InformationGraphBuilder:
         # Process each Java file
         packages_marked = set()
         
-        for java_path, package_name in java_files:
-            # Mark folders based on this Java file's package
-            self._mark_package_folders(Path(java_path), package_name, packages_marked)
+        for java_path_relative, package_name in java_files:
+            # Reconstruct absolute path so _mark_package_folders can work with real filesystem parts
+            java_path_abs = self._to_absolute_path(java_path_relative)
+            self._mark_package_folders(Path(java_path_abs), package_name, packages_marked)
         
         logger.info(f"  Marked {len(packages_marked)} unique package folders")
         logger.info("=" * 60)
@@ -1591,8 +1695,9 @@ class InformationGraphBuilder:
         with self.driver.session(database=self.database) as session:
             result = session.run(query)
             for record in result:
-                file_path = record['path']
-                spring_xml_files.append(file_path)
+                # Path stored in graph is repo-relative; reconstruct absolute for file reading
+                abs_path = self._to_absolute_path(record['path'])
+                spring_xml_files.append(abs_path)
         
         logger.info(f"  Found {len(spring_xml_files)} Spring XML files in graph")
         
@@ -1636,7 +1741,8 @@ class InformationGraphBuilder:
             record = result.single()
             
             if record:
-                return record.get('path', "")
+                # Path stored in graph is repo-relative; return absolute for file access
+                return self._to_absolute_path(record.get('path', ''))
         
         return ""
     
@@ -1649,7 +1755,7 @@ class InformationGraphBuilder:
         2. Using graph queries to find Java source paths instead of file system search
         
         Args:
-            spring_xml_files: List of Spring XML file paths (from graph)
+            spring_xml_files: List of Spring XML file absolute paths (from graph)
             
         Returns:
             Dictionary mapping composite key (bean_id___bean_class) to tuple of (class_name, source_path, xml_file)
@@ -1873,15 +1979,17 @@ class InformationGraphBuilder:
         for composite_key, (bean_class, source_path, xml_file) in global_bean_map.items():
             bean_id = composite_key.split('___')[0] if '___' in composite_key else composite_key
             simple_class_name = bean_class.split('.')[-1] if '.' in bean_class else bean_class
-            
+            #logger.info(f"Preparing Bean '{bean_id}' with class '{bean_class}' with xmlPath '{xml_file}' with source_path '{source_path}' for graph storage")
+            relative_xml_path = self._to_relative_path(Path(xml_file))
+            relative_source_path = self._to_relative_path(Path(source_path)) if source_path else ""
             bean_data.append({
                 'compositeKey': composite_key,
                 'beanId': bean_id,
                 'beanClass': bean_class,
                 'simpleClassName': simple_class_name,
-                'path': source_path or "",
+                'path': relative_source_path,
                 'hasSource': bool(source_path),
-                'xmlPath': xml_file
+                'xmlPath': relative_xml_path
             })
         
         with self.driver.session(database=self.database) as session:
@@ -2277,6 +2385,8 @@ class InformationGraphBuilder:
         
         for job_def in enriched_jobs:
             # Collect Step statements
+            # Normalize absolute source paths to repo-relative before storing to Neo4j
+            self._normalize_job_paths(job_def)
             cypher = generate_cypher(job_def)
             statements = [s.strip() for s in cypher.split(";") if s.strip()]
             all_step_statements.extend(statements)
@@ -2334,11 +2444,13 @@ class InformationGraphBuilder:
 
     def _convert_folder_to_package(self, folder_path: str, package_parts: List[str]):
         """Convert a Folder node to a Package node."""
+        # folder_path is absolute locally; convert to relative for the Neo4j MATCH
+        relative_path = self._to_relative_path(Path(folder_path))
         full_package_name = '.'.join(package_parts)
-        is_test = '\\test\\' in folder_path or '/test/' in folder_path
+        is_test = '/test/' in relative_path or '\\test\\' in relative_path
 
         pkg_node = IGPackageNodeDef(
-            path=folder_path,
+            path=relative_path,
             name=package_parts[-1],
             node_type='Package',
             package_name=package_parts[-1],

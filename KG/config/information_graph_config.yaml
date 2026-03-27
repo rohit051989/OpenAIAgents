@@ -7,14 +7,28 @@ root_directory: "D:\\Iris\\prj\\code\\bmo\\sample_code"
 # Define repositories - each repo should have a unique identifier
 repositories:
   - name: "Test_Code_repo"
+    repo_url: "https://github.com/rohit051989/Test_Code_repo.git"
+    branch_name: "main"
     path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_Code_repo"
     type: "code_repo"
     has_batch_configuration: true  # Indicates this repo contains batch configuration files for helping which SpringConfig files to include during scanning
     batch_configuration_file_path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_Code_repo\\batch\\TestSpringProject\\src\\main\\resources\\batch-configuration.xml"
+
+
+  - name: "test_code_framework_repo"
+    repo_url: "https://github.com/rohit051989/test_code_framework_repo.git"
+    branch_name: "main"
+    path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\test_code_framework_repo"
+    type: "code_repo"
+    has_batch_configuration: false  # Indicates this repo contains batch configuration files for helping which SpringConfig files to include during scanning
+    batch_configuration_file_path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\test_code_framework_repo\\batch\\TestSpringProject\\src\\main\\resources\\batch-configuration.xml"
     
   - name: "Test_DB_Repo"
+    repo_url: "https://github.com/rohit051989/Test_DB_Repo.git"
+    branch_name: "main"
     path: "D:\\Iris\\prj\\code\\bmo\\sample_code\\Test_DB_Repo"
     type: "db_repo"
+    has_batch_configuration: false
 
 # Projects, Folders, and Packages are AUTO-DETECTED:
 # - Project: Any directory containing pom.xml or build.gradle

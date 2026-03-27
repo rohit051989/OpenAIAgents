@@ -1,5 +1,5 @@
 from classes.DataClasses import ClassInfo, DBOperation, MethodDef
-
+from classes.path_utils import extract_java_method_source as _extract_java_method_source
 
 import re
 from pathlib import Path
@@ -44,7 +44,11 @@ class DAOAnalyzer:
         try:
             with open(class_info.source_path, 'r', encoding='utf-8') as f:
                 source = f.read()
-            method_source = self._extract_method_source(source, method_def.method_name)
+            method_source = self._extract_method_source(
+                source,
+                method_def.method_name,
+                [ptype for ptype, _ in method_def.parameters],
+            )
         except:
             method_source = ""
 
@@ -109,7 +113,7 @@ class DAOAnalyzer:
 
         if has_db_imports:
             # Additional check: class should have typical DAO method names
-            method_names = [m.lower() for m in class_info.methods.keys()]
+            method_names = [m.method_name.lower() for m in class_info.methods.values()]
             dao_method_keywords = ['find', 'save', 'delete', 'update', 'insert', 'query', 'get', 'create', 'persist']
             has_dao_methods = any(
                 any(keyword in method_name for keyword in dao_method_keywords)
@@ -307,30 +311,10 @@ class DAOAnalyzer:
 
         return None
 
-    def _extract_method_source(self, file_content: str, method_name: str) -> str:
-        """Extract method source from file - handles nested braces"""
-        # Find method declaration
-        method_pattern = rf'(public|private|protected)\s+[\w<>,\[\]\s]+\s+{re.escape(method_name)}\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{{'
-        match = re.search(method_pattern, file_content, re.DOTALL)
-        if not match:
-            return ""
-
-        # Find matching closing brace by counting braces
-        start_pos = match.end() - 1  # Position of opening brace
-        brace_count = 1
-        pos = start_pos + 1
-
-        while pos < len(file_content) and brace_count > 0:
-            if file_content[pos] == '{':
-                brace_count += 1
-            elif file_content[pos] == '}':
-                brace_count -= 1
-            pos += 1
-
-        if brace_count == 0:
-            return file_content[match.start():pos]
-
-        return ""
+    def _extract_method_source(self, file_content: str, method_name: str,
+                                param_types=None) -> str:
+        """Extract method source from file - handles nested braces and overloads."""
+        return _extract_java_method_source(file_content, method_name, param_types)
 
     def _resolve_sql_constant(self, constant_class: str, constant_name: str, class_info: ClassInfo) -> Optional[str]:
         """Resolve SQL constant by parsing the constant class file"""

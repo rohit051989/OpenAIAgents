@@ -1,5 +1,5 @@
 from classes.DataClasses import ClassInfo, MethodDef, ProcedureCall
-
+from classes.path_utils import extract_java_method_source as _extract_java_method_source
 
 import re
 from typing import List, Tuple, Optional
@@ -49,7 +49,11 @@ class OracleProcedureAnalyzer:
         try:
             with open(class_info.source_path, 'r', encoding='utf-8') as f:
                 source = f.read()
-            method_source = self._extract_method_source(source, method_def.method_name)
+            method_source = self._extract_method_source(
+                source,
+                method_def.method_name,
+                [ptype for ptype, _ in method_def.parameters],
+            )
         except:
             method_source = ""
 
@@ -112,8 +116,7 @@ class OracleProcedureAnalyzer:
             params.append(f"{index}:{method}={value.strip()}")
         return params
 
-    def _extract_method_source(self, file_content: str, method_name: str) -> str:
-        """Extract method source from file"""
-        pattern = rf'(public|private|protected).*\s+{re.escape(method_name)}\s*\([^)]*\)\s*\{{[^}}]*\}}'
-        match = re.search(pattern, file_content, re.DOTALL)
-        return match.group(0) if match else ""
+    def _extract_method_source(self, file_content: str, method_name: str,
+                                param_types=None) -> str:
+        """Extract method source from file - handles nested braces and overloads."""
+        return _extract_java_method_source(file_content, method_name, param_types)

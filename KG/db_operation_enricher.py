@@ -33,6 +33,7 @@ import json
 # Import analyzers
 from classes.DAOAnalyzer import DAOAnalyzer
 from classes.DataClasses import ClassInfo
+from classes.path_utils import to_absolute_path as _path_to_absolute, param_types_from_method_fqn as _param_types_from_fqn
 
 import logging
 
@@ -219,7 +220,7 @@ Return ONLY the JSON:"""
                 record = result.single()
                 
                 if record:
-                    path = record['path']
+                    path = self._to_absolute_path(record['path'])
                     content = record.get('content')
                     
                     # If content not in graph, read from file
@@ -370,6 +371,14 @@ class DBOperationEnricher:
         
         logger.info(f"DB Operation Enricher initialized with strategy: {self.strategy.upper()}")
     
+    def _to_absolute_path(self, relative_path: str) -> str:
+        """Convert repo-relative graph path to absolute local filesystem path."""
+        return _path_to_absolute(
+            relative_path,
+            self.config.get('repositories', []),
+            self.config.get('root_directory', '')
+        )
+    
     def enrich(self):
         """Main enrichment process"""
         logger.info(" " + "=" * 80)
@@ -401,7 +410,7 @@ class DBOperationEnricher:
         for dao_class in dao_classes:
             class_fqn = dao_class['fqn']
             class_name = dao_class['className']
-            path = dao_class['path']
+            path = self._to_absolute_path(dao_class['path'])
             
             logger.info(f"   Processing DAO: {class_name}")
             
@@ -414,7 +423,8 @@ class DBOperationEnricher:
                 method_name = method['methodName']
                 
                 # Get method source
-                method_source = self._get_method_source(path, method_name)
+                method_source = self._get_method_source(
+                    path, method_name, _param_types_from_fqn(method_fqn))
                 
                 if not method_source:
                     continue
@@ -427,8 +437,8 @@ class DBOperationEnricher:
                 else:
                     # Regex strategy - need to reconstruct ClassInfo and MethodDef
                     class_info = self._build_class_info(path, class_fqn)
-                    if class_info and method_name in class_info.methods:
-                        method_def = class_info.methods[method_name]
+                    if class_info and class_info.has_method_name(method_name):
+                        method_def = class_info.get_method_by_name_and_params(method_name, None)
                         operations = analyzer.analyze_method(method_def, class_info)  # Now returns List[DBOperation]
                     else:
                         operations = []
@@ -478,7 +488,8 @@ class DBOperationEnricher:
             result = session.run(query, fqn=class_fqn)
             return [dict(record) for record in result]
     
-    def _get_method_source(self, path: str, method_name: str) -> Optional[str]:
+    def _get_method_source(self, path: str, method_name: str,
+                            param_types=None) -> Optional[str]:
         """Extract method source code from file"""
         if not path or not Path(path).exists():
             return None
@@ -492,7 +503,7 @@ class DBOperationEnricher:
                 neo4j_driver=self.driver,
                 neo4j_database=self.database
             )
-            return analyzer._extract_method_source(content, method_name)
+            return analyzer._extract_method_source(content, method_name, param_types)
         except Exception as e:
             logger.warning(f"Failed to read method source: {e}")
             return None
