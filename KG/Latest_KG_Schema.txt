@@ -190,7 +190,7 @@
             "packageName": "Oracle package name (for procedures/functions declared inside a package)",
             "foundInRepo": "True if discovered from a db_repo git scan (has full file-tree + git metadata); False if loaded from Excel/manual config",
             "repoName": "Git repository name the DDL/SQL definition file belongs to (set when foundInRepo=True)",
-            "repoFilePath": "Absolute path to the SQL/DDL definition file in the repository (set when foundInRepo=True)",
+            "repoFilePath": "Repo-relative path to the SQL/DDL definition file in the repository (set when foundInRepo=True)",
             "path": "IG file-tree path — same as repoFilePath (set when foundInRepo=True)",
             "node_type": "IG node type label (always 'Resource')",
             "extension": "File extension of the definition file, e.g. .sql (set when foundInRepo=True)",

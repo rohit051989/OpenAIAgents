@@ -268,3 +268,26 @@ def extract_java_method_source(file_content: str,
             best_source = '\n'.join(lines[:max_lines]) + '\n// ... (truncated)'
 
     return best_source
+
+
+def count_java_code_lines(source: str) -> int:
+    """Count actual Java code lines in a method source string.
+
+    Strips Javadoc (/** */), block comments (/* */), and single-line
+    comments (//), then counts the remaining non-blank lines.  This is the
+    fallback used for the JavaLang parser path where AST comment-node
+    positions are not available.
+
+    Args:
+        source: Raw method source text (may include the method signature).
+
+    Returns:
+        Number of non-blank, non-comment lines.
+    """
+    if not source:
+        return 0
+    # Remove block/javadoc comments first (/** ... */ and /* ... */)
+    stripped = _re.sub(r'/\*.*?\*/', '', source, flags=_re.DOTALL)
+    # Remove single-line comments (// ...)
+    stripped = _re.sub(r'//[^\n]*', '', stripped)
+    return sum(1 for line in stripped.splitlines() if line.strip())

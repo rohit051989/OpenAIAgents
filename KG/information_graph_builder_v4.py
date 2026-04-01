@@ -24,6 +24,7 @@ from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
 from classes.SpringBeanRegistry import SpringBeanRegistry
 from classes.DataClasses import BeanDef, ClassInfo, JobDef
 from classes.path_utils import extract_java_method_source as _extract_java_method_source
+from classes.path_utils import count_java_code_lines as _count_java_code_lines
 from classes.KGNodeDefs import (
     IGDirectoryNodeDef, IGRepositoryNodeDef, IGProjectNodeDef, IGFolderNodeDef,
     IGPackageNodeDef,
@@ -468,13 +469,14 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                         }
                     ))
                     
-                    # Create USES_CLASS relationship
-                    lines.append((
-                        "MATCH (c:JavaClass {fqn: $class_fqn})"
-                        " MATCH (cc:JavaClass {fqn: $called_class_fqn})"
-                        " MERGE (c)-[:USES_CLASS]->(cc)",
-                        {"class_fqn": class_fqn, "called_class_fqn": called_class_fqn}
-                    ))
+                    # Create USES_CLASS relationship (skip self-references)
+                    if called_class_fqn != class_fqn:
+                        lines.append((
+                            "MATCH (c:JavaClass {fqn: $class_fqn})"
+                            " MATCH (cc:JavaClass {fqn: $called_class_fqn})"
+                            " MERGE (c)-[:USES_CLASS]->(cc)",
+                            {"class_fqn": class_fqn, "called_class_fqn": called_class_fqn}
+                        ))
                     
                     # Recursively process the called class
                     process_class_recursive(called_class_fqn, depth + 1, max_depth)
@@ -705,6 +707,8 @@ class InformationGraphBuilder:
     def _normalize_job_paths(self, job_def) -> None:
         """Convert absolute source paths in StepDef/DecisionDef/ListenerDef to
         repo-relative paths (same format as JavaClass.path) before storing to Neo4j."""
+        if job_def.source_file:
+            job_def.source_file = self._to_relative_path(Path(job_def.source_file))
         for step in job_def.steps.values():
             if step.class_source_path:
                 step.class_source_path = self._to_relative_path(Path(step.class_source_path))
@@ -1413,6 +1417,19 @@ class InformationGraphBuilder:
                 method_name,
                 [ptype for ptype, _ in method_def.parameters],
             )
+
+            # Determine code line count.
+            # TreeSitter path: already set from AST (excludes comments/blanks).
+            # JavaLang path: line_count == 0, so compute from the full source here.
+            java_line_count = method_def.line_count
+            if java_line_count == 0 and source_content:
+                full_source = _extract_java_method_source(
+                    source_content,
+                    method_name,
+                    [ptype for ptype, _ in method_def.parameters],
+                    max_lines=None,  # no cap — we want the full method
+                )
+                java_line_count = _count_java_code_lines(full_source)
             
             query_method = """
             MATCH (c:JavaClass {fqn: $class_fqn})
@@ -1428,7 +1445,8 @@ class InformationGraphBuilder:
                 m.dbOperations = $db_operations,
                 m.procedureCalls = $procedure_calls,
                 m.shellExecutions = $shell_executions,
-                m.sourceCode = $source_code
+                m.sourceCode = $source_code,
+                m.javaLineCount = $java_line_count
             MERGE (c)-[:HAS_METHOD]->(m)
             RETURN m
             """
@@ -1446,7 +1464,8 @@ class InformationGraphBuilder:
                        db_operations=db_operations,
                        procedure_calls=procedure_calls,
                        shell_executions=shell_executions,
-                       source_code=method_source
+                       source_code=method_source,
+                       java_line_count=java_line_count
                        )
     
     # =====================================================================

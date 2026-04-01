@@ -426,7 +426,7 @@ class DBRepoScanner:
             session: Neo4j session
         """
         file_name = sql_file.name
-        file_path_str = str(sql_file.absolute())
+        file_path_str = self._to_relative_path(sql_file)
         
         # Read file content
         try:

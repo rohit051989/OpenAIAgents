@@ -200,7 +200,7 @@ class ResourceNodeDef(GitMetadataNode):
 
     # Repo-sourced properties (populated when foundInRepo=True)
     repoName: str = ""          # Git repository name the definition file belongs to
-    repoFilePath: str = ""      # Absolute path to the SQL/DDL file in the repo
+    repoFilePath: str = ""      # Repo-relative path to the SQL/DDL file in the repo
     path: str = ""              # Same as repoFilePath — IG file-tree path
     node_type: str = "Resource" # IG node type label
     extension: str = ""         # File extension of the definition file (.sql, .ddl, etc.)

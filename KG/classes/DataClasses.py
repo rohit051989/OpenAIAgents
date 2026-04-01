@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 import logging
+import re as _re
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,11 @@ class MethodDef:
     modifiers: List[str] = field(default_factory=list)
     calls: List[MethodCall] = field(default_factory=list)
     
+    # Actual Java code line count (excludes blank lines, comments, and commented-out code).
+    # Populated by the TreeSitter parser directly from AST comment nodes; populated by
+    # the builder (via regex source stripping) for the JavaLang parser path.
+    line_count: int = 0
+
     # Attached analysis results at method level
     db_operations: List['DBOperation'] = field(default_factory=list)
     procedure_calls: List['ProcedureCall'] = field(default_factory=list)
@@ -83,8 +89,22 @@ class MethodDef:
         """Unique key for this method within its class, incorporating parameter types to
         support overloaded methods (same name, different signatures).
         Format: ``methodName(Type1,Type2)``
+
+        Generic type arguments are erased (``List<T>`` → ``List``) so that
+        the TreeSitter parser path (which preserves generics from the source)
+        produces the same key as the JavaLang path (which erases them).
+        This keeps all enricher FQN lookups consistent between parser modes.
         """
-        param_types = ",".join(ptype for ptype, _ in self.parameters)
+        def _erase_generics(t: str) -> str:
+            # Iteratively strip innermost <...> groups to handle nesting
+            # e.g. Map<String, List<Object>> → Map<String, List> → Map
+            prev = None
+            while prev != t:
+                prev = t
+                t = _re.sub(r'<[^<>]*>', '', t)
+            return t.strip()
+
+        param_types = ",".join(_erase_generics(ptype) for ptype, _ in self.parameters)
         return f"{self.method_name}({param_types})"
 
     @property
