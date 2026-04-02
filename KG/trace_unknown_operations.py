@@ -74,9 +74,9 @@ def trace_step_operations(step_name, database):
                s.writerBean as writerBean,
                s.processorBean as processorBean,
                elementId(s) as stepId,
-               s.stepDbOperations as dbOps,
-               s.stepProcedureCalls as procCalls,
-               s.stepShellExecutions as shellExecs
+               coalesce(s.stepDbOperations, []) as dbOps,
+               coalesce(s.stepProcedureCalls, []) as procCalls,
+               coalesce(s.stepShellExecutions, []) as shellExecs
         """
         result = session.run(query_step, stepName=step_name)
         step_record = result.single()

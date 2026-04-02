@@ -603,23 +603,24 @@ class ShellExecutionEnricher:
                             if called.get('shellExecs') and called.get('shellExecCount', 0) > 0:
                                 all_shell_executions.update(called['shellExecs'])
 
-            if all_shell_executions:
-                step_execs_list = sorted(list(all_shell_executions))
+            # Always write the property so the key exists in the schema
+            step_execs_list = sorted(list(all_shell_executions))
 
-                query_update = """
-                MATCH (s:Step)
-                WHERE elementId(s) = $stepId
-                SET s.stepShellExecutions = $executions,
-                    s.stepShellExecutionCount = $count
-                RETURN s.name as name
-                """
+            query_update = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            SET s.stepShellExecutions = $executions,
+                s.stepShellExecutionCount = $count
+            RETURN s.name as name
+            """
 
-                with self.driver.session(database=self.database) as session:
-                    session.run(query_update,
-                                stepId=step_id,
-                                executions=step_execs_list,
-                                count=len(step_execs_list))
+            with self.driver.session(database=self.database) as session:
+                session.run(query_update,
+                            stepId=step_id,
+                            executions=step_execs_list,
+                            count=len(step_execs_list))
 
+            if step_execs_list:
                 steps_updated += 1
                 logger.info(f"    Step '{step_name}': {len(step_execs_list)} unique shell executions")
 

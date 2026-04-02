@@ -551,23 +551,24 @@ class ProcedureCallEnricher:
                             if called.get('procCalls') and called.get('procCallCount', 0) > 0:
                                 all_procedure_calls.update(called['procCalls'])
 
-            if all_procedure_calls:
-                step_procs_list = sorted(list(all_procedure_calls))
+            # Always write the property so the key exists in the schema
+            step_procs_list = sorted(list(all_procedure_calls))
 
-                query_update = """
-                MATCH (s:Step)
-                WHERE elementId(s) = $stepId
-                SET s.stepProcedureCalls = $procedures,
-                    s.stepProcedureCallCount = $count
-                RETURN s.name as name
-                """
+            query_update = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            SET s.stepProcedureCalls = $procedures,
+                s.stepProcedureCallCount = $count
+            RETURN s.name as name
+            """
 
-                with self.driver.session(database=self.database) as session:
-                    session.run(query_update,
-                                stepId=step_id,
-                                procedures=step_procs_list,
-                                count=len(step_procs_list))
+            with self.driver.session(database=self.database) as session:
+                session.run(query_update,
+                            stepId=step_id,
+                            procedures=step_procs_list,
+                            count=len(step_procs_list))
 
+            if step_procs_list:
                 steps_updated += 1
                 logger.info(f"    Step '{step_name}': {len(step_procs_list)} unique procedure calls")
 
