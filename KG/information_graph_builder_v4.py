@@ -703,13 +703,45 @@ class InformationGraphBuilder:
             self.config.get('repositories', []),
             self.config['root_directory']
         )
-        
+
+    def _get_repo_config_for_path(self, path: Path) -> Optional[dict]:
+        """Return the repo config dict for the repo that contains *path*, or None.
+
+        Used to derive git_repo_name / git_branch_name for any file node without
+        needing to pass repo context through every helper call.
+        """
+        try:
+            abs_path = path.resolve()
+        except Exception:
+            abs_path = path.absolute()
+        for repo_path_str, repo_cfg in self.repos_map.items():
+            try:
+                repo_root = Path(repo_path_str).resolve()
+                if abs_path == repo_root or abs_path.is_relative_to(repo_root):
+                    return repo_cfg
+            except Exception:
+                continue
+        return None
+
     def _normalize_job_paths(self, job_def) -> None:
         """Convert absolute source paths in StepDef/DecisionDef/ListenerDef to
-        repo-relative paths (same format as JavaClass.path) before storing to Neo4j."""
+        repo-relative paths (same format as JavaClass.path) before storing to Neo4j.
+        Also populates git metadata fields (repo name + branch) from config for
+        every entity derived from the job's Spring XML file."""
+        # Derive git metadata from the Job's Spring XML BEFORE normalising path
         if job_def.source_file:
+            repo_cfg = self._get_repo_config_for_path(Path(job_def.source_file))
+            job_def.git_repo_name = repo_cfg.get('name', '') if repo_cfg else ''
+            job_def.git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
+            job_def.git_file_exists = True
             job_def.source_file = self._to_relative_path(Path(job_def.source_file))
+
+        # Propagate job-level repo info to all child entities — they are declared
+        # in the same Spring XML file as the Job
         for step in job_def.steps.values():
+            step.git_repo_name = job_def.git_repo_name
+            step.git_branch_name = job_def.git_branch_name
+            step.git_file_exists = True
             if step.class_source_path:
                 step.class_source_path = self._to_relative_path(Path(step.class_source_path))
             if step.reader_source_path:
@@ -719,9 +751,15 @@ class InformationGraphBuilder:
             if step.writer_source_path:
                 step.writer_source_path = self._to_relative_path(Path(step.writer_source_path))
         for dec in job_def.decisions.values():
+            dec.git_repo_name = job_def.git_repo_name
+            dec.git_branch_name = job_def.git_branch_name
+            dec.git_file_exists = True
             if dec.class_source_path:
                 dec.class_source_path = self._to_relative_path(Path(dec.class_source_path))
         for listener in job_def.listeners.values():
+            listener.git_repo_name = job_def.git_repo_name
+            listener.git_branch_name = job_def.git_branch_name
+            listener.git_file_exists = True
             if listener.source_path:
                 listener.source_path = self._to_relative_path(Path(listener.source_path))
 
@@ -1234,8 +1272,17 @@ class InformationGraphBuilder:
             file_size = 0
         
         file_types_str = ','.join(file_types)
+
+        # Git metadata — populated from repo config (Step 1).
+        # git_created_by / at / updated_by / at / commit_id left None until Step 2 (git log).
+        repo_cfg = self._get_repo_config_for_path(file_path)
+        git_repo_name   = repo_cfg.get('name', '')        if repo_cfg else ''
+        git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
+
         common = dict(path=path_str, name=file_path.name, node_type='File',
-                      extension=file_path.suffix, size=file_size, file_types=file_types_str)
+                      extension=file_path.suffix, size=file_size, file_types=file_types_str,
+                      git_repo_name=git_repo_name, git_branch_name=git_branch_name,
+                      git_file_exists=True)
 
         # Build the appropriate dataclass node based on file type
         if 'SpringConfig' in file_types:
@@ -1265,6 +1312,9 @@ class InformationGraphBuilder:
                 n.size = $size,
                 n.file_types = $file_types,
                 n.isMainConfig = $isMainConfig,
+                n.gitRepoName = $git_repo_name,
+                n.gitBranchName = $git_branch_name,
+                n.gitFileExists = $git_file_exists,
                 n.created_at = datetime()
             SET n.allowedInImport = $allowedInImport
             WITH n
@@ -1276,6 +1326,9 @@ class InformationGraphBuilder:
                 path=node.path, name=node.name, node_type=node.node_type,
                 extension=node.extension, size=node.size, file_types=node.file_types,
                 isMainConfig=node.isMainConfig, allowedInImport=node.allowedInImport,
+                git_repo_name=node.git_repo_name or '',
+                git_branch_name=node.git_branch_name or '',
+                git_file_exists=node.git_file_exists,
                 parent_path=parent_path
             )
         else:
@@ -1287,6 +1340,9 @@ class InformationGraphBuilder:
                 n.extension = $extension,
                 n.size = $size,
                 n.file_types = $file_types,
+                n.gitRepoName = $git_repo_name,
+                n.gitBranchName = $git_branch_name,
+                n.gitFileExists = $git_file_exists,
                 n.created_at = datetime()
             WITH n
             MATCH (parent:Node {{path: $parent_path}})
@@ -1296,6 +1352,9 @@ class InformationGraphBuilder:
             session.run(query,
                 path=node.path, name=node.name, node_type=node.node_type,
                 extension=node.extension, size=node.size, file_types=node.file_types,
+                git_repo_name=node.git_repo_name or '',
+                git_branch_name=node.git_branch_name or '',
+                git_file_exists=node.git_file_exists,
                 parent_path=parent_path
             )
         
@@ -1314,9 +1373,15 @@ class InformationGraphBuilder:
         # Determine if this is a Shell Executor class
         shell_analyzer = ShellScriptAnalyzer()
         is_shell_executor = shell_analyzer.is_shell_executor_class(class_info)
-        
+
         # Determine if this is a test class (check if path is in test directories)
         is_test_class = self._is_test_path(Path(class_info.source_path))
+
+        # Git metadata — derived from repo config (Step 1).
+        repo_cfg = self._get_repo_config_for_path(Path(class_info.source_path))
+        class_info.git_repo_name   = repo_cfg.get('name', '')        if repo_cfg else ''
+        class_info.git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
+        class_info.git_file_exists = True
         
         # MERGE on fqn (unique identifier) to avoid duplicates
         # This respects the unique constraint on JavaClass.fqn
@@ -1337,6 +1402,9 @@ class InformationGraphBuilder:
             n.isDAOClass = $isDAOClass,
             n.isShellExecutorClass = $isShellExecutorClass,
             n.isTestClass = $isTestClass,
+            n.gitRepoName = $git_repo_name,
+            n.gitBranchName = $git_branch_name,
+            n.gitFileExists = $git_file_exists,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -1360,6 +1428,9 @@ class InformationGraphBuilder:
                 isDAOClass=is_dao_class,
                 isShellExecutorClass=is_shell_executor,
                 isTestClass=is_test_class,
+                git_repo_name=class_info.git_repo_name or '',
+                git_branch_name=class_info.git_branch_name or '',
+                git_file_exists=class_info.git_file_exists,
                 parent_path=parent_path
             )
             
@@ -2001,6 +2072,10 @@ class InformationGraphBuilder:
             #logger.info(f"Preparing Bean '{bean_id}' with class '{bean_class}' with xmlPath '{xml_file}' with source_path '{source_path}' for graph storage")
             relative_xml_path = self._to_relative_path(Path(xml_file))
             relative_source_path = self._to_relative_path(Path(source_path)) if source_path else ""
+            # Git metadata for Bean — derived from the Spring XML file's repo
+            bean_repo_cfg = self._get_repo_config_for_path(Path(xml_file))
+            bean_git_repo_name   = bean_repo_cfg.get('name', '')        if bean_repo_cfg else ''
+            bean_git_branch_name = bean_repo_cfg.get('branch_name', '') if bean_repo_cfg else ''
             bean_data.append({
                 'compositeKey': composite_key,
                 'beanId': bean_id,
@@ -2008,7 +2083,9 @@ class InformationGraphBuilder:
                 'simpleClassName': simple_class_name,
                 'path': relative_source_path,
                 'hasSource': bool(source_path),
-                'xmlPath': relative_xml_path
+                'xmlPath': relative_xml_path,
+                'gitRepoName': bean_git_repo_name,
+                'gitBranchName': bean_git_branch_name,
             })
         
         with self.driver.session(database=self.database) as session:
@@ -2022,6 +2099,9 @@ class InformationGraphBuilder:
                 b.simpleClassName = bean.simpleClassName,
                 b.path = bean.path,
                 b.hasSource = bean.hasSource,
+                b.gitRepoName = bean.gitRepoName,
+                b.gitBranchName = bean.gitBranchName,
+                b.gitFileExists = true,
                 b.created_at = datetime()
             ON MATCH SET
                 b.beanId = bean.beanId,

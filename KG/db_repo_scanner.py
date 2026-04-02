@@ -427,6 +427,13 @@ class DBRepoScanner:
         """
         file_name = sql_file.name
         file_path_str = self._to_relative_path(sql_file)
+
+        # Look up branch name for git metadata
+        repo_cfg = next(
+            (r for r in self.config.get('repositories', []) if r.get('name') == repo_name),
+            {}
+        )
+        branch_name = repo_cfg.get('branch_name', '')
         
         # Read file content
         try:
@@ -497,6 +504,7 @@ class DBRepoScanner:
                     'packageName': res_node.packageName,
                     'repoFilePath': res_node.repoFilePath,
                     'repoName': res_node.repoName,
+                    'gitBranchName': branch_name,
                 }
                 self.collected_resources.append(resource_data)
                 resources_found += 1
@@ -622,6 +630,9 @@ class DBRepoScanner:
                                       r.foundInRepo = true,
                                       r.repoName = res.repoName,
                                       r.repoFilePath = res.repoFilePath,
+                                      r.gitRepoName = res.repoName,
+                                      r.gitBranchName = res.gitBranchName,
+                                      r.gitFileExists = true,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,
                                      r.repoName = COALESCE(r.repoName, res.repoName),
@@ -648,6 +659,9 @@ class DBRepoScanner:
                                       r.repoName = res.repoName,
                                       r.repoFilePath = res.repoFilePath,
                                       r.packageName = null,
+                                      r.gitRepoName = res.repoName,
+                                      r.gitBranchName = res.gitBranchName,
+                                      r.gitFileExists = true,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,
                                      r.repoName = COALESCE(r.repoName, res.repoName),

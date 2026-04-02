@@ -479,11 +479,16 @@ def generate_cypher(job: JobDef) -> str:
 
     # Job - Create Job node with source file path
     source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher  # Escape for Cypher
+    git_repo_name   = (job.git_repo_name   or '').replace("'", "\\'") 
+    git_branch_name = (job.git_branch_name or '').replace("'", "\\'")
     #lines.append(f"MERGE (j:Job {{name: '{job.name}'}}) SET j.sourceFile = '{source_file}';")
     lines.append(f"""MERGE (j:Job {{id: '{job.name}', 
                  name: '{job.name}', 
                  sourceFile: '{source_file}'}}) 
-                 ON CREATE SET j.createdAt = datetime(), j.enabled = true 
+                 ON CREATE SET j.createdAt = datetime(), j.enabled = true,
+                               j.gitRepoName = '{git_repo_name}',
+                               j.gitBranchName = '{git_branch_name}',
+                               j.gitFileExists = true
                  ON MATCH SET j.lastSeenAt = datetime();""")
 
     # Steps
@@ -495,24 +500,32 @@ def generate_cypher(job: JobDef) -> str:
             reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'")
             processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'")
             writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'")
+            step_git_repo   = (step.git_repo_name   or '').replace("'", "\\'")
+            step_git_branch = (step.git_branch_name or '').replace("'", "\\'")
 
             lines.append(
-                "MERGE (:Step {name: '%s', stepKind: '%s', "
+                "MERGE (s:Step {name: '%s', stepKind: '%s', "
                 "readerBean: '%s', readerClass: '%s', readerSourcePath: '%s', "
                 "processorBean: '%s', processorClass: '%s', processorSourcePath: '%s', "
-                "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'});" %
+                "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'})"
+                " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s', s.gitFileExists = true;" %
                 (step.name, step.step_kind,
                  step.reader_bean, step.reader_class, reader_src,
                  step.processor_bean, step.processor_class, processor_src,
-                 step.writer_bean, step.writer_class, writer_src)
+                 step.writer_bean, step.writer_class, writer_src,
+                 step_git_repo, step_git_branch)
             )
         else:
             # For tasklet-based steps
             # Escape path for Cypher
             class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
+            step_git_repo   = (step.git_repo_name   or '').replace("'", "\\'")
+            step_git_branch = (step.git_branch_name or '').replace("'", "\\'")
             lines.append(
-                "MERGE (:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'});" %
-                (step.name, step.step_kind, step.impl_bean, step.class_name, class_src)
+                "MERGE (s:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'})"
+                " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s', s.gitFileExists = true;" %
+                (step.name, step.step_kind, step.impl_bean, step.class_name, class_src,
+                 step_git_repo, step_git_branch)
             )
 
     # Blocks
@@ -526,18 +539,26 @@ def generate_cypher(job: JobDef) -> str:
     for dec in job.decisions.values():
         # Escape path for Cypher
         dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
+        dec_git_repo   = (dec.git_repo_name   or '').replace("'", "\\'")
+        dec_git_branch = (dec.git_branch_name or '').replace("'", "\\'")
         lines.append(
-            "MERGE (:Decision {name: '%s', deciderBean: '%s', className: '%s', path: '%s'});" %
-            (dec.name, dec.decider_bean, dec.class_name, dec_src)
+            "MERGE (d:Decision {name: '%s', deciderBean: '%s', className: '%s', path: '%s'})"
+            " ON CREATE SET d.gitRepoName = '%s', d.gitBranchName = '%s', d.gitFileExists = true;" %
+            (dec.name, dec.decider_bean, dec.class_name, dec_src,
+             dec_git_repo, dec_git_branch)
         )
 
     # Listeners
     for listener in job.listeners.values():
         # Escape path for Cypher
         listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'")
+        list_git_repo   = (listener.git_repo_name   or '').replace("'", "\\'")
+        list_git_branch = (listener.git_branch_name or '').replace("'", "\\'")
         lines.append(
-            "MERGE (:Listener {name: '%s', scope: '%s', implBean: '%s', path: '%s'});" %
-            (listener.name, listener.scope, listener.impl_bean, listener_src)
+            "MERGE (l:Listener {name: '%s', scope: '%s', implBean: '%s', path: '%s'})"
+            " ON CREATE SET l.gitRepoName = '%s', l.gitBranchName = '%s', l.gitFileExists = true;" %
+            (listener.name, listener.scope, listener.impl_bean, listener_src,
+             list_git_repo, list_git_branch)
         )
 
     # Job CONTAINS

@@ -145,7 +145,7 @@ scan_options:
   #       JavaLang has the most edge-case coverage (chained calls, local var tracking, etc.).
   #   "treesitter_only" — always use TreeSitter. Handles all Java versions uniformly.
   #       Use this once you are confident TreeSitter covers all your edge cases.
-  java_parser_mode: "javalang_with_treesitter_fallback"
+  java_parser_mode: "treesitter_only"
   extract_imports: true
   extract_methods: true
   batch_size: 2000  # Number of Cypher statements per transaction
