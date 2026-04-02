@@ -483,6 +483,149 @@ class ShellExecutionEnricher:
         except Exception as e:
             logger.error(f"  Error creating resource for {script_name}: {e}")
     
+    def _consolidate_step_shell_executions(self):
+        """
+        Consolidate shell script executions at Step level by traversing the call graph.
+        Mirrors _consolidate_step_db_operations() in db_operation_enricher.
+        """
+        logger.info(" " + "=" * 80)
+        logger.info("Consolidating Shell Executions at Step Level")
+        logger.info("=" * 80)
+
+        query_steps = """
+        MATCH (s:Step)
+        OPTIONAL MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+        RETURN s.name as stepName,
+               s.stepKind as stepKind,
+               elementId(s) as stepId,
+               collect(DISTINCT jc.fqn) as classNames
+        """
+
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query_steps)
+            steps_data = [dict(record) for record in result]
+
+        logger.info(f"  Found {len(steps_data)} Steps to process")
+
+        steps_updated = 0
+
+        for step_data in steps_data:
+            step_name = step_data['stepName']
+            step_kind = step_data['stepKind']
+            step_id = step_data['stepId']
+            class_names = step_data['classNames']
+
+            if not class_names:
+                continue
+
+            if step_kind == "TASKLET":
+                entry_method_names = ["execute"]
+            elif step_kind == "CHUNK":
+                entry_method_names = ["read", "process", "write"]
+            else:
+                continue
+
+            query_entry_methods = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+
+            CALL (jc) {
+                MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId,
+                       m.methodName as methodName,
+                       m.shellExecutions as shellExecs,
+                       m.shellExecutionCount as shellExecCount,
+                       0 as inheritanceDepth
+
+                UNION
+
+                MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
+                MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId,
+                       m.methodName as methodName,
+                       m.shellExecutions as shellExecs,
+                       m.shellExecutionCount as shellExecCount,
+                       length(path) as inheritanceDepth
+            }
+
+            WITH methodId, methodName, shellExecs, shellExecCount, inheritanceDepth
+            ORDER BY inheritanceDepth ASC
+            RETURN methodId, methodName, shellExecs, shellExecCount
+            LIMIT 3
+            """
+
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query_entry_methods,
+                                     stepId=step_id,
+                                     methodNames=entry_method_names)
+                entry_methods = [dict(record) for record in result]
+
+            if not entry_methods:
+                continue
+
+            all_shell_executions = set()
+
+            for entry_method in entry_methods:
+                method_id = entry_method['methodId']
+
+                if entry_method.get('shellExecs') and entry_method.get('shellExecCount', 0) > 0:
+                    all_shell_executions.update(entry_method['shellExecs'])
+
+                visited = set()
+                queue = [method_id]
+                visited.add(method_id)
+
+                while queue:
+                    current_id = queue.pop(0)
+
+                    query_calls = """
+                    MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
+                    WHERE elementId(m) = $methodId
+                    RETURN elementId(called) as calledId,
+                           called.shellExecutions as shellExecs,
+                           called.shellExecutionCount as shellExecCount
+                    """
+
+                    with self.driver.session(database=self.database) as session:
+                        result = session.run(query_calls, methodId=current_id)
+                        called_methods = [dict(record) for record in result]
+
+                    for called in called_methods:
+                        called_id = called['calledId']
+
+                        if called_id not in visited:
+                            visited.add(called_id)
+                            queue.append(called_id)
+
+                            if called.get('shellExecs') and called.get('shellExecCount', 0) > 0:
+                                all_shell_executions.update(called['shellExecs'])
+
+            if all_shell_executions:
+                step_execs_list = sorted(list(all_shell_executions))
+
+                query_update = """
+                MATCH (s:Step)
+                WHERE elementId(s) = $stepId
+                SET s.stepShellExecutions = $executions,
+                    s.stepShellExecutionCount = $count
+                RETURN s.name as name
+                """
+
+                with self.driver.session(database=self.database) as session:
+                    session.run(query_update,
+                                stepId=step_id,
+                                executions=step_execs_list,
+                                count=len(step_execs_list))
+
+                steps_updated += 1
+                logger.info(f"    Step '{step_name}': {len(step_execs_list)} unique shell executions")
+
+        logger.info(f"    Updated {steps_updated} Steps with consolidated shell executions")
+        logger.info("=" * 80)
+
     def _clear_shell_execution_data(self):
         """Clear all shell execution properties from JavaMethod nodes."""
         query = """
@@ -593,7 +736,10 @@ class ShellExecutionEnricher:
                                     exec_info['script_type'],
                                     exec_info['confidence']
                                 )
-        
+
+        # Consolidate at Step level
+        self._consolidate_step_shell_executions()
+
         logger.info("\n" + "=" * 80)
         logger.info("ENRICHMENT SUMMARY")
         logger.info("=" * 80)

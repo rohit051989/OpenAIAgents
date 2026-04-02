@@ -425,9 +425,155 @@ class ProcedureCallEnricher:
             else:
                 logger.info(f"  No procedure calls detected\n")
         
+        # Consolidate at Step level
+        self._consolidate_step_procedure_calls()
+        
         # Print statistics
         self._print_statistics()
     
+    def _consolidate_step_procedure_calls(self):
+        """
+        Consolidate stored procedure calls at Step level by traversing the call graph.
+        Mirrors _consolidate_step_db_operations() in db_operation_enricher.
+        """
+        logger.info(" " + "=" * 80)
+        logger.info("Consolidating Stored Procedure Calls at Step Level")
+        logger.info("=" * 80)
+
+        query_steps = """
+        MATCH (s:Step)
+        OPTIONAL MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+        RETURN s.name as stepName,
+               s.stepKind as stepKind,
+               elementId(s) as stepId,
+               collect(DISTINCT jc.fqn) as classNames
+        """
+
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query_steps)
+            steps_data = [dict(record) for record in result]
+
+        logger.info(f"  Found {len(steps_data)} Steps to process")
+
+        steps_updated = 0
+
+        for step_data in steps_data:
+            step_name = step_data['stepName']
+            step_kind = step_data['stepKind']
+            step_id = step_data['stepId']
+            class_names = step_data['classNames']
+
+            if not class_names:
+                continue
+
+            if step_kind == "TASKLET":
+                entry_method_names = ["execute"]
+            elif step_kind == "CHUNK":
+                entry_method_names = ["read", "process", "write"]
+            else:
+                continue
+
+            query_entry_methods = """
+            MATCH (s:Step)
+            WHERE elementId(s) = $stepId
+            MATCH (s)-[:IMPLEMENTED_BY]->(jc:JavaClass)
+
+            CALL (jc) {
+                MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId,
+                       m.methodName as methodName,
+                       m.procedureCalls as procCalls,
+                       m.procedureCallCount as procCallCount,
+                       0 as inheritanceDepth
+
+                UNION
+
+                MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
+                MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
+                WHERE m.methodName IN $methodNames
+                RETURN elementId(m) as methodId,
+                       m.methodName as methodName,
+                       m.procedureCalls as procCalls,
+                       m.procedureCallCount as procCallCount,
+                       length(path) as inheritanceDepth
+            }
+
+            WITH methodId, methodName, procCalls, procCallCount, inheritanceDepth
+            ORDER BY inheritanceDepth ASC
+            RETURN methodId, methodName, procCalls, procCallCount
+            LIMIT 3
+            """
+
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query_entry_methods,
+                                     stepId=step_id,
+                                     methodNames=entry_method_names)
+                entry_methods = [dict(record) for record in result]
+
+            if not entry_methods:
+                continue
+
+            all_procedure_calls = set()
+
+            for entry_method in entry_methods:
+                method_id = entry_method['methodId']
+
+                if entry_method.get('procCalls') and entry_method.get('procCallCount', 0) > 0:
+                    all_procedure_calls.update(entry_method['procCalls'])
+
+                visited = set()
+                queue = [method_id]
+                visited.add(method_id)
+
+                while queue:
+                    current_id = queue.pop(0)
+
+                    query_calls = """
+                    MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
+                    WHERE elementId(m) = $methodId
+                    RETURN elementId(called) as calledId,
+                           called.procedureCalls as procCalls,
+                           called.procedureCallCount as procCallCount
+                    """
+
+                    with self.driver.session(database=self.database) as session:
+                        result = session.run(query_calls, methodId=current_id)
+                        called_methods = [dict(record) for record in result]
+
+                    for called in called_methods:
+                        called_id = called['calledId']
+
+                        if called_id not in visited:
+                            visited.add(called_id)
+                            queue.append(called_id)
+
+                            if called.get('procCalls') and called.get('procCallCount', 0) > 0:
+                                all_procedure_calls.update(called['procCalls'])
+
+            if all_procedure_calls:
+                step_procs_list = sorted(list(all_procedure_calls))
+
+                query_update = """
+                MATCH (s:Step)
+                WHERE elementId(s) = $stepId
+                SET s.stepProcedureCalls = $procedures,
+                    s.stepProcedureCallCount = $count
+                RETURN s.name as name
+                """
+
+                with self.driver.session(database=self.database) as session:
+                    session.run(query_update,
+                                stepId=step_id,
+                                procedures=step_procs_list,
+                                count=len(step_procs_list))
+
+                steps_updated += 1
+                logger.info(f"    Step '{step_name}': {len(step_procs_list)} unique procedure calls")
+
+        logger.info(f"    Updated {steps_updated} Steps with consolidated procedure calls")
+        logger.info("=" * 80)
+
     def _print_statistics(self):
         """Print enrichment statistics."""
         logger.info("=" * 80)
