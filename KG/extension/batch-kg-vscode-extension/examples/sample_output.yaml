@@ -1,9 +1,9 @@
-# Example YAML Output
+﻿# Example YAML Output
 # This is what the extension generates when you save a resolution
 
 grey_area_resolutions:
   description: Manual resolutions for UNKNOWN/DYNAMIC/PARAMETERIZED operations
-  generated_by: Batch KG Gap Analyzer VS Code Extension
+  generated_by: Batch IG Gap Analyzer VS Code Extension
   generated_at: '2026-03-24T12:00:00.000Z'
   
   steps:

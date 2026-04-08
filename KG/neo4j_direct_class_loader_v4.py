@@ -23,7 +23,6 @@ import logging
 import yaml
 import os
 from dotenv import load_dotenv
-from neo4j_direct_step_loader import generate_cypher
 from cpm_analyzer_v1 import CPMAnalyzer
 from classes.DataClasses import JobDef
 from classes.KGNodeDefs import (

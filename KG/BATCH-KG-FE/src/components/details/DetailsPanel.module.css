@@ -1,0 +1,309 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ─── Tabs ───────────────────────────────────────────────────────────────────── */
+
+.tabs {
+  flex-shrink: 0;
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 var(--space-4);
+  gap: var(--space-1);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  margin-bottom: -1px;
+}
+
+.tab:hover {
+  color: var(--color-text-primary);
+}
+
+.tabActive {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+.tabCount {
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  border-radius: 20px;
+  padding: 1px 7px;
+  font-weight: 500;
+}
+
+/* ─── Content area ───────────────────────────────────────────────────────────── */
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+/* ─── Execution log ──────────────────────────────────────────────────────────── */
+
+.logList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.logEntry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.logMsg {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* ─── Badges ────────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  width: fit-content;
+}
+
+.badgeDefault {
+  background: #edf2f7;
+  color: #4a5568;
+}
+
+.badgePlanner {
+  background: #ebf8ff;
+  color: #2b6cb0;
+}
+
+.badgeSummarizer {
+  background: #f0fff4;
+  color: #276749;
+}
+
+.badgeStep {
+  background: #faf5ff;
+  color: #6b46c1;
+}
+
+/* ─── Plan ───────────────────────────────────────────────────────────────────── */
+
+.planMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.metaKey {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metaTag {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+.tagStrategy {
+  background: #ebf8ff;
+  color: #2b6cb0;
+}
+
+.tagComplexity {
+  background: #f0fff4;
+  color: #276749;
+}
+
+.planList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.planCard {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.planCardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  background: var(--color-bg-subtle);
+  transition: background var(--transition-fast);
+  user-select: none;
+}
+
+.planCardHeader:hover {
+  background: var(--color-bg-hover);
+}
+
+.planCardLeft {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+}
+
+.planCardRight {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.stepNum {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: white;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.stepAction {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  flex: 1;
+}
+
+.chevron {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.planCardBody {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.detailRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.detailKey {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  min-width: 70px;
+}
+
+.detailVal {
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+}
+
+.tag {
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  font-weight: 500;
+}
+
+.tagTool {
+  background: #faf5ff;
+  color: #6b46c1;
+  border: 1px solid #e9d8fd;
+}
+
+.tagCypher {
+  background: #fffff0;
+  color: #744210;
+  border: 1px solid #fefcbf;
+}
+
+/* ─── Empty state ────────────────────────────────────────────────────────────── */
+
+.empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+.emptyIcon {
+  font-size: 3rem;
+  opacity: 0.2;
+  line-height: 1;
+}
+
+.emptyTitle {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.emptyHint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  max-width: 220px;
+  line-height: 1.6;
+}
+
+.noData {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+  margin-top: var(--space-6);
+}

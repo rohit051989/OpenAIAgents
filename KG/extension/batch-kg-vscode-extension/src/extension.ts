@@ -1,12 +1,12 @@
-import * as vscode from 'vscode';
+﻿import * as vscode from 'vscode';
 import { GapAnalyzerPanel } from './gapAnalyzerPanel';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Batch KG Gap Analyzer extension is now active');
+    console.log('Batch IG Gap Analyzer extension is now active');
 
     // Register command to open Gap Analyzer
-    const openGapAnalyzer = vscode.commands.registerCommand('batchKg.openGapAnalyzer', () => {
-        GapAnalyzerPanel.createOrShow(context.extensionUri);
+    const openGapAnalyzer = vscode.commands.registerCommand('batchIg.openGapAnalyzer', () => {
+        GapAnalyzerPanel.createOrShow(context.extensionUri, context);
     });
 
     context.subscriptions.push(openGapAnalyzer);
@@ -15,12 +15,12 @@ export function activate(context: vscode.ExtensionContext) {
     if (vscode.window.registerWebviewPanelSerializer) {
         vscode.window.registerWebviewPanelSerializer(GapAnalyzerPanel.viewType, {
             async deserializeWebviewPanel(webviewPanel: vscode.WebviewPanel, state: any) {
-                GapAnalyzerPanel.revive(webviewPanel, context.extensionUri);
+                GapAnalyzerPanel.revive(webviewPanel, context.extensionUri, context);
             }
         });
     }
 }
 
 export function deactivate() {
-    console.log('Batch KG Gap Analyzer extension is now deactivated');
+    console.log('Batch IG Gap Analyzer extension is now deactivated');
 }

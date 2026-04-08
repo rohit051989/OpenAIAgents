@@ -1,4 +1,4 @@
-# Batch KG Gap Analyzer - Feature Overview
+﻿# Batch IG Gap Analyzer - Feature Overview
 
 ## 🎯 Problem Statement
 
@@ -34,7 +34,7 @@
 ### 1. Main Panel Layout
 ```
 ┌──────────────────────────────────────────────────────┐
-│  🔍 Batch KG Gap Analyzer    [Test Connection]      │
+│  🔍 Batch IG Gap Analyzer    [Test Connection]      │
 ├──────────────────────────────────────────────────────┤
 │  📊 Gap Visualization                                │
 │  ┌────────────────────────────────────────────────┐ │
@@ -133,7 +133,6 @@ grey_area_resolutions:
 ### Works With:
 - **Neo4j Database**: Queries information_graph database
 - **Python Scripts**: Uses same data as trace_unknown_operations.py
-- **Config Files**: Reads from `config/information_graph_config.yaml`
 - **Enrichers**: Integrates with db_operation_enricher.py, etc.
 
 ### Replaces:
@@ -244,6 +243,6 @@ grey_area_resolutions:
 
 ## 📝 Summary
 
-The Batch KG Gap Analyzer extension transforms the gap resolution process from a tedious, error-prone manual task into a streamlined, efficient workflow. By providing visual navigation, guided forms, and automatic YAML generation, it enables developers to resolve gaps 10x faster with significantly fewer errors.
+The Batch IG Gap Analyzer extension transforms the gap resolution process from a tedious, error-prone manual task into a streamlined, efficient workflow. By providing visual navigation, guided forms, and automatic YAML generation, it enables developers to resolve gaps 10x faster with significantly fewer errors.
 
 **Key Takeaway**: What used to take hours now takes minutes, with better accuracy and a superior developer experience.

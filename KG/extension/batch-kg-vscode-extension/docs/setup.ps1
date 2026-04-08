@@ -1,8 +1,8 @@
-# Batch KG Gap Analyzer - Installation Script
+﻿# Batch IG Gap Analyzer - Installation Script
 # Run this script from PowerShell to set up the extension
 
 Write-Host "================================" -ForegroundColor Cyan
-Write-Host "Batch KG Gap Analyzer Setup" -ForegroundColor Cyan
+Write-Host "Batch IG Gap Analyzer Setup" -ForegroundColor Cyan
 Write-Host "================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -70,7 +70,7 @@ Write-Host "1. Open this folder in VS Code" -ForegroundColor White
 Write-Host "2. Update Neo4j credentials in .vscode\settings.json" -ForegroundColor White
 Write-Host "3. Press F5 to launch Extension Development Host" -ForegroundColor White
 Write-Host "4. In the new window, press Ctrl+Shift+P" -ForegroundColor White
-Write-Host "5. Type 'Batch KG: Open Gap Analyzer'" -ForegroundColor White
+Write-Host "5. Type 'Batch IG: Open Gap Analyzer'" -ForegroundColor White
 Write-Host ""
 Write-Host "For more details, see QUICK_START.md" -ForegroundColor Cyan
 Write-Host ""

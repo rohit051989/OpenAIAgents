@@ -17,7 +17,6 @@ interface AppState {
 
 interface Job {
     name: string;
-    gap_count: number;
 }
 
 interface Step {

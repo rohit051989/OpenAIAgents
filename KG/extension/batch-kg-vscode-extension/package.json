@@ -1,53 +1,36 @@
 {
-  "name": "batch-kg-gap-analyzer",
-  "displayName": "Batch KG Gap Analyzer",
-  "description": "VS Code extension for analyzing and resolving Spring Batch Knowledge Graph gaps",
+  "name": "batch-ig-gap-analyzer",
+  "displayName": "Batch IG Gap Analyzer",
+  "description": "VS Code extension for analyzing and resolving Spring Batch Information Graph gaps",
   "version": "0.1.0",
-  "publisher": "batch-kg",
+  "publisher": "batch-ig",
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
     "Other"
   ],
+  "activationEvents": [
+    "*"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "batchKg.openGapAnalyzer",
-        "title": "Batch KG: Open Gap Analyzer",
-        "category": "Batch KG"
+        "command": "batchIg.openGapAnalyzer",
+        "title": "Batch IG: Open Gap Analyzer",
+        "category": "Batch IG"
       }
     ],
     "configuration": {
-      "title": "Batch KG Gap Analyzer",
+      "title": "Batch IG Gap Analyzer",
       "properties": {
-        "batchKg.neo4jUri": {
+        "batchIg.apiUrl": {
           "type": "string",
-          "default": "bolt://localhost:7687",
-          "description": "Neo4j database URI"
+          "default": "http://localhost:8000",
+          "description": "Base URL of the Batch-IG-Extension-APIs FastAPI service (e.g. http://myserver:8000). Change this setting when the API is deployed on a remote host or different port."
         },
-        "batchKg.neo4jUser": {
-          "type": "string",
-          "default": "neo4j",
-          "description": "Neo4j username"
-        },
-        "batchKg.neo4jPassword": {
-          "type": "string",
-          "default": "",
-          "description": "Neo4j password"
-        },
-        "batchKg.neo4jDatabase": {
-          "type": "string",
-          "default": "information_graph",
-          "description": "Neo4j database name"
-        },
-        "batchKg.configPath": {
-          "type": "string",
-          "default": "../Batch_KG/config/information_graph_config.yaml",
-          "description": "Path to information_graph_config.yaml (relative to workspace root)"
-        },
-        "batchKg.yamlOutputPath": {
+        "batchIg.yamlOutputPath": {
           "type": "string",
           "default": "config/grey_area_resolution.yaml",
           "description": "Output path for generated YAML files"
@@ -72,7 +55,6 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "neo4j-driver": "^5.15.0",
     "js-yaml": "^4.1.0"
   }
 }

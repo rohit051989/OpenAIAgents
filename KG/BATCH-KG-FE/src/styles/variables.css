@@ -1,0 +1,71 @@
+/* Design tokens — light theme matching the Context Graph Demo reference */
+
+:root {
+  /* Page background */
+  --color-bg-canvas:     #f0f4f8;
+  --color-bg-surface:    #ffffff;
+  --color-bg-hover:      #f7fafc;
+  --color-bg-subtle:     #f7fafc;
+  --color-bg-code:       #f1f5f9;
+
+  /* Borders */
+  --color-border:        #e2e8f0;
+  --color-border-muted:  #edf2f7;
+
+  /* Text */
+  --color-text-primary:  #1a202c;
+  --color-text-secondary:#4a5568;
+  --color-text-muted:    #a0aec0;
+
+  /* Brand / accent */
+  --color-accent:        #3182ce;
+  --color-accent-hover:  #2b6cb0;
+  --color-accent-light:  #ebf8ff;
+
+  /* Semantic */
+  --color-success:       #38a169;
+  --color-success-light: #f0fff4;
+  --color-warning:       #d69e2e;
+  --color-warning-light: #fffff0;
+  --color-danger:        #e53e3e;
+  --color-danger-light:  #fff5f5;
+  --color-info:          #3182ce;
+
+  /* Chat bubbles */
+  --color-user-bubble:      #3182ce;
+  --color-user-bubble-text: #ffffff;
+  --color-assistant-bubble: #ffffff;
+
+  /* Card shadow */
+  --shadow-card:  0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-sm:    0 1px 2px rgba(0,0,0,.06);
+
+  /* Typography */
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Helvetica, Arial, sans-serif;
+  --font-mono:   ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --font-size-xs:   0.75rem;
+  --font-size-sm:   0.8125rem;
+  --font-size-base: 0.9375rem;
+  --font-size-lg:   1.0625rem;
+  --font-size-xl:   1.25rem;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-base: 250ms ease;
+}

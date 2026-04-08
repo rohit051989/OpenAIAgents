@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Refactored Gap Analyzer Panel
  * Uses modular ViewBuilder for HTML/CSS/JS generation
  */
@@ -6,22 +6,24 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Neo4jService } from './services/neo4jService';
+import { execSync } from 'child_process';
+import { ApiService } from './services/apiService';
 import { YamlGenerator } from './services/yamlGenerator';
 import { ResolutionEntry } from './models/types';
 import { ViewBuilder } from './views/viewBuilder';
 
 export class GapAnalyzerPanel {
     public static currentPanel: GapAnalyzerPanel | undefined;
-    public static readonly viewType = 'batchKgGapAnalyzer';
+    public static readonly viewType = 'batchIgGapAnalyzer';
 
     private readonly _panel: vscode.WebviewPanel;
     private readonly _extensionUri: vscode.Uri;
+    private _context: vscode.ExtensionContext;
     private _disposables: vscode.Disposable[] = [];
-    private neo4jService: Neo4jService;
+    private neo4jService: ApiService;
     private viewBuilder: ViewBuilder;
 
-    public static createOrShow(extensionUri: vscode.Uri) {
+    public static createOrShow(extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
@@ -35,7 +37,7 @@ export class GapAnalyzerPanel {
         // Otherwise, create a new panel
         const panel = vscode.window.createWebviewPanel(
             GapAnalyzerPanel.viewType,
-            'Batch KG Gap Analyzer',
+            'Batch IG Gap Analyzer',
             column || vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -47,17 +49,18 @@ export class GapAnalyzerPanel {
             }
         );
 
-        GapAnalyzerPanel.currentPanel = new GapAnalyzerPanel(panel, extensionUri);
+        GapAnalyzerPanel.currentPanel = new GapAnalyzerPanel(panel, extensionUri, context);
     }
 
-    public static revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
-        GapAnalyzerPanel.currentPanel = new GapAnalyzerPanel(panel, extensionUri);
+    public static revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
+        GapAnalyzerPanel.currentPanel = new GapAnalyzerPanel(panel, extensionUri, context);
     }
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
         this._panel = panel;
         this._extensionUri = extensionUri;
-        this.neo4jService = new Neo4jService();
+        this._context = context;
+        this.neo4jService = new ApiService();
         this.viewBuilder = new ViewBuilder(extensionUri);
 
         // Set the webview's initial html content
@@ -91,6 +94,21 @@ export class GapAnalyzerPanel {
             case 'openSourceFile':
                 await this.handleOpenSourceFile(message.methodFqn);
                 break;
+            case 'openRepoSetup':
+                await this.handleOpenRepoSetup();
+                break;
+            case 'viewRepoConfig':
+                await this.handleOpenRepoSetup();
+                break;
+            case 'flushRepoCache':
+                await this.handleFlushRepoCache();
+                break;
+            case 'validateRepoPaths':
+                await this.handleValidateRepoPaths(message.pathMap);
+                break;
+            case 'openJavaFile':
+                await this.handleOpenJavaFile(message.gitRepoName, message.filePath, message.methodFqn);
+                break;
             case 'testConnection':
                 await this.handleTestConnection();
                 break;
@@ -102,47 +120,213 @@ export class GapAnalyzerPanel {
             const result = await this.neo4jService.getJavaFileForMethod(methodFqn);
             if (!result) {
                 vscode.window.showWarningMessage(
-                    `Could not find source file for method: ${methodFqn}\nThe JavaClass node may not have a 'path' property stored in the graph.`
+                    `Could not find method info for: ${methodFqn}\nThe JavaMethod node may not exist in the graph.`
                 );
                 return;
             }
 
-            const fileUri = vscode.Uri.file(result.filePath);
-
-            // Check the file actually exists on disk before trying to open it
-            if (!fs.existsSync(result.filePath)) {
-                vscode.window.showWarningMessage(
-                    `Source file not found on disk: ${result.filePath}\nThe graph path may point to a different machine or the file was moved.`
-                );
-                return;
+            // Truncate source code to first 30 lines if longer
+            let displayCode = result.sourceCode ?? '(source code not available)';
+            const lines = displayCode.split('\n');
+            const truncated = lines.length > 30;
+            if (truncated) {
+                displayCode = lines.slice(0, 30).join('\n') + '\n// ... (truncated — showing first 30 lines)';
             }
 
-            const doc = await vscode.workspace.openTextDocument(fileUri);
-            const editor = await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+            // Determine whether a validated local path exists for this repo
+            const validatedPaths = this._context.globalState.get<Record<string, string>>(
+                'batchIg.validatedRepoPaths', {}
+            );
+            const hasLocalRepo = !!(result.gitRepoName && validatedPaths[result.gitRepoName]);
 
-            // Derive the simple method name from the FQN and scroll to it
-            const methodName = methodFqn.split('.').pop() ?? '';
-            console.info(`Opening file ${result.filePath} for method ${methodFqn} (simple name: ${methodName})`);
-            if (methodName) {
-                const text = doc.getText();
-                const lines = text.split('\n');
-                // Find the first line that declares this method (looks for the method name followed by '(')
-                const methodLine = lines.findIndex(line => {
-                    const trimmed = line.trim();
-                    return trimmed.includes(methodName + '(') &&
-                           !trimmed.startsWith('//') &&
-                           !trimmed.startsWith('*');
-                });
-                if (methodLine >= 0) {
-                    const pos = new vscode.Position(methodLine, 0);
-                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.AtTop);
-                    editor.selection = new vscode.Selection(pos, pos);
+            this._panel.webview.postMessage({
+                command: 'showSourceCodePopup',
+                methodFqn,
+                methodName: result.methodName ?? methodFqn.split('.').pop(),
+                javaLineCount: result.javaLineCount,
+                gitBranchName: result.gitBranchName,
+                gitRepoName: result.gitRepoName,
+                filePath: result.filePath,
+                classFqn: result.classFqn,
+                sourceCode: displayCode,
+                hasLocalRepo,
+            });
+        } catch (error: any) {
+            console.error('Error fetching source code:', error);
+            vscode.window.showErrorMessage(`Error fetching source code: ${error.message}`);
+        }
+    }
+
+    private async handleOpenRepoSetup() {
+        try {
+            const repos = await this.neo4jService.getRepositories();
+            const validatedPaths = this._context.globalState.get<Record<string, string>>(
+                'batchIg.validatedRepoPaths', {}
+            );
+            this._panel.webview.postMessage({
+                command: 'reposLoaded',
+                repos,
+                validatedPaths,
+            });
+        } catch (error: any) {
+            console.error('Error fetching repositories:', error);
+            vscode.window.showErrorMessage(`Error fetching repositories: ${error.message}`);
+        }
+    }
+
+    private async handleFlushRepoCache() {
+        const choice = await vscode.window.showWarningMessage(
+            'Clear all saved repository paths? You will need to re-enter them in Repo Config.',
+            { modal: true },
+            'Yes, Clear'
+        );
+        if (choice !== 'Yes, Clear') { return; }
+        await this._context.globalState.update('batchIg.validatedRepoPaths', {});
+        vscode.window.showInformationMessage('Repository path cache cleared.');
+        this._panel.webview.postMessage({ command: 'repoCacheFlushed' });
+    }
+
+    private async handleValidateRepoPaths(        pathMap: Record<string, { localPath: string; expectedBranch: string }>
+    ) {
+        const results: Record<string, { valid: boolean; message: string }> = {};
+        let allValid = true;
+
+        for (const [repoName, { localPath, expectedBranch }] of Object.entries(pathMap)) {
+            if (!localPath) {
+                results[repoName] = { valid: false, message: 'Path is required.' };
+                allValid = false;
+                continue;
+            }
+            if (!fs.existsSync(localPath)) {
+                results[repoName] = { valid: false, message: `Path does not exist: ${localPath}` };
+                allValid = false;
+                continue;
+            }
+            try {
+                const actualBranch = execSync(
+                    `git -C "${localPath}" rev-parse --abbrev-ref HEAD`,
+                    { timeout: 5000 }
+                ).toString().trim();
+
+                if (expectedBranch && actualBranch !== expectedBranch) {
+                    results[repoName] = {
+                        valid: false,
+                        message: `Branch mismatch: expected "${expectedBranch}", current is "${actualBranch}".`,
+                    };
+                    allValid = false;
+                } else {
+                    results[repoName] = { valid: true, message: `Validated (branch: ${actualBranch})` };
+                }
+            } catch (err: any) {
+                results[repoName] = {
+                    valid: false,
+                    message: `Not a valid git repository (${err.message.split('\n')[0]})`,
+                };
+                allValid = false;
+            }
+        }
+
+        if (allValid) {
+            const pathsToSave: Record<string, string> = {};
+            for (const [repoName, { localPath }] of Object.entries(pathMap)) {
+                pathsToSave[repoName] = localPath;
+            }
+            await this._context.globalState.update('batchIg.validatedRepoPaths', pathsToSave);
+        }
+
+        this._panel.webview.postMessage({ command: 'repoValidationResult', results, allValid });
+    }
+
+    private async handleOpenJavaFile(repoName: string, filePath: string, methodFqn?: string) {
+        const validatedPaths = this._context.globalState.get<Record<string, string>>(
+            'batchIg.validatedRepoPaths', {}
+        );
+        const localRepoPath = validatedPaths[repoName];
+        if (!localRepoPath) {
+            vscode.window.showErrorMessage(
+                `No local path configured for repository "${repoName}". Set it up via the source popup first.`
+            );
+            return;
+        }
+        if (!filePath) {
+            vscode.window.showErrorMessage('No file path available for this Java class.');
+            return;
+        }
+
+        // JavaClass.path starts with the repo folder name (e.g. "test_code_repo/src/...").
+        // The localRepoPath already points inside that folder, so strip the leading segment
+        // when it matches the last component of localRepoPath.
+        const repoFolderName = path.basename(localRepoPath);
+        const normalizedFilePath = filePath.replace(/\\/g, '/');
+        const strippedFilePath = normalizedFilePath.startsWith(repoFolderName + '/')
+            ? normalizedFilePath.slice(repoFolderName.length + 1)
+            : normalizedFilePath;
+
+        const absolutePath = path.join(localRepoPath, strippedFilePath);
+        if (!fs.existsSync(absolutePath)) {
+            vscode.window.showErrorMessage(`File not found at: ${absolutePath}`);
+            return;
+        }
+        try {
+            const document = await vscode.workspace.openTextDocument(absolutePath);
+            const editor = await vscode.window.showTextDocument(document, { preview: false });
+
+            // Jump to the specific method, handling overloads by matching parameter types
+            if (methodFqn) {
+                const sig = this.parseMethodSignature(methodFqn);
+                if (sig) {
+                    const lines = document.getText().split('\n');
+                    const lineIndex = this.findMethodLine(lines, sig.methodName, sig.paramTypes);
+                    if (lineIndex >= 0) {
+                        const pos = new vscode.Position(lineIndex, 0);
+                        editor.selection = new vscode.Selection(pos, pos);
+                        editor.revealRange(
+                            new vscode.Range(pos, pos),
+                            vscode.TextEditorRevealType.InCenter
+                        );
+                    }
                 }
             }
-        } catch (error: any) {
-            console.error('Error opening source file:', error);
-            vscode.window.showErrorMessage(`Error opening source file: ${error.message}`);
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`Could not open file: ${err.message}`);
         }
+    }
+
+    /** Parse "com.pkg.Class.methodName(Type1,Type2)" → { methodName, paramTypes } */
+    private parseMethodSignature(fqn: string): { methodName: string; paramTypes: string[] } | null {
+        const parenOpen = fqn.indexOf('(');
+        if (parenOpen === -1) { return null; }
+        const beforeParen = fqn.substring(0, parenOpen);
+        const inside = fqn.substring(parenOpen + 1, fqn.endsWith(')') ? fqn.length - 1 : undefined);
+        const methodName = beforeParen.split('.').pop() || '';
+        const paramTypes = inside ? inside.split(',').map(p => p.trim()).filter(Boolean) : [];
+        return { methodName, paramTypes };
+    }
+
+    /**
+     * Find the line index of a Java method declaration that matches methodName and all paramTypes.
+     * Handles overloads: a line must contain the method name followed by '(' AND all
+     * parameter type simple names (e.g. "Map" matches "Map<String,Integer>").
+     */
+    private findMethodLine(lines: string[], methodName: string, paramTypes: string[]): number {
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            // Must contain: methodName followed (somewhere) by '('
+            const nameIdx = line.indexOf(methodName);
+            if (nameIdx === -1) { continue; }
+            const afterName = line.substring(nameIdx + methodName.length).trimStart();
+            if (!afterName.startsWith('(')) { continue; }
+            // Must contain each param type (simple name — no FQN prefix)
+            if (paramTypes.length > 0) {
+                const allMatch = paramTypes.every(pt => {
+                    const simpleName = pt.split('.').pop() || pt;
+                    return line.includes(simpleName);
+                });
+                if (!allMatch) { continue; }
+            }
+            return i;
+        }
+        return -1;
     }
 
     private async handleTestConnection() {
@@ -153,27 +337,27 @@ export class GapAnalyzerPanel {
                 command: 'connectionStatus',
                 success: connected,
                 message: connected 
-                    ? ' Neo4j connection successful!' 
-                    : ' Neo4j connection failed. Check your settings.'
+                    ? ' API connection successful!' 
+                    : ' API connection failed. Check your settings.'
             });
 
             if (connected) {
-                vscode.window.showInformationMessage(' Neo4j connection successful!');
+                vscode.window.showInformationMessage(' API connection successful!');
             } else {
-                vscode.window.showErrorMessage(' Neo4j connection failed. Check your settings.', 'Open Settings')
+                vscode.window.showErrorMessage(' API connection failed. Check "batchIg.apiUrl" in settings.', 'Open Settings')
                     .then(selection => {
                         if (selection === 'Open Settings') {
-                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchKg');
+                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchIg');
                         }
                     });
             }
         } catch (error: any) {
-            const errorMsg = ` Neo4j error: ${error.message}`;
+            const errorMsg = ` API error: ${error.message}`;
             
             vscode.window.showErrorMessage(errorMsg, 'Open Settings')
                 .then(selection => {
                     if (selection === 'Open Settings') {
-                        vscode.commands.executeCommand('workbench.action.openSettings', 'batchKg');
+                        vscode.commands.executeCommand('workbench.action.openSettings', 'batchIg');
                     }
                 });
             
@@ -187,7 +371,7 @@ export class GapAnalyzerPanel {
 
     private async handleGetJobs() {
         try {
-            console.log('Fetching jobs from Neo4j...');
+            console.log('Fetching jobs from API...');
             const jobs = await this.neo4jService.getAllJobs();
             console.log(`Found ${jobs.length} jobs:`, jobs);
             
@@ -205,7 +389,7 @@ export class GapAnalyzerPanel {
                 vscode.window.showErrorMessage(`Error loading jobs: ${error.message}`, 'Open Settings')
                     .then(selection => {
                         if (selection === 'Open Settings') {
-                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchKg');
+                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchIg');
                         }
                     });
             } else {
@@ -240,7 +424,7 @@ export class GapAnalyzerPanel {
                 vscode.window.showErrorMessage(`Error loading steps: ${error.message}`, 'Open Settings')
                     .then(selection => {
                         if (selection === 'Open Settings') {
-                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchKg');
+                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchIg');
                         }
                     });
             } else {
@@ -339,7 +523,7 @@ export class GapAnalyzerPanel {
                 vscode.window.showErrorMessage(`Error loading gaps: ${error.message}`, 'Open Settings')
                     .then(selection => {
                         if (selection === 'Open Settings') {
-                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchKg');
+                            vscode.commands.executeCommand('workbench.action.openSettings', 'batchIg');
                         }
                     });
             } else {
@@ -415,7 +599,7 @@ export class GapAnalyzerPanel {
             }
 
             // Get output path configuration
-            const config = vscode.workspace.getConfiguration('batchKg');
+            const config = vscode.workspace.getConfiguration('batchIg');
             let outputPath = config.get<string>('yamlOutputPath', 'config/grey_area_resolution.yaml');
             
             // Extract directory from outputPath and use date-based filename

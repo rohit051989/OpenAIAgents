@@ -7,6 +7,10 @@ class FormManager {
     constructor() {}
 
     populateForm(gap: any): void {
+        // Hide placeholder, show the resolution section
+        const placeholder = document.getElementById('resolutionPlaceholder');
+        if (placeholder) { placeholder.style.display = 'none'; }
+
         // 1. Show the resolution section
         const resolutionSection = document.getElementById('resolutionSection');
         if (resolutionSection) {

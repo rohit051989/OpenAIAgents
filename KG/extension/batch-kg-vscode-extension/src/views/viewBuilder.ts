@@ -25,6 +25,8 @@ export class ViewBuilder {
         const headerTemplate = this.readTemplate('header.html');
         const leftPanelTemplate = this.readTemplate('leftPanel.html');
         const rightPanelTemplate = this.readTemplate('rightPanel.html');
+        const sourceCodePopupTemplate = this.readTemplate('sourceCodePopup.html');
+        const repoSetupViewTemplate = this.readTemplate('repoSetupView.html');
         
         // Read form templates
         const dbFieldsTemplate = this.readTemplate('forms/dbFields.html');
@@ -52,6 +54,8 @@ export class ViewBuilder {
             .replace('{{header}}', headerTemplate)
             .replace('{{leftPanel}}', leftPanelTemplate)
             .replace('{{rightPanel}}', rightPanel)
+            .replace('{{sourceCodePopup}}', sourceCodePopupTemplate)
+            .replace('{{repoSetupView}}', repoSetupViewTemplate)
             .replace('{{script}}', script);
 
         return html;

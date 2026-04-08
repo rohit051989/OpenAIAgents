@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------------------
+# Batch-IG-Extension-APIs — Application Configuration
+#
+# This file is the single source of truth for all non-secret, non-infra
+# settings.  Neo4j credentials and server host/port are NOT here — they
+# live in .env so they can vary per environment without touching this file.
+# ---------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Scan options — control which jobs appear in the VS Code extension job list
+# --------------------------------------------------------------------------
+scan_options:
+  # true  → query the graph for every Job node
+  # false → only expose the jobs listed in jobs_to_build below
+  build_all_jobs: true
+  jobs_to_build: []
+
+# --------------------------------------------------------------------------
+# Grey-area keywords
+# A JavaMethod node is flagged as a gap when any of these keywords appear
+# (case-insensitive) in the relevant field of the operation/call string.
+# --------------------------------------------------------------------------
+grey_area_keywords:
+  # Applies to ALL categories as a base check
+  core:
+    - UNKNOWN
+    - DYNAMIC
+    - PARAMETERIZED
+
+  # Matched against the table_name segment of a DB operation string
+  # Format: operation_type:table_name:confidence
+  db_operations:
+    - DYNAMIC_TABLE
+    - DYNAMIC_CATALOG
+    - DYNAMIC_SCHEMA
+
+  # Matched against the procedure_name segment of a procedure call string
+  # Format: schema:package:procedure_name:database_type:proc_type:confidence
+  procedure_calls:
+    - DYNAMIC_PROCEDURE
+    - DYNAMIC_PACKAGE
+
+  # Matched against the script_name segment of a shell execution string
+  # Format: execution_method:script_name:confidence
+  shell_executions:
+    - DYNAMIC_PATH
+    - DYNAMIC_SCRIPT
+    - UNKNOWN_SCRIPT
+    - REMOTE_EXECUTION
+
+  # Soft quality keywords applied to shell script names (case-insensitive
+  # substring match).  Broader than shell_executions to catch vague names.
+  script_quality:
+    - unknown
+    - dynamic
+    - parameterized
+    - variable
+    - placeholder
+    - error
+    - exception
+    - unable
+    - failed
+    - missing
+    - not found
+    - invalid
+    - undefined
+    - "null"
+    - empty
+
+# --------------------------------------------------------------------------
+# Graph query settings
+# Controls how Cypher queries traverse the call graph
+# --------------------------------------------------------------------------
+graph_query:
+  # JavaMethod names treated as BFS entry points for gap scanning
+  entry_method_names:
+    - execute
+    - read
+    - write
+    - process
+
+  # Maximum CALLS depth to traverse when looking for gap methods.
+  # Higher values are more thorough but slower for deep call chains.
+  max_call_depth: 10

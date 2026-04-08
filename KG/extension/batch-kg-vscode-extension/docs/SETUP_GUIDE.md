@@ -1,13 +1,13 @@
-# Batch KG Gap Analyzer - Setup & Usage Guide
+﻿# Batch IG Gap Analyzer - Setup & Usage Guide
 
 ## 📋 Overview
 
-This VS Code extension streamlines the process of identifying and resolving gaps in Spring Batch Knowledge Graph. It replaces the manual process of running Python scripts, analyzing logs, and manually writing YAML files.
+This VS Code extension streamlines the process of identifying and resolving gaps in Spring Batch Information Graph. It replaces the manual process of running Python scripts, analyzing logs, and manually writing YAML files.
 
 ## 🏗️ Project Structure
 
 ```
-batch-kg-vscode-extension/
+batch-ig-vscode-extension/
 ├── src/
 │   ├── extension.ts              # Extension entry point
 │   ├── gapAnalyzerPanel.ts       # Main webview UI controller
@@ -24,7 +24,7 @@ batch-kg-vscode-extension/
 ### 1. Install Dependencies
 
 ```bash
-cd batch-kg-vscode-extension
+cd batch-ig-vscode-extension
 npm install
 ```
 
@@ -36,13 +36,13 @@ npm run compile
 
 ### 3. Run Extension in Development Mode
 
-1. Open the `batch-kg-vscode-extension` folder in VS Code
+1. Open the `batch-ig-vscode-extension` folder in VS Code
 2. Press `F5` to launch Extension Development Host
 3. A new VS Code window will open with the extension loaded
 
 ### 4. Configure Settings
 
-In VS Code settings (File → Preferences → Settings), search for "Batch KG" and configure:
+In VS Code settings (File → Preferences → Settings), search for "Batch IG" and configure:
 
 - **Neo4j URI**: `bolt://localhost:7687` (or your Neo4j server)
 - **Neo4j User**: `neo4j`
@@ -54,11 +54,11 @@ Alternatively, add to `.vscode/settings.json`:
 
 ```json
 {
-  "batchKg.neo4jUri": "bolt://localhost:7687",
-  "batchKg.neo4jUser": "neo4j",
-  "batchKg.neo4jPassword": "your-password",
-  "batchKg.neo4jDatabase": "information_graph",
-  "batchKg.yamlOutputPath": "config/grey_area_resolution.yaml"
+  "batchIg.neo4jUri": "bolt://localhost:7687",
+  "batchIg.neo4jUser": "neo4j",
+  "batchIg.neo4jPassword": "your-password",
+  "batchIg.neo4jDatabase": "information_graph",
+  "batchIg.yamlOutputPath": "config/grey_area_resolution.yaml"
 }
 ```
 
@@ -67,7 +67,7 @@ Alternatively, add to `.vscode/settings.json`:
 ### Step 1: Open Gap Analyzer
 
 1. Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
-2. Type: "Batch KG: Open Gap Analyzer"
+2. Type: "Batch IG: Open Gap Analyzer"
 3. Press Enter
 
 ### Step 2: Test Connection
@@ -140,7 +140,7 @@ Example output:
 ```yaml
 grey_area_resolutions:
   description: Manual resolutions for UNKNOWN/DYNAMIC/PARAMETERIZED operations
-  generated_by: Batch KG Gap Analyzer VS Code Extension
+  generated_by: Batch IG Gap Analyzer VS Code Extension
   generated_at: '2026-03-24T12:00:00.000Z'
   steps:
     customerProcessingStep:
@@ -230,7 +230,6 @@ This creates a `.vsix` file that can be installed in VS Code.
 This extension works with:
 
 - **Python Scripts**: `trace_unknown_operations.py`, `quick_trace.py`, `list_unknown_steps.py`
-- **Config Files**: `config/information_graph_config.yaml`
 - **Enrichers**: `db_operation_enricher.py`, `procedure_call_enricher.py`, `shell_execution_enricher.py`
 
 ## 🤝 Contributing
@@ -242,4 +241,4 @@ This extension works with:
 
 ## 📄 License
 
-Internal use only - Batch KG project
+Internal use only - Batch IG project

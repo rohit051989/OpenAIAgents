@@ -1,11 +1,10 @@
-/**
- * Type definitions for the Batch KG Gap Analyzer extension
+﻿/**
+ * Type definitions for the Batch IG Gap Analyzer extension
  */
 
 export interface Job {
     name: string;
     jobId: string;
-    gap_count?: number;
 }
 
 export interface Step {
@@ -84,24 +83,6 @@ export interface ShellResolution {
     description?: string;
     bean_id?: string;
     tasklet_fqn?: string;
-}
-
-export interface GreyAreaKeywords {
-    core: string[];
-    db_operations: string[];
-    procedure_calls: string[];
-    shell_executions: string[];
-    script_quality: string[];
-}
-
-/**
- * Parsed from scan_options in information_graph_config.yaml
- * Controls which jobs are visible in the extension's job list
- */
-export interface GraphConfig {
-    build_all_jobs: boolean;
-    jobs_to_build: string[];
-    keywords: GreyAreaKeywords;
 }
 
 export interface WebviewMessage {

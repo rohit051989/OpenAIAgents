@@ -1,7 +1,7 @@
-# Enterprise Refactoring Guide
+﻿# Enterprise Refactoring Guide
 
 ## Overview
-This guide documents the refactoring of the Batch KG Gap Analyzer VS Code extension from a monolithic architecture to an enterprise-grade modular structure.
+This guide documents the refactoring of the Batch IG Gap Analyzer VS Code extension from a monolithic architecture to an enterprise-grade modular structure.
 
 ## Completed Steps
 
@@ -79,7 +79,7 @@ npm run watch
 ### 9. Test the Extension
 1. Press F5 to launch Extension Development Host
 2. Open Command Palette (Ctrl+Shift+P)
-3. Run "Batch KG: Open Gap Analyzer"
+3. Run "Batch IG: Open Gap Analyzer"
 4. Test all functionality:
    - Connection test
    - Job/Step/Gap loading

@@ -1,0 +1,42 @@
+<!-- Source Code Popup — hidden by default, shown by messageHandler.ts -->
+<div id="sourceCodePopupOverlay" class="popup-overlay popup-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="popupMethodTitle">
+    <div id="sourceCodePopup" class="source-code-popup">
+
+        <div class="popup-header">
+            <span id="popupMethodTitle" class="popup-title"></span>
+            <button id="closeSourcePopup" class="popup-close-btn" title="Close">&#x2715;</button>
+        </div>
+
+        <div id="popupMeta" class="popup-meta">
+            <span id="popupMetaRepo" class="popup-meta-item" style="display: none;">
+                <span class="popup-meta-label">Repo:</span>
+                <span id="popupMetaRepoValue"></span>
+            </span>
+            <span id="popupMetaBranch" class="popup-meta-item" style="display: none;">
+                <span class="popup-meta-label">Branch:</span>
+                <span id="popupMetaBranchValue"></span>
+            </span>
+            <span id="popupMetaPath" class="popup-meta-item" style="display: none;">
+                <span class="popup-meta-label">Path:</span>
+                <span id="popupMetaPathValue"></span>
+            </span>
+            <span id="popupMetaLines" class="popup-meta-item" style="display: none;">
+                <span class="popup-meta-label">Lines:</span>
+                <span id="popupMetaLinesValue"></span>
+            </span>
+        </div>
+
+        <pre class="popup-code"><code id="popupSourceCode"></code></pre>
+
+        <!-- Action footer: shows either "Setup repos" link OR "View full file" button depending on hasLocalRepo flag -->
+        <div class="popup-footer">
+            <a id="popupSetupRepoLink" href="#" class="popup-action-link">
+                &#128279; Setup local repositories to view full source code
+            </a>
+            <button id="popupViewFileBtn" class="btn btn-primary popup-action-btn popup-overlay--hidden">
+                &#128196; View Full File in Editor
+            </button>
+        </div>
+
+    </div>
+</div>

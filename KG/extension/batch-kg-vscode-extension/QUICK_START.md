@@ -1,10 +1,10 @@
-# Quick Start Commands
+﻿# Quick Start Commands
 
 ## Initial Setup
 
 ```powershell
 # Navigate to extension directory
-cd d:\Iris\practice\GenAI\code\batch-kg-vscode-extension
+cd d:\Iris\practice\GenAI\code\batch-ig-vscode-extension
 
 # Install dependencies
 npm install
@@ -29,23 +29,23 @@ Add to the **extension project** settings (`.vscode/settings.json`):
 
 ```json
 {
-  "batchKg.neo4jUri": "bolt://localhost:7687",
-  "batchKg.neo4jUser": "neo4j",
-  "batchKg.neo4jPassword": "your-password-here",
-  "batchKg.neo4jDatabase": "informationgraph",
-  "batchKg.yamlOutputPath": "config/grey_area_resolution.yaml"
+  "batchIg.neo4jUri": "bolt://localhost:7687",
+  "batchIg.neo4jUser": "neo4j",
+  "batchIg.neo4jPassword": "your-password-here",
+  "batchIg.neo4jDatabase": "informationgraph",
+  "batchIg.yamlOutputPath": "config/grey_area_resolution.yaml"
 }
 ```
 
 ### Option 2: Target Workspace Settings (Recommended)
-Add to the **Batch_KG project** settings (`Batch_KG/.vscode/settings.json`):
+Add to the **Batch_IG project** settings (`Batch_IG/.vscode/settings.json`):
 - This is where you'll actually use the extension
 - Settings are already configured with your Neo4j credentials
-- Open the Batch_KG folder in the Extension Development Host window
+- Open the Batch_IG folder in the Extension Development Host window
 
 ## Usage in VS Code
 
-1. **Ctrl+Shift+P** → "Batch KG: Open Gap Analyzer"
+1. **Ctrl+Shift+P** → "Batch IG: Open Gap Analyzer"
 2. Click "Test Connection"
 3. Select: Job → Step → Category → Gap
 4. Fill form and click "Save Resolution"
@@ -59,7 +59,7 @@ npm install -g vsce
 # Package extension
 vsce package
 
-# This creates: batch-kg-gap-analyzer-0.1.0.vsix
+# This creates: batch-ig-gap-analyzer-0.1.0.vsix
 ```
 
 ## Install Packaged Extension

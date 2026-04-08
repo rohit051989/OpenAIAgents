@@ -14,6 +14,7 @@ class EventHandlers {
 
     initialize(): void {
         this.setupConnectionTest();
+        this.setupRepoCacheButtons();
         this.setupJobSelection();
         this.setupStepSelection();
         this.setupCategorySelection();
@@ -27,6 +28,24 @@ class EventHandlers {
         if (testBtn) {
             testBtn.addEventListener('click', () => {
                 this.stateManager.sendMessage('testConnection');
+            });
+        }
+    }
+
+    private setupRepoCacheButtons(): void {
+        const viewBtn = document.getElementById('viewRepoConfigBtn');
+        if (viewBtn) {
+            viewBtn.addEventListener('click', () => {
+                this.stateManager.sendMessage('viewRepoConfig');
+            });
+        }
+
+        const flushBtn = document.getElementById('flushRepoCacheBtn');
+        if (flushBtn) {
+            flushBtn.addEventListener('click', () => {
+                // Confirmation is done in the extension host via VS Code's showWarningMessage
+                // (window.confirm is blocked in VS Code webviews)
+                this.stateManager.sendMessage('flushRepoCache');
             });
         }
     }

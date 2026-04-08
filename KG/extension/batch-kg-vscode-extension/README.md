@@ -1,6 +1,6 @@
-# Batch KG Gap Analyzer - VS Code Extension
+﻿# Batch IG Gap Analyzer - VS Code Extension
 
-A Visual Studio Code extension for analyzing and resolving gaps in Spring Batch Knowledge Graph.
+A Visual Studio Code extension for analyzing and resolving gaps in Spring Batch Information Graph.
 
 ## Features
 
@@ -19,16 +19,16 @@ A Visual Studio Code extension for analyzing and resolving gaps in Spring Batch 
 
 Set the following in VS Code settings:
 
-- `batchKg.neo4jUri`: Neo4j database URI (default: bolt://localhost:7687)
-- `batchKg.neo4jUser`: Neo4j username
-- `batchKg.neo4jPassword`: Neo4j password
-- `batchKg.neo4jDatabase`: Database name (default: information_graph)
-- `batchKg.yamlOutputPath`: Output path for YAML files
+- `batchIg.neo4jUri`: Neo4j database URI (default: bolt://localhost:7687)
+- `batchIg.neo4jUser`: Neo4j username
+- `batchIg.neo4jPassword`: Neo4j password
+- `batchIg.neo4jDatabase`: Database name (default: information_graph)
+- `batchIg.yamlOutputPath`: Output path for YAML files
 
 ## Usage
 
 1. Open Command Palette (Ctrl+Shift+P / Cmd+Shift+P)
-2. Run command: "Batch KG: Open Gap Analyzer"
+2. Run command: "Batch IG: Open Gap Analyzer"
 3. Select Job → Step → Category → Gap
 4. Fill in resolution details
 5. Click Save to generate YAML

@@ -1,0 +1,41 @@
+<!-- Repository Setup Screen — hidden by default, shown when user clicks "Setup Local Repositories" -->
+<div id="repoSetupOverlay" class="repo-setup-overlay popup-overlay--hidden">
+
+    <!-- Sticky header — always visible even when scrolled -->
+    <div class="repo-setup-sticky-header">
+        <div class="repo-setup-header-inner">
+            <h2 class="repo-setup-title">Repository Setup</h2>
+            <button id="repoSetupBackBtn" class="btn btn-secondary">&#8592; Back to Analyzer</button>
+        </div>
+    </div>
+
+    <!-- Scrollable body -->
+    <div class="repo-setup-scroll-body">
+        <div class="repo-setup-container">
+
+            <!-- Shown while repos are being fetched -->
+            <div id="repoSetupLoading" class="repo-setup-section">
+                <p class="repo-loading-text">Loading repository information from graph&#8230;</p>
+            </div>
+
+            <!-- Shown once repos are loaded (toggled by JS) -->
+            <div id="repoSetupContent" class="repo-setup-section popup-overlay--hidden">
+                <p class="repo-setup-intro">
+                    To open full Java source files directly in the editor, configure the local path for each
+                    cloned repository below. If you haven&#39;t cloned a repository yet, use the details shown
+                    to clone it first.
+                </p>
+
+                <!-- Repo cards are injected here by messageHandler.ts -->
+                <div id="repoCardsList" class="repo-cards-list"></div>
+
+                <div class="repo-validate-section">
+                    <button id="validateRepoPathsBtn" class="btn btn-primary">Validate Paths</button>
+                    <div id="repoValidationSummary" class="repo-validation-summary popup-overlay--hidden"></div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+</div>
