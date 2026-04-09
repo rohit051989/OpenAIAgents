@@ -1,0 +1,125 @@
+Using Corporate Proxy with pip, git, and npm
+This document explains how to configure and use an internet proxy for common developer tools: pip (Python), git, and npm (Node.js). It is intended for teams working in corporate networks where direct internet access is restricted and all traffic must go through an HTTP/HTTPS proxy.
+
+1. General Concepts (Important for Everyone)
+What is a Proxy?
+A proxy is a gateway between your machine and the internet. In corporate environments:
+•	Direct internet access is blocked
+•	All outbound traffic must go through a proxy
+•	Tools must be explicitly configured to use it
+Typical Proxy Format
+1     http://<username>:<password>@<proxy-host>:<port>
+Examples:
+1     http://proxy.company.com:8080
+2     http://user1:password1@10.10.10.1:3128
+3     
+If username/password are not required, omit them.
+
+2. Python – pip Proxy Configuration
+Option A: Use Proxy Per Command (Recommended for quick usage)
+1     pip install <package-name> \
+2       --proxy http://username:password@proxy-host:port
+3     
+Example:
+1     pip install requests --proxy http://corpuser:corppass@10.10.10.1:8080
+2     
+Option B: Configure Proxy Permanently (For All pip Commands)
+Linux / macOS:
+Create or edit:
+1     ~/.pip/pip.conf
+2     
+1     [global]
+2     proxy = http://username:password@proxy-host:port
+3     
+Windows:
+Create or edit:
+1     %APPDATA%\pip\pip.ini
+2     
+1     [global]
+2     proxy = http://username:password@proxy-host:port
+3     
+Verify pip Proxy
+1     pip config list
+2     
+
+3. Git – Proxy Configuration
+Git must be explicitly told to use a proxy unless your network transparently allows Git traffic.
+Option A: Set Proxy Globally (Most Common)
+1     git config --global http.proxy http://username:password@proxy-host:port
+2     git config --global https.proxy http://username:password@proxy-host:port
+3     
+Option B: Set Proxy for One Repository Only
+1     git config http.proxy http://username:password@proxy-host:port
+2     git config https.proxy http://username:password@proxy-host:port
+3     
+(run inside the git repository)
+Verify Git Proxy
+1     git config --global --get http.proxy
+2     git config --global --get https.proxy
+3     
+Remove Proxy (If Needed)
+1     git config --global --unset http.proxy
+2     git config --global --unset https.proxy
+3     
+
+4. Node.js – npm Proxy Configuration
+⚠️ npm does not automatically use pip or git proxy settings. It must be configured separately.
+Step 1: Configure Proxy (Required)
+1     npm config set proxy http://username:password@proxy-host:port
+2     npm config set https-proxy http://username:password@proxy-host:port
+3     
+Step 2: Verify Proxy
+1     npm config get proxy
+2     npm config get https-proxy
+3     
+Step 3: Handle Corporate SSL Inspection (Very Common)
+If your proxy intercepts SSL traffic, npm may hang or fail silently.
+1     npm config set strict-ssl false
+2     
+⚠️ Use this only inside trusted corporate networks.
+Step 4: Optional – Force Registry
+1     npm config set registry http://registry.npmjs.org/
+2     
+Clean and Retry Installation
+1     npm cache clean --force
+2     npm install --verbose
+3     
+Quick Connectivity Test
+1     npm ping
+2     
+
+5. Using Environment Variables (Tool-Agnostic Method)
+This method works for pip, git, npm, and many other tools.
+Windows (Command Prompt)
+1     set HTTP_PROXY=http://username:password@proxy-host:port
+2     set HTTPS_PROXY=http://username:password@proxy-host:port
+3     
+Linux / macOS
+1     export HTTP_PROXY=http://username:password@proxy-host:port
+2     export HTTPS_PROXY=http://username:password@proxy-host:port
+3     
+After setting, run:
+1     pip install <pkg>
+2     npm install
+3     git pull
+4     
+
+6. Common Problems & Symptoms
+Symptom	Likely Cause
+npm install stuck for hours	Proxy not configured
+SSL / CERT errors	Corporate SSL inspection
+pip install works, npm fails	npm proxy missing
+Git works but npm doesn’t	Git proxy is configured, npm is not
+
+7. Recommended Team Standard ✅
+1.	Use environment variables for temporary work
+2.	Use tool-specific config for daily development
+3.	Always verify with:
+o	pip config list
+o	git config --list
+o	npm config list
+
+8. Summary (TL;DR)
+✔ All package managers need internet access ✔ All must be proxy-aware in corporate networks ✔ pip, git, and npm do NOT share proxy configs ✔ npm is most commonly forgotten
+
+📌 Share this document with new team members to avoid setup delays and “npm install stuck forever” issues.
