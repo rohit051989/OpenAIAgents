@@ -71,7 +71,7 @@ import yaml
 import uuid
 import argparse
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
@@ -120,6 +120,7 @@ class ManualResourceAssociator:
             'db_operations_processed': 0,
             'procedure_calls_processed': 0,
             'shell_executions_processed': 0,
+            'sql_executions_processed': 0,
             'resources_created': 0,
             'relationships_created': 0,
             'errors': 0
@@ -308,11 +309,17 @@ class ManualResourceAssociator:
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
 
-                    # Also update method node so trace no longer reports it as grey area
+                    # Mark as generic and reset method-level operation arrays (tracked at Step)
                     session.run(
-                        "MATCH (m:JavaMethod {fqn: $fqn}) SET m.furtherAnalysisRequired = false",
+                        """
+                        MATCH (m:JavaMethod {fqn: $fqn})
+                        SET m.genericMethod    = true,
+                            m.dbOperations     = [],
+                            m.dbOperationCount = 0,
+                            m.furtherAnalysisRequired = false
+                        """,
                         fqn=method_fqn)
-                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                    logger.info(f"     Method updated: genericMethod=true, dbOperations reset, furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = """
@@ -495,11 +502,17 @@ class ManualResourceAssociator:
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
 
-                    # Also update method node so trace no longer reports it as grey area
+                    # Mark as generic and reset method-level operation arrays (tracked at Step)
                     session.run(
-                        "MATCH (m:JavaMethod {fqn: $fqn}) SET m.furtherAnalysisRequired = false",
+                        """
+                        MATCH (m:JavaMethod {fqn: $fqn})
+                        SET m.genericMethod       = true,
+                            m.procedureCalls      = [],
+                            m.procedureCallCount  = 0,
+                            m.furtherAnalysisRequired = false
+                        """,
                         fqn=method_fqn)
-                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                    logger.info(f"     Method updated: genericMethod=true, procedureCalls reset, furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     update_method_query = """
@@ -689,21 +702,18 @@ class ManualResourceAssociator:
                     composite_key = f"{method_fqn}|{bean_id}"
                     self.class_level_methods.add(composite_key)
 
-                    # Also update the method node so trace_unknown_operations no longer
-                    # reports it as a grey area (class-level methods stay "unresolved" on
-                    # the node otherwise, causing false alarms after manual resolution).
-                    update_method_query = """
-                    MATCH (m:JavaMethod {fqn: $fqn})
-                    SET m.shellExecutions = CASE
-                        WHEN $shellValue IN m.shellExecutions THEN m.shellExecutions
-                        WHEN size(m.shellExecutions) = 1 AND NOT m.shellExecutions[0] STARTS WITH 'RESOLVED:'
-                        THEN [$shellValue]
-                        ELSE [exec IN m.shellExecutions WHERE exec STARTS WITH 'RESOLVED:'] + [$shellValue]
-                    END,
-                    m.furtherAnalysisRequired = false
-                    """
-                    session.run(update_method_query, fqn=method_fqn, shellValue=shell_exec_value)
-                    logger.info(f"     Method updated: furtherAnalysisRequired=false")
+                    # Mark as generic and reset method-level shell arrays (tracked at Step)
+                    session.run(
+                        """
+                        MATCH (m:JavaMethod {fqn: $fqn})
+                        SET m.genericMethod       = true,
+                            m.shellExecutions     = [],
+                            m.shellExecutionCount = 0,
+                            m.furtherAnalysisRequired = false
+                        """,
+                        fqn=method_fqn,
+                    )
+                    logger.info(f"     Method updated: genericMethod=true, shellExecutions reset, furtherAnalysisRequired=false")
                 else:
                     # Original behavior: Update JavaMethod
                     # Strategy: Replace grey area entries with RESOLVED entry (idempotent)
@@ -725,7 +735,410 @@ class ManualResourceAssociator:
             logger.error(f"   Error associating shell execution: {e}")
             self.stats['errors'] += 1
             return False
-    
+
+    # ── SQL execution helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_sql_search_keys(script_name: str, script_path: str) -> Tuple[Optional[str], str]:
+        """
+        From a script_path (may be a raw path or a full sqlplus command like
+        'sqlplus -l -s user/pwd@TNS/apps/batch/common/file.sql'), determine the
+        folder that appears immediately after the *common segment (if any) and
+        return the primary IG search key.
+
+        Returns: (config_folder, primary_key)
+          - config_folder: folder between *common and filename, or None if filename
+                           is directly after *common
+          - primary_key  : '<config_folder>/<script_name>' when a folder exists,
+                           or 'sql/<script_name>' when none (default sql subfolder)
+        """
+        import re
+        if not script_path:
+            return None, f"sql/{script_name}"
+        parts = [p for p in re.split(r'[/\\]', script_path) if p.strip()]
+        common_idx = None
+        for i, part in enumerate(parts):
+            if part.strip().lower().endswith('common'):
+                common_idx = i
+        if common_idx is None:
+            return None, f"sql/{script_name}"
+        after_parts = parts[common_idx + 1:]
+        if not after_parts:
+            return None, f"sql/{script_name}"
+        first_after = after_parts[0].strip()
+        if first_after.lower() == script_name.lower():
+            # *common/<filename> — no subfolder; default to 'sql'
+            return None, f"sql/{script_name}"
+        else:
+            # *common/<folder>/.../<filename>
+            return first_after, f"{first_after}/{script_name}"
+
+    def _find_sql_resource_in_ig(
+        self, session, script_name: str, script_path: str
+    ) -> Optional[object]:
+        """
+        Find an existing SQL Resource or SqlScript File node in the IG by filename,
+        using priority path matching when multiple nodes share the same name.
+
+        Priority (applies only when count > 1):
+          1. Path contains '<config_folder>/<script_name>'
+             (config_folder derived from *common segment in script_path config value)
+          2. Path contains 'sql/<script_name>'
+             (applied even when priority-1 key == 'sql/<script_name>', as fallback when
+              config_folder != 'sql' and priority 1 fails)
+          3. Any match by name (logs warning)
+
+        Returns the neo4j Record (access via rec['r']) or None.
+        """
+        config_folder, primary_key = self._extract_sql_search_keys(script_name, script_path)
+        sql_key_fallback = f"sql/{script_name}"
+
+        # Count how many nodes exist with this filename
+        cnt_result = session.run(
+            """
+            MATCH (r)
+            WHERE r.name = $filename
+              AND (r.type = 'SQL_SCRIPT' OR r.extension IN ['.sql', '.ddl'])
+            RETURN count(r) AS cnt
+            """,
+            filename=script_name,
+        )
+        count = cnt_result.single()['cnt']
+
+        if count == 0:
+            return None
+
+        if count == 1:
+            result = session.run(
+                """
+                MATCH (r)
+                WHERE r.name = $filename
+                  AND (r.type = 'SQL_SCRIPT' OR r.extension IN ['.sql', '.ddl'])
+                RETURN r LIMIT 1
+                """,
+                filename=script_name,
+            )
+            return result.single()
+
+        # Multiple matches — apply priority
+        def _path_search(folder_file: str):
+            return session.run(
+                """
+                MATCH (r)
+                WHERE r.name = $filename
+                  AND (r.type = 'SQL_SCRIPT' OR r.extension IN ['.sql', '.ddl'])
+                  AND (
+                    replace(coalesce(r.path, ''), $bs, '/') CONTAINS $folderFile
+                    OR replace(coalesce(r.resourceLocation, ''), $bs, '/') CONTAINS $folderFile
+                  )
+                RETURN r LIMIT 1
+                """,
+                filename=script_name,
+                folderFile=folder_file,
+                bs='\\',
+            ).single()
+
+        # Priority 1
+        rec = _path_search(primary_key)
+        if rec:
+            return rec
+
+        # Priority 2: fallback to sql/<filename> (only if primary was different)
+        if primary_key != sql_key_fallback:
+            rec = _path_search(sql_key_fallback)
+            if rec:
+                logger.warning(
+                    f"     SQL resource '{script_name}': not found via '{primary_key}', "
+                    f"matched via 'sql/{script_name}'"
+                )
+                return rec
+
+        # Priority 3: any match
+        result = session.run(
+            """
+            MATCH (r)
+            WHERE r.name = $filename
+              AND (r.type = 'SQL_SCRIPT' OR r.extension IN ['.sql', '.ddl'])
+            RETURN r LIMIT 1
+            """,
+            filename=script_name,
+        )
+        rec = result.single()
+        if rec:
+            path_info = rec['r'].get('path') or rec['r'].get('resourceLocation') or 'unknown path'
+            logger.warning(
+                f"     SQL resource '{script_name}': not found in sql subfolder. "
+                f"Using any match: {path_info}"
+            )
+        return rec
+
+    def associate_sql_execution(
+        self,
+        method_fqn: str,
+        script_name: str,
+        script_path: str = None,
+        confidence: str = "HIGH",
+        tasklet_fqn: str = None,
+        reader_fqn: str = None,
+        writer_fqn: str = None,
+        processor_fqn: str = None,
+        bean_id: str = None,
+        description: str = None,
+    ) -> bool:
+        """
+        Handle shell_executions entries with script_type: SQL.
+
+        Instead of creating a SHELL_SCRIPT Resource, this method:
+          - Finds the SQL file Resource in the IG (using priority path matching)
+            OR creates a new SQL_SCRIPT Resource if not found
+          - Creates JavaMethod -[:INVOKES {executionType:'SQL_SCRIPT'}]-> sql_resource
+          - Updates stepSqlFileInvocations on the Step
+
+        Logic branches mirror associate_shell_execution:
+          - Without bean_id/class FQN: locates Step via JavaMethod's class, updates it
+          - With bean_id + class FQN: updates Step directly via bean_id
+        """
+        try:
+            method_fqn = self._resolve_method_fqn(method_fqn)
+            if not method_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
+            with self.driver.session(database=self.database) as session:
+
+                # ── 1. Locate or create SQL Resource ──────────────────────────
+                sql_rec = self._find_sql_resource_in_ig(session, script_name, script_path or '')
+                sql_node_path: Optional[str] = None
+
+                if sql_rec:
+                    sql_node = sql_rec['r']
+                    sql_node_path = sql_node.get('path')
+                    logger.info(
+                        f"     SQL Resource found in IG: {script_name} "
+                        f"(path={sql_node_path})"
+                    )
+                    # Ensure type is stamped
+                    if sql_node_path:
+                        session.run(
+                            "MATCH (r) WHERE r.path = $path SET r.type = 'SQL_SCRIPT'",
+                            path=sql_node_path,
+                        )
+                    # INVOKES rel via path
+                    if sql_node_path:
+                        session.run(
+                            """
+                            MATCH (m:JavaMethod {fqn: $methodFqn})
+                            MATCH (r) WHERE r.path = $path
+                            MERGE (m)-[:INVOKES {
+                                executionType: 'SQL_SCRIPT',
+                                confidence: $confidence,
+                                manuallyResolved: true
+                            }]->(r)
+                            """,
+                            methodFqn=method_fqn,
+                            path=sql_node_path,
+                            confidence=confidence,
+                        )
+                    else:
+                        session.run(
+                            """
+                            MATCH (m:JavaMethod {fqn: $methodFqn})
+                            MATCH (r)
+                            WHERE r.name = $name
+                              AND (r.type = 'SQL_SCRIPT' OR r.extension IN ['.sql', '.ddl'])
+                            MERGE (m)-[:INVOKES {
+                                executionType: 'SQL_SCRIPT',
+                                confidence: $confidence,
+                                manuallyResolved: true
+                            }]->(r)
+                            """,
+                            methodFqn=method_fqn,
+                            name=script_name,
+                            confidence=confidence,
+                        )
+                else:
+                    # Not found in IG — create a new SQL_SCRIPT Resource
+                    unique_id = f"RES_SQL_{uuid.uuid4().hex[:8].upper()}"
+                    session.run(
+                        """
+                        MERGE (r:Resource {name: $name, type: 'SQL_SCRIPT'})
+                        ON CREATE SET r.id            = $id,
+                                      r.enabled       = true,
+                                      r.scriptPath    = $scriptPath,
+                                      r.description   = $description,
+                                      r.foundInRepo   = false,
+                                      r.notFoundInRepo = true,
+                                      r.manuallyResolved = true
+                        ON MATCH SET  r.manuallyResolved = true,
+                                      r.scriptPath = COALESCE(r.scriptPath, $scriptPath)
+                        """,
+                        name=script_name,
+                        id=unique_id,
+                        scriptPath=script_path or script_name,
+                        description=description or '',
+                    )
+                    logger.info(f"     SQL Resource created: {script_name}")
+                    self.stats['resources_created'] += 1
+                    session.run(
+                        """
+                        MATCH (m:JavaMethod {fqn: $methodFqn})
+                        MATCH (r:Resource {name: $name, type: 'SQL_SCRIPT'})
+                        MERGE (m)-[:INVOKES {
+                            executionType: 'SQL_SCRIPT',
+                            confidence: $confidence,
+                            manuallyResolved: true
+                        }]->(r)
+                        """,
+                        methodFqn=method_fqn,
+                        name=script_name,
+                        confidence=confidence,
+                    )
+
+                logger.info(
+                    f"     Relationship: {method_fqn} -[INVOKES SQL_SCRIPT]-> {script_name}"
+                )
+                self.stats['relationships_created'] += 1
+
+                # ── 2. Step-level tracking ──────────────────────────────────
+                sql_value = f"RESOLVED:{script_name}:{confidence}"
+                class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
+
+                if class_fqn:
+                    # Generic path — locate Step via bean_id
+                    if not bean_id:
+                        logger.error(f"     bean_id required when using class FQN")
+                        self.stats['errors'] += 1
+                        return False
+
+                    check_q = """
+                    MATCH (s:Step)
+                    WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                       OR s.writerBean = $beanId OR s.processorBean = $beanId
+                    RETURN s.name as name
+                    """
+                    step_rec = session.run(check_q, beanId=bean_id).single()
+                    if not step_rec:
+                        logger.error(
+                            f"     Step not found with bean_id "
+                            f"(implBean/readerBean/writerBean/processorBean): {bean_id}"
+                        )
+                        self.stats['errors'] += 1
+                        return False
+
+                    session.run(
+                        """
+                        MATCH (s:Step)
+                        WHERE s.implBean = $beanId OR s.readerBean = $beanId
+                           OR s.writerBean = $beanId OR s.processorBean = $beanId
+                        WITH s,
+                             CASE
+                               WHEN s.stepSqlFileInvocations IS NULL THEN [$sqlValue]
+                               WHEN $sqlValue IN s.stepSqlFileInvocations
+                               THEN s.stepSqlFileInvocations
+                               ELSE s.stepSqlFileInvocations + [$sqlValue]
+                             END AS newSqlFiles
+                        SET s.stepSqlFileInvocations      = newSqlFiles,
+                            s.stepSqlFileInvocationCount  = size(newSqlFiles),
+                            s.manuallyResolvedSqlInvocations = true
+                        """,
+                        beanId=bean_id,
+                        sqlValue=sql_value,
+                    )
+                    logger.info(
+                        f"     Step updated: {step_rec['name']} (beanId: {bean_id})"
+                    )
+                    logger.info(f"     Added: {sql_value}")
+
+                    composite_key = f"{method_fqn}|{bean_id}"
+                    self.class_level_methods.add(composite_key)
+
+                    # Mark as generic and reset method-level arrays (tracked at Step)
+                    session.run(
+                        """
+                        MATCH (m:JavaMethod {fqn: $fqn})
+                        SET m.genericMethod           = true,
+                            m.sqlFileInvocations      = [],
+                            m.sqlFileInvocationsCount = 0,
+                            m.shellExecutions         = [],
+                            m.shellExecutionCount     = 0,
+                            m.furtherAnalysisRequired = false
+                        """,
+                        fqn=method_fqn,
+                    )
+                    logger.info(f"     Method updated: genericMethod=true, sqlFileInvocations/shellExecutions reset, furtherAnalysisRequired=false")
+                else:
+                    # Non-generic path — find Step(s) implementing this method's class
+                    clean_fqn = method_fqn[:method_fqn.index('(')] if '(' in method_fqn else method_fqn
+                    last_dot = clean_fqn.rfind('.')
+                    class_fqn_from_method = clean_fqn[:last_dot] if last_dot != -1 else clean_fqn
+
+                    step_records = [
+                        r['stepName']
+                        for r in session.run(
+                            """
+                            MATCH (jc:JavaClass {fqn: $classFqn})<-[:IMPLEMENTED_BY]-(s:Step)
+                            RETURN s.name AS stepName
+                            """,
+                            classFqn=class_fqn_from_method,
+                        )
+                    ]
+
+                    if step_records:
+                        for step_name in step_records:
+                            session.run(
+                                """
+                                MATCH (s:Step {name: $stepName})
+                                WITH s,
+                                     CASE
+                                       WHEN s.stepSqlFileInvocations IS NULL THEN [$sqlValue]
+                                       WHEN $sqlValue IN s.stepSqlFileInvocations
+                                       THEN s.stepSqlFileInvocations
+                                       ELSE s.stepSqlFileInvocations + [$sqlValue]
+                                     END AS newSqlFiles
+                                SET s.stepSqlFileInvocations     = newSqlFiles,
+                                    s.stepSqlFileInvocationCount = size(newSqlFiles),
+                                    s.manuallyResolvedSqlInvocations = true
+                                """,
+                                stepName=step_name,
+                                sqlValue=sql_value,
+                            )
+                            logger.info(f"     Step updated: {step_name}")
+                    else:
+                        logger.warning(
+                            f"     No Step found implementing class {class_fqn_from_method}; "
+                            f"INVOKES rel created on method only"
+                        )
+
+                    # Update method: append sqlFileInvocations, reset shellExecutions
+                    session.run(
+                        """
+                        MATCH (m:JavaMethod {fqn: $fqn})
+                        WITH m,
+                             CASE
+                               WHEN $sqlValue IN COALESCE(m.sqlFileInvocations, [])
+                               THEN COALESCE(m.sqlFileInvocations, [])
+                               ELSE COALESCE(m.sqlFileInvocations, []) + [$sqlValue]
+                             END AS newSqlFiles
+                        SET m.sqlFileInvocations      = newSqlFiles,
+                            m.sqlFileInvocationsCount = size(newSqlFiles),
+                            m.shellExecutions         = [],
+                            m.shellExecutionCount     = 0,
+                            m.furtherAnalysisRequired = false
+                        """,
+                        fqn=method_fqn,
+                        sqlValue=sql_value,
+                    )
+                    logger.info(f"     Method updated: sqlFileInvocations appended, shellExecutions reset, furtherAnalysisRequired=false")
+
+                self.stats['sql_executions_processed'] += 1
+                return True
+
+        except Exception as e:
+            logger.error(f"   Error associating SQL execution: {e}")
+            self.stats['errors'] += 1
+            return False
+
     def _consolidate_all_steps(self):
         """
         Consolidate all operations (DB, procedures, shell) at Step level.
@@ -739,16 +1152,17 @@ class ManualResourceAssociator:
         # Get all Steps
         query_steps = """
         MATCH (s:Step)
-        RETURN s.name as stepName, 
+        RETURN s.name as stepName,
                s.stepKind as stepKind,
                s.implBean as implBean,
                s.readerBean as readerBean,
                s.processorBean as processorBean,
                s.writerBean as writerBean,
                elementId(s) as stepId,
-               s.stepDbOperations as stepDbOps,
-               s.stepProcedureCalls as stepProcCalls,
-               s.stepShellExecutions as stepShellExecs
+               s.stepDbOperations      as stepDbOps,
+               s.stepProcedureCalls    as stepProcCalls,
+               s.stepShellExecutions   as stepShellExecs,
+               s.stepSqlFileInvocations as stepSqlInvocations
         """
         
         with self.driver.session(database=self.database) as session:
@@ -787,13 +1201,13 @@ class ManualResourceAssociator:
             all_db_operations = set()
             all_procedure_calls = set()
             all_shell_executions = set()
-            
-            # NEW: First, collect from Step properties (manually resolved operations)
+            all_sql_invocations = set()
+
+            # First, collect from Step properties (manually resolved operations)
             # ONLY keep RESOLVED entries - discard all grey area/unresolved entries
-            # Grey area indicators: UNKNOWN, DYNAMIC, PARAMETERIZED, or entries from enrichers (Runtime.exec, CommonsExec, etc.)
+            # Grey area indicators: UNKNOWN, DYNAMIC, PARAMETERIZED, or entries from enrichers
             if step_data.get('stepDbOps'):
                 for op in step_data['stepDbOps']:
-                    # Keep only if it starts with RESOLVED: or doesn't contain grey area keywords
                     if op.startswith('RESOLVED:') or not any(kw in op for kw in CORE_KEYWORDS):
                         all_db_operations.add(op)
             if step_data.get('stepProcCalls'):
@@ -802,10 +1216,12 @@ class ManualResourceAssociator:
                         all_procedure_calls.add(proc)
             if step_data.get('stepShellExecs'):
                 for shell in step_data['stepShellExecs']:
-                    # Only keep RESOLVED entries or clean entries (not from enricher detection)
                     is_enricher_entry = any(prefix in shell for prefix in ENRICHER_PREFIXES)
                     if shell.startswith('RESOLVED:') or (not is_enricher_entry and not any(kw in shell for kw in CORE_KEYWORDS)):
                         all_shell_executions.add(shell)
+            # Preserve SQL invocations already set on Step (from generic-path or prev run)
+            if step_data.get('stepSqlInvocations'):
+                all_sql_invocations.update(step_data['stepSqlInvocations'])
             
             # Find entry methods for this Step AND get JavaClass properties
             # Support inheritance: traverse EXTENDS chain to find inherited methods
@@ -819,33 +1235,35 @@ class ManualResourceAssociator:
                 // Check direct methods first (closest in hierarchy)
                 MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
-                RETURN elementId(m) as methodId, 
+                RETURN elementId(m) as methodId,
                        m.methodName as methodName,
                        m.fqn as methodFqn,
-                       m.dbOperations as dbOps,
-                       m.procedureCalls as procCalls,
-                       m.shellExecutions as shellExecs,
+                       m.dbOperations      as dbOps,
+                       m.procedureCalls    as procCalls,
+                       m.shellExecutions   as shellExecs,
+                       m.sqlFileInvocations as sqlInvocations,
                        0 as inheritanceDepth
-                
+
                 UNION
-                
+
                 // Check parent classes (up to 10 levels of inheritance)
                 MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
                 MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
-                RETURN elementId(m) as methodId, 
+                RETURN elementId(m) as methodId,
                        m.methodName as methodName,
                        m.fqn as methodFqn,
-                       m.dbOperations as dbOps,
-                       m.procedureCalls as procCalls,
-                       m.shellExecutions as shellExecs,
+                       m.dbOperations      as dbOps,
+                       m.procedureCalls    as procCalls,
+                       m.shellExecutions   as shellExecs,
+                       m.sqlFileInvocations as sqlInvocations,
                        length(path) as inheritanceDepth
             }
-            
+
             // Return the method closest in the inheritance hierarchy (prefer child overrides)
-            WITH methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, inheritanceDepth
+            WITH methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, sqlInvocations, inheritanceDepth
             ORDER BY inheritanceDepth ASC
-            RETURN methodId, methodName, methodFqn, dbOps, procCalls, shellExecs
+            RETURN methodId, methodName, methodFqn, dbOps, procCalls, shellExecs, sqlInvocations
             LIMIT 3  // For TASKLET: 1 execute, For CHUNK: read, write, process
             """
             
@@ -880,6 +1298,8 @@ class ManualResourceAssociator:
                         all_procedure_calls.update(entry_method['procCalls'])
                     if entry_method.get('shellExecs'):
                         all_shell_executions.update(entry_method['shellExecs'])
+                    if entry_method.get('sqlInvocations'):
+                        all_sql_invocations.update(entry_method['sqlInvocations'])
                 
                 # BFS traversal
                 visited = set()
@@ -894,10 +1314,11 @@ class ManualResourceAssociator:
                     MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
                     WHERE elementId(m) = $methodId
                     RETURN elementId(called) as calledId,
-                           called.fqn as calledFqn,
-                           called.dbOperations as dbOps,
-                           called.procedureCalls as procCalls,
-                           called.shellExecutions as shellExecs
+                           called.fqn          as calledFqn,
+                           called.dbOperations      as dbOps,
+                           called.procedureCalls    as procCalls,
+                           called.shellExecutions   as shellExecs,
+                           called.sqlFileInvocations as sqlInvocations
                     """
                     
                     with self.driver.session(database=self.database) as session2:
@@ -929,38 +1350,45 @@ class ManualResourceAssociator:
                                     all_procedure_calls.update(called['procCalls'])
                                 if called.get('shellExecs'):
                                     all_shell_executions.update(called['shellExecs'])
+                                if called.get('sqlInvocations'):
+                                    all_sql_invocations.update(called['sqlInvocations'])
             
             # Update Step with recalculated operations
-            step_db_ops = sorted(list(all_db_operations))
-            step_proc_calls = sorted(list(all_procedure_calls))
-            step_shell_execs = sorted(list(all_shell_executions))
-            
-            
+            step_db_ops          = sorted(list(all_db_operations))
+            step_proc_calls      = sorted(list(all_procedure_calls))
+            step_shell_execs     = sorted(list(all_shell_executions))
+            step_sql_invocations = sorted(list(all_sql_invocations))
+
             query_update = """
             MATCH (s:Step)
             WHERE elementId(s) = $stepId
-            SET s.stepDbOperations = $dbOps,
-                s.stepDbOperationCount = $dbOpCount,
-                s.stepProcedureCalls = $procCalls,
-                s.stepProcedureCallCount = $procCallCount,
-                s.stepShellExecutions = $shellExecs,
-                s.stepShellExecutionCount = $shellExecCount,
-                s.lastUpdated = datetime()
+            SET s.stepDbOperations            = $dbOps,
+                s.stepDbOperationCount        = $dbOpCount,
+                s.stepProcedureCalls          = $procCalls,
+                s.stepProcedureCallCount      = $procCallCount,
+                s.stepShellExecutions         = $shellExecs,
+                s.stepShellExecutionCount     = $shellExecCount,
+                s.stepSqlFileInvocations      = $sqlInvocations,
+                s.stepSqlFileInvocationCount  = $sqlCount,
+                s.lastUpdated                 = datetime()
             RETURN s.name as name
             """
-            
+
             with self.driver.session(database=self.database) as session:
-                session.run(query_update, 
+                session.run(query_update,
                            stepId=step_id,
                            dbOps=step_db_ops,
                            dbOpCount=len(step_db_ops),
                            procCalls=step_proc_calls,
                            procCallCount=len(step_proc_calls),
                            shellExecs=step_shell_execs,
-                           shellExecCount=len(step_shell_execs))
-            
+                           shellExecCount=len(step_shell_execs),
+                           sqlInvocations=step_sql_invocations,
+                           sqlCount=len(step_sql_invocations))
+
             logger.info(f"    Step '{step_name}': {len(step_db_ops)} DB ops, "
-                      f"{len(step_proc_calls)} proc calls, {len(step_shell_execs)} shell execs")
+                      f"{len(step_proc_calls)} proc calls, {len(step_shell_execs)} shell execs, "
+                      f"{len(step_sql_invocations)} SQL invocations")
             steps_updated += 1
         
         logger.info(f"\n  Updated {steps_updated} Steps with consolidated operations")
@@ -1090,15 +1518,23 @@ class ManualResourceAssociator:
                     class_fqn = tasklet_fqn or reader_fqn or writer_fqn or processor_fqn
                     logger.info(f"      Target: {class_type} JavaClass - {class_fqn}")
                 logger.info(f"      Script: {script_name} ({script_type})")
-                if remote_host:
-                    logger.info(f"      Execution: REMOTE ({remote_user}@{remote_host})")
+                if (script_type or '').strip().upper() == 'SQL':
+                    # SQL invocation — find SQL Resource in IG and create INVOKES rel
+                    self.associate_sql_execution(
+                        method_fqn, script_name, script_path, confidence,
+                        tasklet_fqn, reader_fqn, writer_fqn, processor_fqn, bean_id,
+                        description
+                    )
                 else:
-                    logger.info(f"      Execution: LOCAL")
-                self.associate_shell_execution(
-                    method_fqn, script_name, script_path, script_type,
-                    remote_host, remote_user, remote_port, ssh_key_location,
-                    confidence, description, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn, bean_id
-                )
+                    if remote_host:
+                        logger.info(f"      Execution: REMOTE ({remote_user}@{remote_host})")
+                    else:
+                        logger.info(f"      Execution: LOCAL")
+                    self.associate_shell_execution(
+                        method_fqn, script_name, script_path, script_type,
+                        remote_host, remote_user, remote_port, ssh_key_location,
+                        confidence, description, tasklet_fqn, reader_fqn, writer_fqn, processor_fqn, bean_id
+                    )
                 logger.info("")
         
         # Consolidate all Step operations ONCE after all fixes
@@ -1116,6 +1552,7 @@ class ManualResourceAssociator:
         logger.info(f"  DB Operations Processed:     {self.stats['db_operations_processed']}")
         logger.info(f"  Procedure Calls Processed:   {self.stats['procedure_calls_processed']}")
         logger.info(f"  Shell Executions Processed:  {self.stats['shell_executions_processed']}")
+        logger.info(f"  SQL Executions Processed:    {self.stats['sql_executions_processed']}")
         logger.info(f"  Resources Created/Updated:   {self.stats['resources_created']}")
         logger.info(f"  Relationships Created:       {self.stats['relationships_created']}")
         logger.info(f"  Errors:                      {self.stats['errors']}")

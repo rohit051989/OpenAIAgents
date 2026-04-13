@@ -68,22 +68,19 @@ procedure_calls:
 # For methods that execute shell scripts with dynamic paths or unknown details
 shell_executions:
 - method_fqn: com.companyname.util.BatchUtils.executeAsCommand(String)
-  script_name: customer_export.sh
-  script_path: /opt/batch/scripts/customer_export.sh
-  script_type: BASH
+  script_name: deactivated_accounts_report_script.sql
+  script_path: "sqlplus -l -s user_key/user_pwd@APMS_BATCH_TNS/apps/apms-batch/common/deactivated_accounts_report_script.sql"
+  script_type: SQL
   remote_host: batch-server-01.company.com
-  remote_user: batchuser
-  remote_port: 22
-  ssh_key_location: /home/batchuser/.ssh/id_rsa
   confidence: HIGH
   description: "Customer export shell script - runs on remote batch server"
   
 - method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
   tasklet_fqn: com.companyname.batch.tasklet.CustomerProcessingTasklet
   bean_id: customerProcessingTasklet
-  script_name: data_customer_validation.sh
-  script_path: /opt/batch/scripts/data_customer_validation.sh
-  script_type: BASH
+  script_name: deactivated_accounts_report_script.sql
+  script_path: "sqlplus -l -s user_key/user_pwd@APMS_BATCH_TNS/apps/apms-batch/common/deactivated_accounts_report_script.sql"
+  script_type: SQL
   remote_host: null  # null means local execution
   confidence: HIGH
   description: "Local data validation script"

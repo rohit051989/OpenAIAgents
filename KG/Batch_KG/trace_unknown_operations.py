@@ -76,7 +76,8 @@ def trace_step_operations(step_name, database):
                elementId(s) as stepId,
                coalesce(s.stepDbOperations, []) as dbOps,
                coalesce(s.stepProcedureCalls, []) as procCalls,
-               coalesce(s.stepShellExecutions, []) as shellExecs
+               coalesce(s.stepShellExecutions, []) as shellExecs,
+               coalesce(s.stepSqlFileInvocations, []) as sqlInvocations
         """
         result = session.run(query_step, stepName=step_name)
         step_record = result.single()
@@ -108,24 +109,30 @@ def trace_step_operations(step_name, database):
         db_ops = step_record['dbOps'] or []
         proc_calls = step_record['procCalls'] or []
         shell_execs = step_record['shellExecs'] or []
-        
+        sql_invocations = step_record.get('sqlInvocations') or []
+
         if db_ops:
             print(f"\n  DB Operations ({len(db_ops)}):")
             for op in db_ops:
                 marker = "Warning   " if has_grey_area([op]) else "Looks Perfect "
                 print(f"    {marker}{op}")
-        
+
         if proc_calls:
             print(f"\n  Procedure Calls ({len(proc_calls)}):")
             for proc in proc_calls:
                 marker = "Warning   " if has_grey_area([proc]) else "Looks Perfect "
                 print(f"    {marker}{proc}")
-        
+
         if shell_execs:
             print(f"\n  Shell Executions ({len(shell_execs)}):")
             for shell in shell_execs:
                 marker = "Warning   " if has_grey_area([shell]) else "Looks Perfect "
                 print(f"    {marker}{shell}")
+
+        if sql_invocations:
+            print(f"\n  SQL File Invocations ({len(sql_invocations)}):")
+            for sql in sql_invocations:
+                print(f"    Looks Perfect {sql}")
         
         # Determine entry method names
         if step_kind == "TASKLET":
@@ -146,9 +153,10 @@ def trace_step_operations(step_name, database):
         RETURN elementId(m) as methodId,
                m.methodName as methodName,
                m.fqn as fqn,
-               m.dbOperations as dbOps,
-               m.procedureCalls as procCalls,
-               m.shellExecutions as shellExecs,
+               m.dbOperations       as dbOps,
+               m.procedureCalls     as procCalls,
+               m.shellExecutions    as shellExecs,
+               m.sqlFileInvocations as sqlInvocations,
                m.furtherAnalysisRequired as needsAnalysis
         """
         
@@ -195,6 +203,12 @@ def trace_step_operations(step_name, database):
                 print(f"  Shell Executions:")
                 for shell in get_grey_area_entries(entry_method.get('shellExecs')):
                     print(f"    - {shell}")
+
+            entry_sql = entry_method.get('sqlInvocations') or []
+            if entry_sql:
+                print(f"\n   SQL File Invocations in entry method '{entry_method['fqn']}':")
+                for sql in entry_sql:
+                    print(f"    - {sql}")
             
             # BFS traversal to find grey areas in called methods
             visited = set()
@@ -212,9 +226,10 @@ def trace_step_operations(step_name, database):
                 WHERE elementId(m) = $methodId
                 RETURN elementId(called) as calledId,
                        called.fqn as fqn,
-                       called.dbOperations as dbOps,
-                       called.procedureCalls as procCalls,
-                       called.shellExecutions as shellExecs,
+                       called.dbOperations       as dbOps,
+                       called.procedureCalls     as procCalls,
+                       called.shellExecutions    as shellExecs,
+                       called.sqlFileInvocations as sqlInvocations,
                        called.furtherAnalysisRequired as needsAnalysis
                 """
                 
@@ -230,11 +245,13 @@ def trace_step_operations(step_name, database):
                         new_path = path + [called_fqn]
                         queue.append((called_id, new_path))
                         
-                        # Check for grey areas
+                        # Check for grey areas (UNKNOWN/DYNAMIC/PARAMETERIZED keywords)
                         grey_db = get_grey_area_entries(called.get('dbOps'))
                         grey_proc = get_grey_area_entries(called.get('procCalls'))
                         grey_shell = get_grey_area_entries(called.get('shellExecs'))
-                        
+                        # SQL invocations are always RESOLVED — never a grey-area indicator
+                        sql_calls = called.get('sqlInvocations') or []
+
                         if grey_db or grey_proc or grey_shell:
                             found_grey_areas.append({
                                 'fqn': called_fqn,
@@ -242,6 +259,7 @@ def trace_step_operations(step_name, database):
                                 'dbOps': grey_db,
                                 'procCalls': grey_proc,
                                 'shellExecs': grey_shell,
+                                'sqlInvocations': sql_calls,
                                 'needsAnalysis': called.get('needsAnalysis', False)
                             })
             
@@ -273,7 +291,12 @@ def trace_step_operations(step_name, database):
                         print(f"\n   Shell Executions ({len(grey['shellExecs'])}):")
                         for shell in grey['shellExecs']:
                             print(f"     - {shell}")
-                    
+
+                    if grey.get('sqlInvocations'):
+                        print(f"\n   SQL File Invocations ({len(grey['sqlInvocations'])}) [Resolved]:")
+                        for sql in grey['sqlInvocations']:
+                            print(f"     - {sql}")
+
                     print(f"\n   {'-'*70}")
             else:
                 if not has_grey:
