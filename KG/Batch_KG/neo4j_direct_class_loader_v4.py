@@ -184,6 +184,7 @@ class Neo4jLoader:
         self._load_job_successors(excel_file)
         self._load_steps_directly_from_IG()
         self._copy_step_db_operations_from_info_graph()
+        self._copy_step_shell_and_procedure_executions_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
         self._load_calendar(excel_file)
@@ -764,21 +765,32 @@ class Neo4jLoader:
         """
         logger.info("Creating DataAsset nodes from information graph DB operations...")
         
-        # Query information graph for Steps with JavaMethods that have DB operations
+        # Query information graph for Steps with JavaMethods that have DB operations.
+        # Two paths to JavaClass are handled:
+        #   TASKLET: Step -[:IMPLEMENTED_BY]-> JavaClass
+        #   CHUNK  : Step -[:USES_BEAN]-> Bean -[:IMPLEMENTS]-> JavaClass
         query_step_methods = """
-        MATCH (s:Step)-[:IMPLEMENTED_BY]->(jc:JavaClass)-[:HAS_METHOD]->(m:JavaMethod)
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
         WHERE m.dbOperations IS NOT NULL AND m.dbOperationCount > 0
         RETURN s.name as stepName,
-               collect({
+               collect(DISTINCT {
                    methodName: m.methodName,
                    methodFqn: m.fqn,
                    dbOperations: m.dbOperations
                }) as methodsWithOps
-        
+
         UNION
-        
-        MATCH (s:Step)-[:IMPLEMENTED_BY]->(jc:JavaClass)-[:HAS_METHOD]->(entry:JavaMethod)
-        MATCH path = (entry)-[:CALLS*]->(called:JavaMethod)
+
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(entry:JavaMethod)
+        MATCH (entry)-[:CALLS*]->(called:JavaMethod)
         WHERE called.dbOperations IS NOT NULL AND called.dbOperationCount > 0
         RETURN s.name as stepName,
                collect(DISTINCT {
@@ -920,7 +932,276 @@ class Neo4jLoader:
                     created_count += 1
         
         logger.info(f"   Created {created_count} DataAsset nodes with relationships in knowledge graph")
-    
+
+    def _copy_step_shell_and_procedure_executions_from_info_graph(self):
+        """
+        Copy shell-script and stored-procedure execution links from the Information
+        Graph into the Knowledge Graph, using the same DataAsset intermediary pattern
+        as _copy_step_db_operations_from_info_graph.
+
+        IG source relationships:
+          JavaMethod -[:EXECUTES]->(r:Resource {type:'SHELL_SCRIPT'})
+          JavaMethod -[:INVOKES]->(r:Resource {type:'PROCEDURE'|'FUNCTION'})
+
+        KG structure created:
+          Step -[:EXECUTES]->(da:DataAsset)-[:FOR_RESOURCE]->(r:Resource)
+
+        Both direct method links AND call-chain traversals are included, mirroring
+        the UNION approach used for DB operations.
+        """
+        logger.info("Creating DataAsset nodes from information graph shell/procedure executions...")
+
+        # Two paths to JavaClass are handled:
+        #   TASKLET: Step -[:IMPLEMENTED_BY]-> JavaClass
+        #   CHUNK  : Step -[:USES_BEAN]-> Bean -[:IMPLEMENTS]-> JavaClass
+        #            (applies to reader, processor, and writer beans alike)
+
+        # ── Shell executions ──────────────────────────────────────────────────
+        shell_query = """
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)-[:EXECUTES]->(r:Resource)
+        WHERE r.type = 'SHELL_SCRIPT'
+        RETURN s.name          AS stepName,
+               r.name          AS resourceName,
+               r.type          AS resourceType,
+               r.scriptType    AS scriptType,
+               r.scriptPath    AS scriptPath,
+               r.scriptDir     AS scriptDir,
+               r.scriptFile    AS scriptFile,
+               r.executionUser AS executionUser,
+               r.scriptParams  AS scriptParams,
+               m.fqn           AS methodFqn
+
+        UNION
+
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(entry:JavaMethod)
+        MATCH (entry)-[:CALLS*]->(m:JavaMethod)-[:EXECUTES]->(r:Resource)
+        WHERE r.type = 'SHELL_SCRIPT'
+        RETURN s.name          AS stepName,
+               r.name          AS resourceName,
+               r.type          AS resourceType,
+               r.scriptType    AS scriptType,
+               r.scriptPath    AS scriptPath,
+               r.scriptDir     AS scriptDir,
+               r.scriptFile    AS scriptFile,
+               r.executionUser AS executionUser,
+               r.scriptParams  AS scriptParams,
+               m.fqn           AS methodFqn
+        """
+
+        # ── Procedure / Function calls ────────────────────────────────────────
+        proc_query = """
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)-[:INVOKES]->(r:Resource)
+        WHERE r.type IN ['PROCEDURE', 'FUNCTION']
+        RETURN s.name           AS stepName,
+               r.name           AS resourceName,
+               r.type           AS resourceType,
+               r.databaseType   AS databaseType,
+               r.schemaName     AS schemaName,
+               r.packageName    AS packageName,
+               m.fqn            AS methodFqn
+
+        UNION
+
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(entry:JavaMethod)
+        MATCH (entry)-[:CALLS*]->(m:JavaMethod)-[:INVOKES]->(r:Resource)
+        WHERE r.type IN ['PROCEDURE', 'FUNCTION']
+        RETURN s.name           AS stepName,
+               r.name           AS resourceName,
+               r.type           AS resourceType,
+               r.databaseType   AS databaseType,
+               r.schemaName     AS schemaName,
+               r.packageName    AS packageName,
+               m.fqn            AS methodFqn
+        """
+
+        shell_rows = []
+        proc_rows  = []
+        with self.driver.session(database=self.info_database) as session:
+            shell_rows = [dict(r) for r in session.run(shell_query)]
+            proc_rows  = [dict(r) for r in session.run(proc_query)]
+
+        if not shell_rows and not proc_rows:
+            logger.info("  No shell/procedure executions found in information graph")
+            return
+
+        logger.info(
+            f"  Found {len(shell_rows)} shell execution link(s) and "
+            f"{len(proc_rows)} procedure execution link(s) in IG"
+        )
+
+        # Deduplicate by (stepName, resourceName) — UNION can produce duplicates
+        def _deduplicate(rows):
+            seen, unique = set(), []
+            for row in rows:
+                key = (row["stepName"], row["resourceName"])
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(row)
+            return unique
+
+        shell_rows = _deduplicate(shell_rows)
+        proc_rows  = _deduplicate(proc_rows)
+
+        created_count = 0
+
+        with self.driver.session(database=self.database) as session:
+
+            # ── Shell executions ──────────────────────────────────────────────
+            for row in shell_rows:
+                step_name     = row["stepName"]
+                resource_name = row["resourceName"]
+                script_type   = row.get("scriptType")  or "SHELL"
+                script_path   = row.get("scriptPath")  or resource_name
+                script_dir    = row.get("scriptDir")   or ""
+                script_file   = row.get("scriptFile")  or resource_name
+                exec_user     = row.get("executionUser") or ""
+                script_params = row.get("scriptParams") or ""
+
+                resource_id = (
+                    "RESOURCE_SHELL_"
+                    + resource_name.replace(".", "_").replace("-", "_").upper()
+                )
+                da_id = f"DA_SHELL_{step_name}_{resource_name}"
+
+                # 1. Ensure Resource (mirrors shell_execution_enricher pattern)
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
+                    ON CREATE SET r.id            = $resourceId,
+                                  r.enabled       = true,
+                                  r.scriptType    = $scriptType,
+                                  r.scriptPath    = $scriptPath,
+                                  r.scriptDir     = $scriptDir,
+                                  r.scriptFile    = $scriptFile,
+                                  r.executionUser = $execUser,
+                                  r.scriptParams  = $scriptParams,
+                                  r.foundInRepo   = false
+                    ON MATCH SET  r.scriptType    = COALESCE(r.scriptType, $scriptType),
+                                  r.scriptPath    = COALESCE(r.scriptPath, $scriptPath)
+                    """,
+                    name=resource_name, resourceId=resource_id,
+                    scriptType=script_type, scriptPath=script_path,
+                    scriptDir=script_dir, scriptFile=script_file,
+                    execUser=exec_user, scriptParams=script_params,
+                )
+
+                # 2. Create DataAsset and link to Resource
+                session.run(
+                    """
+                    MERGE (da:DataAsset {id: $daId})
+                    SET da.description   = $description,
+                        da.scriptType    = $scriptType,
+                        da.scriptFile    = $scriptFile,
+                        da.scriptParams  = $scriptParams,
+                        da.executionUser = $execUser,
+                        da.enabled       = true
+                    WITH da
+                    MATCH (r:Resource {name: $resourceName, type: 'SHELL_SCRIPT'})
+                    MERGE (da)-[:FOR_RESOURCE]->(r)
+                    """,
+                    daId=da_id,
+                    description=f"Shell execution: {resource_name}",
+                    scriptType=script_type, scriptFile=script_file,
+                    scriptParams=script_params, execUser=exec_user,
+                    resourceName=resource_name,
+                )
+
+                # 3. Step -[:EXECUTES]-> DataAsset
+                session.run(
+                    """
+                    MATCH (s:Step {name: $stepName})
+                    MATCH (da:DataAsset {id: $daId})
+                    MERGE (s)-[:EXECUTES {scriptType: $scriptType, confidence: 'HIGH'}]->(da)
+                    """,
+                    stepName=step_name, daId=da_id, scriptType=script_type,
+                )
+
+                created_count += 1
+
+            # ── Procedure / Function calls ────────────────────────────────────
+            for row in proc_rows:
+                step_name     = row["stepName"]
+                resource_name = row["resourceName"]
+                resource_type = row["resourceType"]        # PROCEDURE or FUNCTION
+                db_type       = row.get("databaseType") or ""
+                schema_name   = row.get("schemaName")   or ""
+                package_name  = row.get("packageName")  or ""
+
+                resource_id = (
+                    f"RESOURCE_{resource_type}_{schema_name}_{resource_name}"
+                    .replace(" ", "_").upper()
+                )
+                da_id = f"DA_{resource_type}_{step_name}_{resource_name}"
+
+                # 1. Ensure Resource (mirrors procedure_call_enricher pattern)
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id           = $resourceId,
+                                  r.enabled      = true,
+                                  r.databaseType = $dbType,
+                                  r.schemaName   = $schemaName,
+                                  r.packageName  = $packageName,
+                                  r.foundInRepo  = false
+                    ON MATCH SET  r.databaseType = COALESCE(r.databaseType, $dbType),
+                                  r.schemaName   = COALESCE(r.schemaName, $schemaName)
+                    """,
+                    name=resource_name, rtype=resource_type, resourceId=resource_id,
+                    dbType=db_type, schemaName=schema_name, packageName=package_name,
+                )
+
+                # 2. Create DataAsset and link to Resource
+                session.run(
+                    """
+                    MERGE (da:DataAsset {id: $daId})
+                    SET da.description  = $description,
+                        da.databaseType = $dbType,
+                        da.schemaName   = $schemaName,
+                        da.packageName  = $packageName,
+                        da.enabled      = true
+                    WITH da
+                    MATCH (r:Resource {name: $resourceName, type: $rtype})
+                    MERGE (da)-[:FOR_RESOURCE]->(r)
+                    """,
+                    daId=da_id,
+                    description=f"Procedure call: {resource_name}",
+                    dbType=db_type, schemaName=schema_name, packageName=package_name,
+                    resourceName=resource_name, rtype=resource_type,
+                )
+
+                # 3. Step -[:EXECUTES]-> DataAsset
+                session.run(
+                    """
+                    MATCH (s:Step {name: $stepName})
+                    MATCH (da:DataAsset {id: $daId})
+                    MERGE (s)-[:EXECUTES {databaseType: $dbType, confidence: 'HIGH'}]->(da)
+                    """,
+                    stepName=step_name, daId=da_id, dbType=db_type,
+                )
+
+                created_count += 1
+
+        logger.info(
+            f"   Created {created_count} DataAsset/Resource pair(s) for "
+            f"shell/procedure executions in knowledge graph"
+        )
+
     def _load_resource_dependency(self, excel_file):
         """Load Resources Dependency"""
         df = pd.read_excel(excel_file, 'ResourceDependency')
@@ -1467,7 +1748,7 @@ def main():
             stats = loader.get_statistics()
             for node_type, count in stats.items():
                 logger.info(f"  {node_type}: {count}")
-            
+
             logger.info("\n" + "=" * 70)
             logger.info(" LOADING COMPLETE!")
             logger.info("=" * 70)

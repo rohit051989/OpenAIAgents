@@ -54,7 +54,7 @@ procedure_calls:
   database_type: ORACLE
   is_function: false
 
-- method_fqn: com.companyname.dao.BatchJobDAO.executeStoredProcedure(String,String,String)
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.executeStoredProcedure(String,String,String)
   tasklet_fqn: "com.companyname.batch.tasklet.StoredProcedureExecutorTasklet"
   bean_id: "customerStoredProcedureTasklet"
   procedure_name: P_DATA_RESTORE_PROCESSOR

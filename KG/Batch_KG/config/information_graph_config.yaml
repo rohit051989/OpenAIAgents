@@ -77,6 +77,12 @@ file_type_rules:
     exact_names: ["azure-pipelines.yml", "azure-pipelines-artifactory-onprem.yml", "Jenkinsfile", ".gitlab-ci.yml"]
     include_patterns: [".github/workflows/.*\\.yml$"]
 
+  shell_script:
+    extensions: [".sh", ".bat", ".cmd", ".ps1", ".pl"]
+
+  sql_script:
+    extensions: [".sql", ".ddl"]
+
 # Directories to skip during scanning
 skip_directories:
   - ".git"
@@ -221,3 +227,17 @@ grey_area_keywords:
   
   # Enricher entry prefixes (for filtering)
   enricher_prefixes: ['Runtime.exec:', 'CommonsExec:', 'ProcessBuilder:', 'SSHClient:', 'SSH:']
+
+# Dynamic Jobs configuration
+# Dynamic jobs are batch jobs with no custom Java logic that run a shared
+# DynamicTasklet class to execute shell scripts configured via an Excel sheet.
+dynamic_jobs:
+  enabled: true
+  excel_file: "sample_data/Dynamic_Jobs.xlsx"
+
+  # Shared virtual class used by every dynamic job step.
+  # These values must match what dynamic_job_loader.py writes to Neo4j.
+  dynamic_tasklet_class_fqn:   "com.batch.dynamic.DynamicTasklet"
+  dynamic_tasklet_bean_id:     "dynamicTasklet"
+  dynamic_tasklet_path:        "dynamic/DynamicTasklet.java"
+  dynamic_spring_config_path:  "dynamic/dynamic-spring-config.xml"

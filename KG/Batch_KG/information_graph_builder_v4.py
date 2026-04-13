@@ -144,6 +144,39 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
         
         return None
     
+    def _resolve_return_type_fqn(tc_fqn: str, m_name: str, arg_types) -> Optional[str]:
+        """Return the FQN of the return type of tc_fqn.m_name(), or None.
+
+        Used during the pre-pass in process_class_recursive to build a complete
+        call-index → return-type map for chained-call resolution.
+        """
+        if not tc_fqn or tc_fqn not in all_classes_cache:
+            return None
+        tci = all_classes_cache[tc_fqn]
+        target_fqn = tc_fqn
+        # For interfaces, peek at the single implementation (if any)
+        if tci.is_interface:
+            impls = interface_registry.get(tc_fqn, [])
+            if len(impls) == 1 and impls[0] in all_classes_cache:
+                target_fqn = impls[0]
+                tci = all_classes_cache[target_fqn]
+        if not tci.has_method_name(m_name):
+            found = find_method_in_class_hierarchy(target_fqn, m_name, all_classes_cache)
+            if found:
+                target_fqn, tci = found
+            else:
+                return None
+        m_def = tci.get_method_by_name_and_params(m_name, arg_types)
+        rt_simple = m_def.return_type
+        if not rt_simple:
+            return None
+        if '.' in rt_simple and rt_simple in all_classes_cache:
+            return rt_simple
+        for fqn_key in all_classes_cache.keys():
+            if fqn_key.endswith('.' + rt_simple) or fqn_key == rt_simple:
+                return fqn_key
+        return None
+
     def process_class_recursive(class_fqn: str, depth: int = 0, max_depth: int = 10):
         """Recursively process a class and its called classes"""
         if depth > max_depth or class_fqn in processed_classes or class_fqn not in all_classes_cache:
@@ -212,9 +245,19 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                 ))
                 
                 # Process method calls
-                # Track previous method calls within this method for chained call resolution
-                previous_call_return_types = {}  # call_index -> return_type_fqn
-                
+                # Pre-pass: compute return types for ALL calls so that chained-call resolution
+                # works regardless of call order in the list.
+                # Background: AST traversal emits the OUTER call first (e.g. executeStoredProcedure)
+                # before the INNER chained call (e.g. getJobsDao), so a forward-only pass would miss
+                # the return type needed to resolve the outer call's target.
+
+                all_call_return_types: dict = {}  # call_index -> return_type_fqn (pre-computed)
+                for _ci, _c in enumerate(method_def.calls):
+                    if _c.target_class:
+                        _rt = _resolve_return_type_fqn(_c.target_class, _c.method_name, _c.argument_types)
+                        if _rt:
+                            all_call_return_types[_ci] = _rt
+
                 for call_index, call in enumerate(method_def.calls):
                     resolution_stats['total_calls'] += 1
                     
@@ -222,38 +265,28 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                     called_class_fqn = call.target_class if call.target_class else class_fqn
                     
                     # === CHAINED METHOD CALL RESOLUTION ===
-                    # If target_class is None, check if a previous call's return type has this method
-                    if not call.target_class and previous_call_return_types:
+                    # If target_class is None, check if ANY other call's return type has this method.
+                    # We search all_call_return_types (pre-computed for the whole method) so that the
+                    # outer call in a chain (e.g. executeStoredProcedure at index 0) can be resolved
+                    # using the inner call's return type (e.g. getJobsDao at index 1).
+                    if not call.target_class and all_call_return_types:
                         logger.debug(f"  Attempting to resolve chained call for {call.method_name} (no target class)")
-                        for prev_idx, prev_return_type in previous_call_return_types.items():
-                            if prev_return_type and prev_return_type in all_classes_cache:
-                                prev_class_info = all_classes_cache[prev_return_type]
-                                if prev_class_info.has_method_name(call.method_name):
-                                    logger.info(f"  ✓ Resolved chained call: previous method returned {prev_return_type}, calling {call.method_name}")
-                                    called_class_fqn = prev_return_type
+                        for _idx, _ret_type in all_call_return_types.items():
+                            if _ret_type and _ret_type in all_classes_cache:
+                                _ret_class_info = all_classes_cache[_ret_type]
+                                if _ret_class_info.has_method_name(call.method_name):
+                                    logger.info(f"  ✓ Resolved chained call: call[{_idx}] returned {_ret_type}, calling {call.method_name}")
+                                    called_class_fqn = _ret_type
                                     break
-                    
-                    # Store this call's return type for potential future chained calls
-                    if called_class_fqn and called_class_fqn in all_classes_cache:
-                        target_class_info = all_classes_cache[called_class_fqn]
-                        if target_class_info.has_method_name(call.method_name):
-                            target_method = target_class_info.get_method_by_name_and_params(
-                                call.method_name, call.argument_types)
-                            return_type_simple = target_method.return_type
-                            # Try to find FQN of return type in all_classes_cache
-                            return_type_fqn = None
-                            if return_type_simple:
-                                # If it's already an FQN (contains dots)
-                                if '.' in return_type_simple and return_type_simple in all_classes_cache:
-                                    return_type_fqn = return_type_simple
-                                else:
-                                    # Search for matching class name in cache
-                                    for fqn in all_classes_cache.keys():
-                                        if fqn.endswith('.' + return_type_simple) or fqn == return_type_simple:
-                                            return_type_fqn = fqn
+                                # Also search via interface resolution
+                                if _ret_class_info.is_interface:
+                                    impls = interface_registry.get(_ret_type, [])
+                                    if len(impls) >= 1:
+                                        found_in_impl = find_method_in_class_hierarchy(impls[0], call.method_name, all_classes_cache)
+                                        if found_in_impl:
+                                            logger.info(f"  ✓ Resolved chained+interface call: call[{_idx}] returned {_ret_type} → impl {impls[0]}, calling {call.method_name}")
+                                            called_class_fqn = _ret_type  # keep as interface; interface resolution below will finish it
                                             break
-                            if return_type_fqn:
-                                previous_call_return_types[call_index] = return_type_fqn
                     
                     # === INTERFACE RESOLUTION WITH HUMAN REVIEW FLAGS ===
                     # Check if target is an interface and attempt resolution
@@ -1262,6 +1295,12 @@ class InformationGraphBuilder:
         OPTIMIZED: Reuses provided session instead of opening new one."""
         safe_types = [ft.replace(' ', '').replace('-', '') for ft in file_types if ft]
         labels = 'Node:File:' + ':'.join(safe_types) if safe_types else 'Node:File'
+        # Shell scripts are also queryable as Resource nodes (e.g. by dynamic_ig_loader)
+        if 'ShellScript' in file_types and ':Resource' not in labels:
+            labels = labels + ':Resource'
+        # SQL script files are also Resource nodes (for SQL invocation linking)
+        if 'SqlScript' in file_types and ':Resource' not in labels:
+            labels = labels + ':Resource'
         
         # Store repo-relative path in graph
         path_str = self._to_relative_path(file_path)
@@ -1405,6 +1444,7 @@ class InformationGraphBuilder:
             n.gitRepoName = $git_repo_name,
             n.gitBranchName = $git_branch_name,
             n.gitFileExists = $git_file_exists,
+            n.dynamicJavaClass = false,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -1517,7 +1557,8 @@ class InformationGraphBuilder:
                 m.procedureCalls = $procedure_calls,
                 m.shellExecutions = $shell_executions,
                 m.sourceCode = $source_code,
-                m.javaLineCount = $java_line_count
+                m.javaLineCount = $java_line_count,
+                m.dynamicJavaMethod = false
             MERGE (c)-[:HAS_METHOD]->(m)
             RETURN m
             """
@@ -2102,6 +2143,7 @@ class InformationGraphBuilder:
                 b.gitRepoName = bean.gitRepoName,
                 b.gitBranchName = bean.gitBranchName,
                 b.gitFileExists = true,
+                b.dynamicBean = false,
                 b.created_at = datetime()
             ON MATCH SET
                 b.beanId = bean.beanId,
@@ -2415,7 +2457,9 @@ class InformationGraphBuilder:
         for fqn, path, is_interface, implements_array in neo4j_classes:
             if fqn not in all_classes_cache:
                 try:
-                    class_info = parser.parse_java_file(path)
+                    # path stored in Neo4j is repo-relative; convert to absolute for file I/O
+                    abs_path = self._to_absolute_path(path)
+                    class_info = parser.parse_java_file(abs_path)
                     if class_info and class_info.fqn == fqn:
                         all_classes_cache[fqn] = class_info
                         parsed_count += 1
@@ -2427,10 +2471,10 @@ class InformationGraphBuilder:
                             logger.debug(f"    ✓ Parsed implementation: {fqn} implements {class_info.implements}")
                     else:
                         parse_errors += 1
-                        logger.debug(f"    ✗ FQN mismatch for {path}: expected {fqn}, got {class_info.fqn if class_info else 'None'}")
+                        logger.debug(f"    ✗ FQN mismatch for {abs_path}: expected {fqn}, got {class_info.fqn if class_info else 'None'}")
                 except Exception as e:
                     parse_errors += 1
-                    logger.debug(f"    ✗ Failed to parse {path}: {str(e)[:100]}")
+                    logger.debug(f"    ✗ Failed to parse {abs_path}: {str(e)[:100]}")
         
         logger.info(f"  Parsed {parsed_count} additional classes from Neo4j")
         if parse_errors > 0:
@@ -2665,14 +2709,30 @@ def main():
         phase_start = time.time()
         builder._load_classes()
         load_classes_time = time.time() - phase_start
-        
+
+        # LAST STEP: Load dynamic jobs into the Information Graph (included in total time)
+        phase_start = time.time()
+        logger.info(" Dynamic: Loading dynamic jobs into Information Graph...")
+        dynamic_ig_time = 0.0
+        try:
+            from dynamic_ig_loader import DynamicIGLoader
+            dj_loader = DynamicIGLoader(config_path=config_file)
+            dj_loader.load()
+            dj_loader.close()
+            dynamic_ig_time = time.time() - phase_start
+            logger.info(f"    Dynamic IG loading completed in {dynamic_ig_time:.1f} seconds")
+        except Exception as dj_err:
+            dynamic_ig_time = time.time() - phase_start
+            logger.warning(f"  Dynamic IG loader failed (non-fatal): {dj_err}")
+
         total_time = time.time() - script_start
-        
+
         logger.info(" " + "=" * 80)
         logger.info(" ⏱️  PERFORMANCE SUMMARY")
         logger.info("=" * 80)
         if skip_initial:
             logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
+            logger.info(f"  Dynamic Jobs (IG):    {dynamic_ig_time:>8.1f} seconds")
             logger.info(f"  " + "-" * 40)
             logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
             logger.info(f"  Note: Initial phases (DB clearing, constraints, DB repo scan, SHOT 1-2.5) were skipped")
@@ -2683,12 +2743,13 @@ def main():
             logger.info(f"  Shot 2.5 (Validation):{shot2_5_time:>8.1f} seconds")
             logger.info(f"  Shot 2.6 (EXTENDS):   {shot2_6_time:>8.1f} seconds")
             logger.info(f"  Class Loading:        {load_classes_time/60:>8.1f} minutes")
+            logger.info(f"  Dynamic Jobs (IG):    {dynamic_ig_time:>8.1f} seconds")
             logger.info(f"  " + "-" * 40)
             logger.info(f"  TOTAL TIME:           {total_time/60:>8.1f} minutes ({total_time/3600:.2f} hours)")
         logger.info("=" * 80)
         logger.info("  Information Graph built successfully!")
         logger.info("")
-        
+
     except Exception as e:
         logger.info(f"  Error: {str(e)}")
         import traceback
