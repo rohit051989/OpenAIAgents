@@ -124,7 +124,7 @@ def _parse_dynamic_jobs_excel(excel_file: str) -> Dict[str, Dict]:
       Procedure : PROC_NAME, PROC_SCHEMA, PROC_PACKAGE, PROC_PARAMS
     """
     wb = openpyxl.load_workbook(excel_file, data_only=True)
-    ws = wb["Dynamic_Job_Details"]
+    ws = wb["Dynamic_Jobs_Details"]
 
     jobs: Dict[str, Dict] = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -895,14 +895,14 @@ class DynamicIGLoader:
     def load(self):
         """
         Parse the Excel file and write all dynamic-job IG nodes + relationships.
-        Safe to call multiple times — all writes use MERGE (idempotent).
+        Safe to call multiple times - all writes use MERGE (idempotent).
         """
         logger.info("=" * 80)
-        logger.info("DYNAMIC JOB LOADER — Information Graph")
+        logger.info("DYNAMIC JOB LOADER - Information Graph")
         logger.info("=" * 80)
 
         if not self.enabled:
-            logger.info("  dynamic_jobs.enabled = false — skipping.")
+            logger.info("  dynamic_jobs.enabled = false - skipping.")
             return
 
         if not Path(self.excel_file).exists():

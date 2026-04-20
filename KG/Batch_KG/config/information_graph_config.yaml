@@ -164,7 +164,7 @@ scan_options:
 
   # Job filtering for faster testing
   build_all_jobs: false  # Set to false to build only specific jobs
-  jobs_to_build: ["customerProcessingJob","customerExportJob"]  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
+  jobs_to_build: ["customerProcessingJob","customerExportJob","EFC-CS","orderProcessingJob","reportGenerationJob"]  # List of job names when build_all_jobs is false, e.g., ["job1", "job2", "job3"]
 
 # Class data configuration
 class_data:
@@ -173,7 +173,7 @@ class_data:
 
 # Instance data configuration
 instance_data:
-  excel_file: "sample_data/instance_level_data_v3.xlsx"
+  excel_file: "sample_data/instance_level_data_v4.xlsx"
 
 # DB Operation Analysis Configuration
 db_operation_analysis:

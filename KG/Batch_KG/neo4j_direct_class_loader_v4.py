@@ -185,6 +185,7 @@ class Neo4jLoader:
         self._load_steps_directly_from_IG()
         self._copy_step_db_operations_from_info_graph()
         self._copy_step_shell_and_procedure_executions_from_info_graph()
+        self._copy_sql_resource_invokes_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
         self._load_calendar(excel_file)
@@ -313,10 +314,11 @@ class Neo4jLoader:
         query = """
         MATCH (j:Job)
         WHERE j.id IS NOT NULL AND j.name IS NOT NULL
-        RETURN j.id as id,
-               j.name as name,
-               j.enabled as enabled,
-               j.sourceFile as sourceFile
+        RETURN j.id           as id,
+               j.name         as name,
+               j.enabled      as enabled,
+               j.sourceFile   as sourceFile,
+               j.dynamicJob   as dynamicJob
         ORDER BY j.name
         """
         
@@ -325,10 +327,11 @@ class Neo4jLoader:
             result = session.run(query)
             for record in result:
                 jobs.append({
-                    'id': record['id'],
-                    'name': record['name'],
-                    'enabled': record.get('enabled', True),
-                    'sourceFile': record.get('sourceFile', '')
+                    'id':         record['id'],
+                    'name':       record['name'],
+                    'enabled':    record.get('enabled', True),
+                    'sourceFile': record.get('sourceFile', ''),
+                    'dynamicJob': record.get('dynamicJob', False) or False,
                 })
         
         logger.info(f"  Found {len(jobs)} Job nodes in information graph")
@@ -360,16 +363,19 @@ class Neo4jLoader:
             enabled=bool(data.get('enabled', True)),
             source_file=str(data.get('sourceFile', ''))
         )
+        dynamic_job = bool(data.get('dynamicJob', False))
         query = """
         MERGE (j:Job {name: $name})
-        SET j.id = $id,
-            j.enabled = $enabled,
-            j.createdAt = datetime()
+        SET j.id         = $id,
+            j.enabled    = $enabled,
+            j.dynamicJob = $dynamicJob,
+            j.createdAt  = datetime()
         """
         if node.source_file:
             query += ", j.sourceFile = $sourceFile"
         query += " RETURN j"
-        tx.run(query, name=node.name, id=node.id, enabled=node.enabled, sourceFile=node.source_file)
+        tx.run(query, name=node.name, id=node.id, enabled=node.enabled,
+               sourceFile=node.source_file, dynamicJob=dynamic_job)
     
     def _load_jobs_association(self, excel_file):
         """Load Jobs and create relationships to JobGroups"""
@@ -424,20 +430,32 @@ class Neo4jLoader:
         logger.info("  Querying Steps from information graph...")
         steps_query = """
         MATCH (s:Step)
-        RETURN s.name as name,
-               s.stepKind as stepKind,
-               s.readerBean as readerBean,
-               s.readerClass as readerClass,
-               s.readerSourcePath as readerSourcePath,
-               s.processorBean as processorBean,
-               s.processorClass as processorClass,
-               s.processorSourcePath as processorSourcePath,
-               s.writerBean as writerBean,
-               s.writerClass as writerClass,
-               s.writerSourcePath as writerSourcePath,
-               s.implBean as implBean,
-               s.className as className,
-               s.path as path
+        RETURN s.name                              as name,
+               s.stepKind                         as stepKind,
+               s.readerBean                       as readerBean,
+               s.readerClass                      as readerClass,
+               s.readerSourcePath                 as readerSourcePath,
+               s.processorBean                    as processorBean,
+               s.processorClass                   as processorClass,
+               s.processorSourcePath              as processorSourcePath,
+               s.writerBean                       as writerBean,
+               s.writerClass                      as writerClass,
+               s.writerSourcePath                 as writerSourcePath,
+               s.implBean                         as implBean,
+               s.className                        as className,
+               s.path                             as path,
+               coalesce(s.dynamicJob,  false)     as dynamicJob,
+               coalesce(s.dynamicStep, false)     as dynamicStep,
+               coalesce(s.stepOrder,   0)         as stepOrder,
+               s.lastUpdated                      as lastUpdated,
+               coalesce(s.stepDbOperationCount,       0)  as stepDbOperationCount,
+               coalesce(s.stepDbOperations,       [])     as stepDbOperations,
+               coalesce(s.stepProcedureCallCount,     0)  as stepProcedureCallCount,
+               coalesce(s.stepProcedureCalls,     [])     as stepProcedureCalls,
+               coalesce(s.stepShellExecutionCount,    0)  as stepShellExecutionCount,
+               coalesce(s.stepShellExecutions,    [])     as stepShellExecutions,
+               coalesce(s.stepSqlFileInvocationCount, 0)  as stepSqlFileInvocationCount,
+               coalesce(s.stepSqlFileInvocations, [])     as stepSqlFileInvocations
         ORDER BY s.name
         """
         
@@ -587,30 +605,50 @@ class Neo4jLoader:
         logger.info("  Writing entities and relationships to knowledge graph...")
         
         with self.driver.session(database=self.database) as session:
+            # Shared execution-summary properties added to every Step regardless of kind
+            _STEP_STATS_CLAUSE = """
+                        s.dynamicJob                  = $dynamicJob,
+                        s.dynamicStep                 = $dynamicStep,
+                        s.stepOrder                   = $stepOrder,
+                        s.lastUpdated                 = $lastUpdated,
+                        s.stepDbOperationCount        = $stepDbOperationCount,
+                        s.stepDbOperations            = $stepDbOperations,
+                        s.stepProcedureCallCount      = $stepProcedureCallCount,
+                        s.stepProcedureCalls          = $stepProcedureCalls,
+                        s.stepShellExecutionCount     = $stepShellExecutionCount,
+                        s.stepShellExecutions         = $stepShellExecutions,
+                        s.stepSqlFileInvocationCount  = $stepSqlFileInvocationCount,
+                        s.stepSqlFileInvocations      = $stepSqlFileInvocations
+            """
+
             # Create Steps
             for step in steps:
                 if step.get('stepKind') == 'CHUNK':
-                    query = """
+                    query = (
+                        """
                     MERGE (s:Step {name: $name})
-                    SET s.stepKind = $stepKind,
-                        s.readerBean = $readerBean,
-                        s.readerClass = $readerClass,
-                        s.readerSourcePath = $readerSourcePath,
-                        s.processorBean = $processorBean,
-                        s.processorClass = $processorClass,
+                    SET s.stepKind            = $stepKind,
+                        s.readerBean          = $readerBean,
+                        s.readerClass         = $readerClass,
+                        s.readerSourcePath    = $readerSourcePath,
+                        s.processorBean       = $processorBean,
+                        s.processorClass      = $processorClass,
                         s.processorSourcePath = $processorSourcePath,
-                        s.writerBean = $writerBean,
-                        s.writerClass = $writerClass,
-                        s.writerSourcePath = $writerSourcePath
-                    """
+                        s.writerBean          = $writerBean,
+                        s.writerClass         = $writerClass,
+                        s.writerSourcePath    = $writerSourcePath,
+                    """ + _STEP_STATS_CLAUSE
+                    )
                 else:  # TASKLET
-                    query = """
+                    query = (
+                        """
                     MERGE (s:Step {name: $name})
-                    SET s.stepKind = $stepKind,
-                        s.implBean = $implBean,
+                    SET s.stepKind  = $stepKind,
+                        s.implBean  = $implBean,
                         s.className = $className,
-                        s.path = $path
-                    """
+                        s.path      = $path,
+                    """ + _STEP_STATS_CLAUSE
+                    )
                 session.run(query, **step)
             
             logger.info(f"    Created {len(steps)} Steps")
@@ -755,15 +793,12 @@ class Neo4jLoader:
     
     def _copy_step_db_operations_from_info_graph(self):
         """
-        Copy consolidated stepDbOperations from information graph to knowledge graph.
-        
-        This creates DataAsset nodes and relationships similar to _associate_step_interaction,
-        but derives the data from the information graph's JavaMethod nodes instead of Excel.
-        
-        Structure created:
-        Step -[READS_FROM/WRITES_TO/DELETES_FROM/AGGREGATES_ON]-> DataAsset -[FOR_RESOURCE]-> Resource
+        Copy DB operations from the information graph into the knowledge graph.
+
+        Structure created (direct, no DataAsset intermediary):
+          Step -[:DB_OPERATION {operationType, tableName, confidence, methodReference}]-> Resource {type:'TABLE'|'FILE'}
         """
-        logger.info("Creating DataAsset nodes from information graph DB operations...")
+        logger.info("Linking Steps to DB-operation Resources in knowledge graph...")
         
         # Query information graph for Steps with JavaMethods that have DB operations.
         # Two paths to JavaClass are handled:
@@ -844,112 +879,72 @@ class Neo4jLoader:
             else:
                 return 'TABLE'  # Default to TABLE
         
-        # Create DataAsset nodes and relationships for each step
-        created_count = 0
+        # Build deduplicated (stepName, db_op, method_fqn) tuples
+        unique_ops: dict = {}   # (stepName, db_op) -> first methodFqn seen
         for step_name, methods in steps_data.items():
-            # Group operations by unique combination
-            unique_ops = {}
             for method_info in methods:
                 method_fqn = method_info['methodFqn']
-                method_name = method_info['methodName']
-                
                 for db_op in method_info['dbOperations']:
-                    op_key = f"{step_name}_{db_op}_{method_fqn}"
-                    if op_key not in unique_ops:
-                        unique_ops[op_key] = {
-                            'operation': db_op,
-                            'methodReference': method_fqn,
-                            'methodName': method_name
-                        }
-            
-            # Create DataAsset and relationships for each unique operation
-            for op_key, op_data in unique_ops.items():
-                db_operation = op_data['operation']
-                method_reference = op_data['methodReference']
-                method_name = op_data['methodName']
-                
-                operation_type = get_operation_type(db_operation)
-                resource_type = get_resource_type(db_operation)
-                
-                # Parse db_operation to extract resource name
-                # Format: OPERATION:RESOURCE_NAME:PRIORITY (e.g., "SELECT:CUSTOMER:HIGH")
+                    key = (step_name, db_op)
+                    if key not in unique_ops:
+                        unique_ops[key] = method_fqn
+
+        created_count = 0
+        with self.driver.session(database=self.database) as session:
+            for (step_name, db_operation), method_fqn in unique_ops.items():
+                # Parse: "SELECT:CUSTOMER:HIGH" or "INSERT:STAGE_COLLATERAL:HIGH"
                 parts = db_operation.split(':')
-                if len(parts) >= 2:
-                    resource_name = parts[1].strip()  # Extract the resource/table name
-                    resource_id = f"RESOURCE_{resource_type}_{resource_name}"
-                else:
-                    # Fallback if format is different
-                    resource_name = f"Auto-generated {resource_type}"
-                    resource_id = f"RESOURCE_{resource_type}_AUTO"
-                
-                # Create DataAsset and link to Step and Resource
-                query_create = """
-                // Ensure Resource exists
-                MERGE (r:Resource {name: $resourceName, type: $resourceType})
-                ON CREATE SET r.id = $resourceId,
-                              r.name = $resourceName,
-                              r.type = $resourceType,
-                              r.enabled = true,
-                              r.description = 'Auto-generated from information graph'
-                
-                // Create DataAsset
-                MERGE (di:DataAsset {id: $dataAssetId})
-                SET di.description = $description,
-                    di.method = $method,
-                    di.methodReference = $methodReference,
-                    di.enabled = true
-                
-                // Link DataAsset to Resource
-                MERGE (di)-[:FOR_RESOURCE]->(r)
-                
-                // Link Step to DataAsset based on operation type
-                WITH di, r
-                MATCH (s:Step {name: $stepName})
-                """
-                
-                # Add relationship based on operation type
-                if operation_type == 'READ':
-                    query_create += "MERGE (s)-[:READS_FROM]->(di)"
-                elif operation_type == 'INSERT':
-                    query_create += "MERGE (s)-[:WRITES_TO]->(di)"
-                elif operation_type == 'DELETE':
-                    query_create += "MERGE (s)-[:DELETES_FROM]->(di)"
-                elif operation_type == 'AGGREGATE':
-                    query_create += "MERGE (s)-[:AGGREGATES_ON]->(di)"
-                
-                query_create += "\nRETURN di, r, s"
-                
-                with self.driver.session(database=self.database) as session:
-                    session.run(query_create,
-                               resourceId=resource_id,
-                               resourceName=resource_name,
-                               resourceType=resource_type,
-                               dataAssetId=op_key,
-                               description=f"{operation_type} operation: {db_operation}",
-                               method=method_name,
-                               methodReference=method_reference,
-                               stepName=step_name)
-                    created_count += 1
-        
-        logger.info(f"   Created {created_count} DataAsset nodes with relationships in knowledge graph")
+                operation_type  = get_operation_type(db_operation)
+                resource_type   = get_resource_type(db_operation)
+                resource_name   = parts[1].strip() if len(parts) >= 2 else db_operation
+                confidence      = parts[2].strip() if len(parts) >= 3 else 'MEDIUM'
+                resource_id     = f"RESOURCE_{resource_type}_{resource_name}"
+
+                # Ensure Resource node exists
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id      = $rid,
+                                  r.enabled = true
+                    """,
+                    name=resource_name, rtype=resource_type, rid=resource_id,
+                )
+
+                # Step -[:DB_OPERATION]-> Resource  (all info in rel props)
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: $resourceType})
+                    MERGE (s)-[rel:DB_OPERATION {operationType: $opType, tableName: $tname}]->(r)
+                    SET rel.confidence       = $confidence,
+                        rel.methodReference  = $methodRef
+                    """,
+                    stepName=step_name,
+                    resourceName=resource_name,
+                    resourceType=resource_type,
+                    opType=operation_type,
+                    tname=resource_name,
+                    confidence=confidence,
+                    methodRef=method_fqn,
+                )
+                created_count += 1
+
+        logger.info(f"   Created {created_count} Step-[:DB_OPERATION]->Resource link(s) in knowledge graph")
 
     def _copy_step_shell_and_procedure_executions_from_info_graph(self):
         """
         Copy shell-script and stored-procedure execution links from the Information
-        Graph into the Knowledge Graph, using the same DataAsset intermediary pattern
-        as _copy_step_db_operations_from_info_graph.
+        Graph into the Knowledge Graph.
 
-        IG source relationships:
+        IG source:
           JavaMethod -[:EXECUTES]->(r:Resource {type:'SHELL_SCRIPT'})
           JavaMethod -[:INVOKES]->(r:Resource {type:'PROCEDURE'|'FUNCTION'})
 
-        KG structure created:
-          Step -[:EXECUTES]->(da:DataAsset)-[:FOR_RESOURCE]->(r:Resource)
-
-        Both direct method links AND call-chain traversals are included, mirroring
-        the UNION approach used for DB operations.
+        KG structure created (direct, no DataAsset intermediary):
+          Step -[:EXECUTES  {scriptType, confidence, scriptPath, executionUser, scriptParams}]-> Resource {type:'SHELL_SCRIPT'}
+          Step -[:INVOKES   {databaseType, schemaName, packageName, confidence}]->             Resource {type:'PROCEDURE'|'FUNCTION'}
         """
-        logger.info("Creating DataAsset nodes from information graph shell/procedure executions...")
+        logger.info("Linking Steps to shell/procedure Resources in knowledge graph...")
 
         # Two paths to JavaClass are handled:
         #   TASKLET: Step -[:IMPLEMENTED_BY]-> JavaClass
@@ -1062,24 +1057,23 @@ class Neo4jLoader:
 
         with self.driver.session(database=self.database) as session:
 
-            # ── Shell executions ──────────────────────────────────────────────
+            # ── Shell executions: Step -[:EXECUTES]-> Resource ────────────────
             for row in shell_rows:
                 step_name     = row["stepName"]
                 resource_name = row["resourceName"]
-                script_type   = row.get("scriptType")  or "SHELL"
-                script_path   = row.get("scriptPath")  or resource_name
-                script_dir    = row.get("scriptDir")   or ""
-                script_file   = row.get("scriptFile")  or resource_name
+                script_type   = row.get("scriptType")    or "SHELL"
+                script_path   = row.get("scriptPath")    or resource_name
+                script_dir    = row.get("scriptDir")     or ""
+                script_file   = row.get("scriptFile")    or resource_name
                 exec_user     = row.get("executionUser") or ""
-                script_params = row.get("scriptParams") or ""
+                script_params = row.get("scriptParams")  or ""
 
                 resource_id = (
                     "RESOURCE_SHELL_"
                     + resource_name.replace(".", "_").replace("-", "_").upper()
                 )
-                da_id = f"DA_SHELL_{step_name}_{resource_name}"
 
-                # 1. Ensure Resource (mirrors shell_execution_enricher pattern)
+                # Ensure Resource node exists
                 session.run(
                     """
                     MERGE (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
@@ -1090,8 +1084,7 @@ class Neo4jLoader:
                                   r.scriptDir     = $scriptDir,
                                   r.scriptFile    = $scriptFile,
                                   r.executionUser = $execUser,
-                                  r.scriptParams  = $scriptParams,
-                                  r.foundInRepo   = false
+                                  r.scriptParams  = $scriptParams
                     ON MATCH SET  r.scriptType    = COALESCE(r.scriptType, $scriptType),
                                   r.scriptPath    = COALESCE(r.scriptPath, $scriptPath)
                     """,
@@ -1101,44 +1094,29 @@ class Neo4jLoader:
                     execUser=exec_user, scriptParams=script_params,
                 )
 
-                # 2. Create DataAsset and link to Resource
+                # Step -[:EXECUTES {rel props}]-> Resource  (direct, no DataAsset)
                 session.run(
                     """
-                    MERGE (da:DataAsset {id: $daId})
-                    SET da.description   = $description,
-                        da.scriptType    = $scriptType,
-                        da.scriptFile    = $scriptFile,
-                        da.scriptParams  = $scriptParams,
-                        da.executionUser = $execUser,
-                        da.enabled       = true
-                    WITH da
+                    MATCH (s:Step     {name: $stepName})
                     MATCH (r:Resource {name: $resourceName, type: 'SHELL_SCRIPT'})
-                    MERGE (da)-[:FOR_RESOURCE]->(r)
+                    MERGE (s)-[rel:EXECUTES {resourceName: $resourceName}]->(r)
+                    SET rel.scriptType    = $scriptType,
+                        rel.scriptFile    = $scriptFile,
+                        rel.scriptParams  = $scriptParams,
+                        rel.executionUser = $execUser,
+                        rel.confidence    = 'HIGH'
                     """,
-                    daId=da_id,
-                    description=f"Shell execution: {resource_name}",
+                    stepName=step_name, resourceName=resource_name,
                     scriptType=script_type, scriptFile=script_file,
                     scriptParams=script_params, execUser=exec_user,
-                    resourceName=resource_name,
                 )
-
-                # 3. Step -[:EXECUTES]-> DataAsset
-                session.run(
-                    """
-                    MATCH (s:Step {name: $stepName})
-                    MATCH (da:DataAsset {id: $daId})
-                    MERGE (s)-[:EXECUTES {scriptType: $scriptType, confidence: 'HIGH'}]->(da)
-                    """,
-                    stepName=step_name, daId=da_id, scriptType=script_type,
-                )
-
                 created_count += 1
 
-            # ── Procedure / Function calls ────────────────────────────────────
+            # ── Procedure / Function calls: Step -[:INVOKES]-> Resource ───────
             for row in proc_rows:
                 step_name     = row["stepName"]
                 resource_name = row["resourceName"]
-                resource_type = row["resourceType"]        # PROCEDURE or FUNCTION
+                resource_type = row["resourceType"]          # PROCEDURE or FUNCTION
                 db_type       = row.get("databaseType") or ""
                 schema_name   = row.get("schemaName")   or ""
                 package_name  = row.get("packageName")  or ""
@@ -1147,9 +1125,8 @@ class Neo4jLoader:
                     f"RESOURCE_{resource_type}_{schema_name}_{resource_name}"
                     .replace(" ", "_").upper()
                 )
-                da_id = f"DA_{resource_type}_{step_name}_{resource_name}"
 
-                # 1. Ensure Resource (mirrors procedure_call_enricher pattern)
+                # Ensure Resource node exists
                 session.run(
                     """
                     MERGE (r:Resource {name: $name, type: $rtype})
@@ -1157,8 +1134,7 @@ class Neo4jLoader:
                                   r.enabled      = true,
                                   r.databaseType = $dbType,
                                   r.schemaName   = $schemaName,
-                                  r.packageName  = $packageName,
-                                  r.foundInRepo  = false
+                                  r.packageName  = $packageName
                     ON MATCH SET  r.databaseType = COALESCE(r.databaseType, $dbType),
                                   r.schemaName   = COALESCE(r.schemaName, $schemaName)
                     """,
@@ -1166,41 +1142,115 @@ class Neo4jLoader:
                     dbType=db_type, schemaName=schema_name, packageName=package_name,
                 )
 
-                # 2. Create DataAsset and link to Resource
+                # Step -[:INVOKES {rel props}]-> Resource  (direct, no DataAsset)
                 session.run(
                     """
-                    MERGE (da:DataAsset {id: $daId})
-                    SET da.description  = $description,
-                        da.databaseType = $dbType,
-                        da.schemaName   = $schemaName,
-                        da.packageName  = $packageName,
-                        da.enabled      = true
-                    WITH da
+                    MATCH (s:Step     {name: $stepName})
                     MATCH (r:Resource {name: $resourceName, type: $rtype})
-                    MERGE (da)-[:FOR_RESOURCE]->(r)
+                    MERGE (s)-[rel:INVOKES {resourceName: $resourceName}]->(r)
+                    SET rel.databaseType = $dbType,
+                        rel.schemaName   = $schemaName,
+                        rel.packageName  = $packageName,
+                        rel.confidence   = 'HIGH'
                     """,
-                    daId=da_id,
-                    description=f"Procedure call: {resource_name}",
+                    stepName=step_name, resourceName=resource_name, rtype=resource_type,
                     dbType=db_type, schemaName=schema_name, packageName=package_name,
-                    resourceName=resource_name, rtype=resource_type,
                 )
-
-                # 3. Step -[:EXECUTES]-> DataAsset
-                session.run(
-                    """
-                    MATCH (s:Step {name: $stepName})
-                    MATCH (da:DataAsset {id: $daId})
-                    MERGE (s)-[:EXECUTES {databaseType: $dbType, confidence: 'HIGH'}]->(da)
-                    """,
-                    stepName=step_name, daId=da_id, dbType=db_type,
-                )
-
                 created_count += 1
 
         logger.info(
-            f"   Created {created_count} DataAsset/Resource pair(s) for "
-            f"shell/procedure executions in knowledge graph"
+            f"   Created {created_count} direct Step->Resource link(s) "
+            f"(shell EXECUTES + procedure INVOKES) in knowledge graph"
         )
+
+    def _copy_sql_resource_invokes_from_info_graph(self):
+        """
+        Copy SQL_SCRIPT Resource nodes and the shell→SQL INVOKES relationship
+        from the Information Graph into the Knowledge Graph.
+
+        IG source:
+          Resource {type:'SHELL_SCRIPT'} -[:INVOKES {executionType:'SQL_SCRIPT'}]->
+          Resource {type:'SQL_SCRIPT'}
+
+        KG structure created:
+          Resource {type:'SHELL_SCRIPT'} -[:INVOKES {executionType:'SQL_SCRIPT'}]->
+          Resource {type:'SQL_SCRIPT'}
+
+        SQL Resource nodes are MERGEd so re-runs are idempotent.
+        """
+        logger.info("Copying SQL_SCRIPT Resource nodes and INVOKES links from information graph...")
+
+        # ── 1. Fetch all SQL_SCRIPT Resource nodes from IG ──────────────────
+        sql_resources_query = """
+        MATCH (r:Resource {type: 'SQL_SCRIPT'})
+        RETURN r.name       AS name,
+               r.id         AS id,
+               r.scriptPath AS scriptPath,
+               r.enabled    AS enabled,
+               r.dynamicJob AS dynamicJob
+        """
+
+        # ── 2. Fetch all shell→SQL INVOKES relationships from IG ────────────
+        invokes_query = """
+        MATCH (sh:Resource {type: 'SHELL_SCRIPT'})-[r:INVOKES]->(sql:Resource {type: 'SQL_SCRIPT'})
+        RETURN sh.name                AS shellName,
+               sql.name               AS sqlName,
+               r.executionType        AS executionType,
+               coalesce(r.dynamicJob, false) AS dynamicJob
+        """
+
+        sql_rows    = []
+        invoke_rows = []
+        with self.driver.session(database=self.info_database) as session:
+            sql_rows    = [dict(r) for r in session.run(sql_resources_query)]
+            invoke_rows = [dict(r) for r in session.run(invokes_query)]
+
+        if not sql_rows and not invoke_rows:
+            logger.info("  No SQL_SCRIPT resources or INVOKES links found in information graph")
+            return
+
+        logger.info(
+            f"  Found {len(sql_rows)} SQL_SCRIPT Resource(s) and "
+            f"{len(invoke_rows)} INVOKES link(s) in IG"
+        )
+
+        with self.driver.session(database=self.database) as session:
+
+            # Create / update SQL_SCRIPT Resource nodes in KG
+            for row in sql_rows:
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'SQL_SCRIPT'})
+                    ON CREATE SET r.id          = $id,
+                                  r.scriptPath  = $scriptPath,
+                                  r.enabled     = $enabled,
+                                  r.dynamicJob  = $dynamicJob
+                    ON MATCH  SET r.scriptPath  = COALESCE(r.scriptPath, $scriptPath)
+                    """,
+                    name=row["name"],
+                    id=row["id"] or f"RES_SQL_{row['name'].replace('.','_').upper()}",
+                    scriptPath=row.get("scriptPath") or "",
+                    enabled=row.get("enabled", True),
+                    dynamicJob=row.get("dynamicJob", False) or False,
+                )
+
+            logger.info(f"    Merged {len(sql_rows)} SQL_SCRIPT Resource(s) into KG")
+
+            # Create INVOKES relationships between shell and SQL Resources in KG
+            created = 0
+            for row in invoke_rows:
+                session.run(
+                    """
+                    MATCH (sh:Resource {name: $shellName, type: 'SHELL_SCRIPT'})
+                    MATCH (sql:Resource {name: $sqlName,  type: 'SQL_SCRIPT'})
+                    MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql)
+                    """,
+                    shellName=row["shellName"],
+                    sqlName=row["sqlName"],
+                )
+                created += 1
+
+            logger.info(f"    Created {created} INVOKES (shell→SQL) relationship(s) in KG")
 
     def _load_resource_dependency(self, excel_file):
         """Load Resources Dependency"""
@@ -1241,9 +1291,6 @@ class Neo4jLoader:
                r.enabled as enabled,
                r.schemaName as schemaName,
                r.packageName as packageName,
-               r.foundInRepo as foundInRepo,
-               r.repoName as repoName,
-               r.repoFilePath as repoFilePath,
                r.ddlSnippet as ddlSnippet,
                r.description as description
         ORDER BY r.name
@@ -1260,9 +1307,6 @@ class Neo4jLoader:
                     'enabled': record.get('enabled', True),
                     'schemaName': record.get('schemaName', ''),
                     'packageName': record.get('packageName', ''),
-                    'foundInRepo': record.get('foundInRepo', True),
-                    'repoName': record.get('repoName', ''),
-                    'repoFilePath': record.get('repoFilePath', ''),
                     'ddlSnippet': record.get('ddlSnippet', ''),
                     'description': record.get('description', '')
                 })
@@ -1327,10 +1371,7 @@ class Neo4jLoader:
             checkInterval=int(data.get('checkInterval', 0)),
             resourceLocation=str(data.get('filePath', '')),
             schemaName=str(data.get('schemaName', '')),
-            packageName=str(data.get('packageName', '')),
-            foundInRepo=bool(data.get('foundInRepo', False)),
-            repoName=str(data.get('repoName', '')),
-            repoFilePath=str(data.get('repoFilePath', ''))
+            packageName=str(data.get('packageName', ''))
         )
         description = str(data.get('description', ''))
         query = """
@@ -1349,12 +1390,6 @@ class Neo4jLoader:
             query += ", r.packageName = $packageName"
         if description:
             query += ", r.description = $description"
-        if node.foundInRepo:
-            query += ", r.foundInRepo = $foundInRepo"
-        if node.repoName:
-            query += ", r.repoName = $repoName"
-        if node.repoFilePath:
-            query += ", r.repoFilePath = $repoFilePath"
         if 'tagId' in data:
             tagIds = data.get('tagId', None)
             for tagId in tagIds.strip('[]').split(","):
@@ -1368,17 +1403,13 @@ class Neo4jLoader:
                 tx.run(query, id=node.id, name=node.name, type=node.type,
                        enabled=node.enabled, checkInterval=node.checkInterval,
                        resourceLocation=node.resourceLocation, schemaName=node.schemaName,
-                       packageName=node.packageName, description=description,
-                       foundInRepo=node.foundInRepo, repoName=node.repoName,
-                       repoFilePath=node.repoFilePath)
+                       packageName=node.packageName, description=description)
         else:
             query += " RETURN r"
             tx.run(query, id=node.id, name=node.name, type=node.type,
                    enabled=node.enabled, checkInterval=node.checkInterval,
                    resourceLocation=node.resourceLocation, schemaName=node.schemaName,
-                   packageName=node.packageName, description=description,
-                   foundInRepo=node.foundInRepo, repoName=node.repoName,
-                   repoFilePath=node.repoFilePath)
+                   packageName=node.packageName, description=description)
         
     
     def _load_job_successors(self, excel_file):

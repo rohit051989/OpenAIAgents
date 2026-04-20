@@ -31,6 +31,12 @@ db_operations:
   schema_name: APMLOAD
   confidence: HIGH
 
+- method_fqn: com.companyname.dao.CommonFacilityDaoImpl.persistNewCollaterals(List)
+  operation_type: INSERT
+  table_name: STAGE_COLLATERAL
+  schema_name: APMLOAD
+  confidence: HIGH
+
 # Stored Procedure Calls  
 # ----------------------
 # For methods that call stored procedures or functions

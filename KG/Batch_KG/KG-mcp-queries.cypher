@@ -256,7 +256,7 @@ RETURN
 //
 // MCP use : "show me the execution order of jobs in group X"
 // ─────────────────────────────────────────────────────────────────────────────
-MATCH (jg:JobGroup {name: $jobGroupName})-[:ENTRY]->(entry:ScheduleInstanceContext)
+MATCH (jg:JobGroup {id: $jobGroupName})-[:ENTRY]->(entry:ScheduleInstanceContext)
 MATCH p = (entry)-[:PRECEDES*0..30]->(sic:ScheduleInstanceContext)
 WITH jg, collect(p) AS paths, collect(DISTINCT sic) AS allSics
 WITH jg, paths, allSics,

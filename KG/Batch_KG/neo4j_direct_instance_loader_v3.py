@@ -64,6 +64,10 @@ class Neo4jInstanceLoaderV2:
         
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.database = database
+        # In-memory cache of JobGroupExecution IDs already created/confirmed this session.
+        # Key: "{jobGroupId}_{businessDate}" — avoids redundant JobGroup reverse-lookups
+        # and write attempts for the same JobGroupExecution across multiple JobContextExecution rows.
+        self._jge_cache: set = set()
         logger.info(f"Connected to Neo4j at {uri} (Database: {database})")
         
     def close(self):
@@ -132,8 +136,6 @@ class Neo4jInstanceLoaderV2:
         
         try:
             self._load_job_group_executions(excel_file)
-            # Load in sequence
-            self._load_jobcontext_executions(excel_file)
             # Load resource events if they exist
             self._load_resource_events(excel_file)
             
@@ -144,7 +146,7 @@ class Neo4jInstanceLoaderV2:
     
     def _load_job_group_executions(self, excel_file):
         """Load JobGroupExecution nodes"""
-        df = pd.read_excel(excel_file, 'JobGroupExecutions')
+        df = pd.read_excel(excel_file, 'JobContextExecutions')
         logger.info(f"Loading {len(df)} JobGroupExecutions...")
         
         with self.driver.session(database=self.database) as session:
@@ -152,17 +154,84 @@ class Neo4jInstanceLoaderV2:
                 data = row.to_dict()
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_job_group_execution, data)
+                if 'jobGroupExecId' in data:
+                    session.execute_write(self._create_jobcontext_execution, data)
         
         logger.info(f" Loaded {len(df)} JobGroupExecutions")
     
-    @staticmethod
-    def _create_job_group_execution(tx, data: Dict):
-        """Create JobGroupExecution and link to JobContext, Job, and JobGroupExecution"""
-        node = JobGroupExecutionNodeDef(
-            id=str(data.get('id', '')),
-            startTime=str(data.get('startTime', '')),
-            businessDate=str(data.get('businessDate', ''))
+    def _create_job_group_execution(self, tx, data: Dict):
+        """Create JobGroupExecution derived from JobContextExecution row data.
+
+        Derives the JobGroupExecution from two fields:
+          - jobName   : used to reverse-lookup the owning JobGroup via HAS_JOB
+          - startTime : datetime containing both the businessDate and the start time
+
+        JobGroupExecution.id is constructed as "{jobGroupId}_{businessDate}".
+
+        Skips creation and logs a warning when:
+          - jobName or startTime are missing
+          - no JobGroup is found for the given jobName
+          - more than one JobGroup is found (ambiguous mapping)
+          - the same id was already created this session (cache hit)
+        """
+        job_name = str(data.get('jobName', data.get('JobName', ''))).strip()
+        start_time_raw = data.get('startTime', data.get('StartTime', ''))
+
+        if not job_name or not start_time_raw:
+            logger.warning(
+                f"Skipping JobGroupExecution: missing jobName or startTime "
+                f"(jobName={job_name!r}, startTime={start_time_raw!r})"
+            )
+            return
+
+        # Parse the datetime value that pandas delivers from Excel
+        start_dt = pd.Timestamp(start_time_raw)
+        business_date = start_dt.strftime('%Y-%m-%d')
+        start_time_str = start_dt.strftime('%H:%M:%S')
+
+        # Reverse-lookup: find JobGroup(s) that have a HAS_JOB edge to this Job
+        result = tx.run(
+            """
+            MATCH (jg:JobGroup)-[:HAS_JOB]->(j:Job {id: $jobName})
+            RETURN jg.id AS jobGroupId
+            """,
+            jobName=job_name
         )
+        records = result.data()
+
+        if len(records) == 0:
+            logger.warning(
+                f"No JobGroup found for jobName='{job_name}' "
+                f"— skipping JobGroupExecution for businessDate={business_date}"
+            )
+            return
+
+        if len(records) > 1:
+            jg_ids = [r['jobGroupId'] for r in records]
+            logger.warning(
+                f"Ambiguous JobGroup lookup for jobName='{job_name}': "
+                f"found {len(records)} JobGroups {jg_ids} "
+                f"— skipping JobGroupExecution for businessDate={business_date} "
+                f"to avoid incorrect associations"
+            )
+            return
+
+        job_group_id = records[0]['jobGroupId']
+        jge_id = f"{job_group_id}_{business_date}"
+        # Inject for use by _create_jobcontext_execution in the same loop iteration
+        data['jobGroupExecId'] = jge_id
+
+        # Cache check — this combination was already created earlier this session
+        if jge_id in self._jge_cache:
+            logger.debug(f"JobGroupExecution '{jge_id}' already in cache — skipping")
+            return
+
+        node = JobGroupExecutionNodeDef(
+            id=jge_id,
+            startTime=start_time_str,
+            businessDate=business_date
+        )
+
         query = """
         MERGE (jge:JobGroupExecution {id: $id})
         SET jge.businessDate = date($businessDate),
@@ -170,51 +239,128 @@ class Neo4jInstanceLoaderV2:
         WITH jge
         MATCH (jg:JobGroup {id: $jobGroupId})
         MERGE (jge)-[:EXECUTES_JOB_GROUP]->(jg)
+        RETURN jge, jg
         """
+        tx.run(query, id=node.id, businessDate=node.businessDate,
+               startTime=node.startTime, jobGroupId=job_group_id)
+
+        # tagId is not yet present in JobContextExecutions but preserved for when it appears
         if 'tagId' in data:
             tagIds = data.get('tagId', None)
             for tagId in tagIds.strip('[]').split(","):
                 tagIdStrip = tagId.strip()
-                query += f"""
-                    WITH jge, jg
-                    MATCH (tg:Tag {{id: "{tagIdStrip}"}})
+                tag_query = """
+                    MATCH (jge:JobGroupExecution {id: $id})
+                    MATCH (tg:Tag {id: $tagId})
                     MERGE (jge)-[:HAS_TAG]->(tg)
                 """
-                tx.run(query, id=node.id, businessDate=node.businessDate,
-                       startTime=node.startTime, jobGroupId=data.get('jobGroupId'))
-        else:
-            query += " RETURN jge, jg"
-            tx.run(query, id=node.id, businessDate=node.businessDate,
-                   startTime=node.startTime, jobGroupId=data.get('jobGroupId'))
+                tx.run(tag_query, id=node.id, tagId=tagIdStrip)
+
+        self._jge_cache.add(jge_id)
         
-    def _load_jobcontext_executions(self, excel_file):
-        """Load JobContextExecution nodes"""
-        df = pd.read_excel(excel_file, 'JobContextExecutions')
-        logger.info(f"Loading {len(df)} JobContextExecutions...")
-        
-        with self.driver.session(database=self.database) as session:
-            for _, row in df.iterrows():
-                data = row.to_dict()
-                data = {k: v for k, v in data.items() if pd.notna(v)}
-                session.execute_write(self._create_jobcontext_execution, data)
-        
-        logger.info(f" Loaded {len(df)} JobContextExecutions")
-    
     @staticmethod
     def _create_jobcontext_execution(tx, data: Dict):
-        """Create JobContextExecution and link to JobContext, Job, and JobGroupExecution"""
+        """Create JobContextExecution and link to JobContext, Job, and JobGroupExecution.
+
+        jobContextId is derived by reverse-lookup rather than read from Excel:
+          - jobGroupId  : extracted from jobGroupExecId by stripping the trailing "_YYYY-MM-DD"
+          - jobName     : direct field from Excel
+          Finds the ScheduleInstanceContext that has BOTH:
+            (sic)-[:FOR_GROUP]->(JobGroup {id: jobGroupId})
+            (sic)-[:FOR_JOB]  ->(Job     {id: jobName})
+          Skips if 0 or >1 matches (not found / ambiguous).
+        """
+        jge_id = data.get('jobGroupExecId', '')
+        job_name = str(data.get('jobName', data.get('JobName', ''))).strip()
+
+        if not jge_id or not job_name:
+            logger.warning(
+                f"Skipping JobContextExecution: missing jobGroupExecId or jobName "
+                f"(jobGroupExecId={jge_id!r}, jobName={job_name!r})"
+            )
+            return
+
+        # jobGroupExecId format: "{jobGroupId}_{YYYY-MM-DD}" — date is always last 10 chars
+        job_group_id = jge_id[:-11]  # strip trailing "_YYYY-MM-DD" (11 chars)
+
+        # Reverse-lookup: ScheduleInstanceContext linked to BOTH the JobGroup and the Job
+        result = tx.run(
+            """
+            MATCH (sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg:JobGroup {id: $jobGroupId})
+            MATCH (sic)-[:FOR_JOB]->(j:Job {id: $jobName})
+            RETURN sic.id AS jobContextId
+            """,
+            jobGroupId=job_group_id,
+            jobName=job_name
+        )
+        records = result.data()
+
+        if len(records) == 0:
+            logger.warning(
+                f"No ScheduleInstanceContext found for jobName='{job_name}' "
+                f"and jobGroupId='{job_group_id}' — skipping JobContextExecution"
+            )
+            return
+
+        if len(records) > 1:
+            sic_ids = [r['jobContextId'] for r in records]
+            logger.warning(
+                f"Ambiguous ScheduleInstanceContext lookup for jobName='{job_name}' "
+                f"and jobGroupId='{job_group_id}': found {len(records)} entries {sic_ids} "
+                f"— skipping JobContextExecution to avoid incorrect associations"
+            )
+            return
+
+        job_context_id = records[0]['jobContextId']
+
+        # businessDate: derive from jobGroupExecId (last 10 chars = YYYY-MM-DD)
+        business_date = jge_id[-10:]
+
+        # startTime / endTime: now arrive as full datetime "YYYY-MM-DD H:MM:SS AM/PM".
+        # Extract the time-only portion as HH:MM:SS (24-hour) for Neo4j time().
+        def _extract_time(raw) -> str:
+            """Parse any time/datetime string and return HH:MM:SS (24-hour)."""
+            try:
+                return pd.Timestamp(str(raw)).strftime('%H:%M:%S')
+            except Exception:
+                return ''
+
+        # expectedStartTime: may arrive without seconds ("6:00 AM" or "6:00:00 AM").
+        # Normalise to HH:MM:SS so Neo4j time() never chokes on a missing seconds part.
+        def _extract_time_with_seconds_fallback(raw) -> str:
+            raw_str = str(raw).strip()
+            try:
+                return pd.Timestamp(raw_str).strftime('%H:%M:%S')
+            except Exception:
+                return ''
+
+        start_time_str = _extract_time(data.get('startTime', ''))
+        end_time_str   = _extract_time(data.get('endTime', ''))
+        expected_start = _extract_time_with_seconds_fallback(data.get('expectedStartTime', ''))
+
+        # durationMs: compute from the full startTime/endTime datetimes so we are not
+        # dependent on the Excel 'duration' column whose format changed to m.ss notation.
+        try:
+            start_ts = pd.Timestamp(str(data.get('startTime', '')))
+            end_ts   = pd.Timestamp(str(data.get('endTime', '')))
+            duration_ms = int((end_ts - start_ts).total_seconds() * 1000)
+            if duration_ms < 0:
+                duration_ms = 0
+        except Exception:
+            duration_ms = 0
+
         node = JobContextExecutionNodeDef(
             id=str(data.get('id', '')),
             status=str(data.get('status', '')),
-            startTime=str(data.get('startTime', '')),
-            endTime=str(data.get('endTime', '')),
-            businessDate=str(data.get('businessDate', '')),
-            durationMs=int(data.get('durationMs', 0)),
+            startTime=start_time_str,
+            endTime=end_time_str,
+            businessDate=business_date,
+            durationMs=duration_ms,
             volume=int(data.get('volume', 0)),
             exitCode=str(data.get('exitCode', '')),
             exitMessage=str(data.get('exitMessage', '')),
             retryCount=int(data.get('retryCount', 0)),
-            expectedStartTime=str(data.get('expectedStartTime', ''))
+            expectedStartTime=expected_start
         )
         query = """
         MERGE (jce:JobContextExecution {id: $id})
@@ -234,7 +380,7 @@ class Neo4jInstanceLoaderV2:
         WITH jce, jc
         MATCH (jc)-[:FOR_JOB]->(j:Job)
         MERGE (jce)-[:EXECUTES_JOB]->(j)
-        WITH jce,jc
+        WITH jce, jc
         MATCH (jge:JobGroupExecution {id: $jobGroupExecId})
         MERGE (jge)-[:EXECUTES_JOB_CONTEXT]->(jce)
         RETURN jce
@@ -244,7 +390,7 @@ class Neo4jInstanceLoaderV2:
                endTime=node.endTime, durationMs=node.durationMs, volume=node.volume,
                status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
                retryCount=node.retryCount, expectedStartTime=node.expectedStartTime,
-               jobContextId=data.get('jobContextId'), jobGroupExecId=data.get('jobGroupExecId'))
+               jobContextId=job_context_id, jobGroupExecId=jge_id)
     
     def _load_resource_events(self, excel_file):
         """Load ResourceAvailabilityEvent nodes"""
@@ -371,7 +517,6 @@ def main():
     logger.info("=" * 80)
     logger.info("Spring Batch Instance Data - Neo4j Direct Loader V2")
     logger.info("=" * 80)
-    logger.info()
     
     try:
         # Create loader using config file
@@ -384,20 +529,16 @@ def main():
             # Create constraints and indexes
             #logger.info("📐 Creating constraints and indexes...")
             #loader.create_instance_constraints_and_indexes()
-            #logger.info()
             
             # Load instance data
             logger.info(f" Loading instance data from {excel_file}...")
             loader.load_instance_data(excel_file)
-            logger.info()
             analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)
             loader.compute_cpm_for_jobgroup_execution(excel_file, analyzer)
             logger.info("=" * 80)
             logger.info(" LOADING COMPLETE!")
             logger.info("=" * 80)
-            logger.info()
             logger.info("🎉 Instance data is now in Neo4j!")
-            logger.info()
     
     except Exception as e:
         logger.error(f"Error during loading: {str(e)}", exc_info=True)

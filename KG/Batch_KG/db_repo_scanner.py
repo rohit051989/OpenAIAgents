@@ -742,7 +742,7 @@ class DBRepoScanner:
                             count = record['cnt']
                             duplicates_marked += count
                             self.stats['duplicates_found'] += count
-                            logger.warning(f"    Duplicate found: {name} ({resource_type}) in schema {schema}" + 
+                            logger.warning(f"    Already Exist found: {name} ({resource_type}) in schema {schema}" + 
                                          (f", package {package}" if package else ""))
         
         if duplicates_marked > 0:

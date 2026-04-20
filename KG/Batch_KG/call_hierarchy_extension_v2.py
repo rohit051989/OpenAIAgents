@@ -277,6 +277,13 @@ def _apply_bean_dependencies_v2(class_info: ClassInfo, bean_def: BeanDef):
         if dep_type == "type:ref" and field_name in class_info.fields and dep_bean_class_obj:
             old_type = class_info.fields[field_name]
             dep_bean_class = dep_bean_class_obj.split(':')[-1]  # Extract actual class name
+            if not dep_bean_class:
+                # Bean reference could not be resolved to a class (e.g. no <bean> definition
+                # for that bean id in the Spring XML).  Do NOT overwrite the Java-inferred
+                # field type with an empty string — that would corrupt all call targets that
+                # were derived from this field.
+                logger.debug(f"          Skipping unresolved ref for field '{field_name}' (bean id from dep: {dep_bean_id})")
+                continue
             class_info.fields[field_name] = dep_bean_class
             field_mappings[field_name] = (old_type, dep_bean_class)
             logger.info(f"          Resolved field '{field_name}' -> {dep_bean_class}")
