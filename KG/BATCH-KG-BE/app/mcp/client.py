@@ -10,17 +10,42 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
 logger = logging.getLogger(__name__)
 
 
+def _no_proxy_http_client_factory(
+    headers: dict[str, Any] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Create an httpx AsyncClient that bypasses system proxy settings.
+
+    On VDI/corporate environments, HTTP_PROXY/HTTPS_PROXY env vars can cause
+    even localhost requests to be routed through the proxy (resulting in 407).
+    Setting trust_env=False prevents httpx from reading those env vars.
+    """
+    kwargs: dict[str, Any] = {
+        "follow_redirects": True,
+        "trust_env": False,
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if headers is not None:
+        kwargs["headers"] = headers
+    if auth is not None:
+        kwargs["auth"] = auth
+    return httpx.AsyncClient(**kwargs)
+
+
 @asynccontextmanager
 async def _session(server_url: str):
     """Open an MCP SSE session as an async context manager."""
     try:
-        async with sse_client(server_url) as (read_stream, write_stream):
+        async with sse_client(server_url, httpx_client_factory=_no_proxy_http_client_factory) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 yield session
