@@ -2,8 +2,10 @@
 
 import json
 import logging
-from typing import Any
+import boto3
 
+from typing import Any
+from botocore.config import Config
 from app.llm.base import BaseLLM
 
 logger = logging.getLogger(__name__)
@@ -18,12 +20,16 @@ class BedrockLLM(BaseLLM):
         region: str = "us-east-1",
         access_key_id: str | None = None,
         secret_access_key: str | None = None,
+        http_proxy: str | None = None,
+        https_proxy: str | None = None,
     ):
-        import boto3
+        
         kwargs: dict[str, Any] = {"region_name": region, "service_name": "bedrock-runtime"}
         if access_key_id and secret_access_key:
             kwargs["aws_access_key_id"] = access_key_id
             kwargs["aws_secret_access_key"] = secret_access_key
+        if http_proxy and https_proxy:
+            kwargs["config"] = Config(proxies={"http": http_proxy, "https": https_proxy})
 
         self.client = boto3.client(**kwargs)
         self.model_id = model_id
