@@ -122,3 +122,5 @@ shell_executions:
   confidence: HIGH
   description: "Customer export shell script - runs on remote batch server"
 
+db_operation_dismissals:
+- method_fqn: com.companyname.dao.BatchJobDAOImpl.getJobNamesHavingPauseStatus()

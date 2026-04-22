@@ -56,6 +56,32 @@ Config File Format (manual_mappings.yaml):
         script_type: "BASH"
         confidence: "HIGH"
 
+    db_operation_dismissals:
+      # Use when enricher flagged a method as a grey-area DB operation but human review
+      # confirms it is NOT a real DB operation (e.g. the grey area was actually a
+      # procedure call that was separately resolved under procedure_calls).
+      # This removes the UNKNOWN/DYNAMIC entries from dbOperations WITHOUT linking any
+      # Resource.  Resolved (non-grey) entries are NEVER removed.
+      - method_fqn: "com.companyname.dao.SomeDAOImpl.executeSomething(String)"
+        # operation_type is OPTIONAL. When provided, only grey-area entries of that
+        # specific type (e.g. INSERT:UNKNOWN:HIGH) are removed. When omitted, ALL
+        # grey-area entries are removed.
+        operation_type: "INSERT"
+
+    procedure_call_dismissals:
+      # Use when enricher flagged a method as a grey-area procedure call but human review
+      # confirms the method does NOT invoke any stored procedure/function — e.g. the
+      # enricher was misled by a DB operation that resembled a procedure call.
+      # ALL grey-area procedureCalls entries are removed; resolved entries are kept.
+      # No operation_type filter — procedure call entries don't have a type prefix.
+      - method_fqn: "com.companyname.dao.SomeDAOImpl.executeQuery(String)"
+
+    shell_execution_dismissals:
+      # Use when enricher flagged a method as executing a shell script but human review
+      # confirms no real shell execution occurs (false positive).
+      # ALL grey-area shellExecutions entries are removed; RESOLVED: entries are kept.
+      - method_fqn: "com.companyname.util.SomeUtil.runCommand(String)"
+
 HOW IT WORKS:
 - Without tasklet/reader/writer/processor FQN: Updates the JavaMethod directly (original behavior)
 - With tasklet/reader/writer/processor FQN + bean_id: Updates the Step node directly (using bean_id)
@@ -121,6 +147,9 @@ class ManualResourceAssociator:
             'procedure_calls_processed': 0,
             'shell_executions_processed': 0,
             'sql_executions_processed': 0,
+            'db_operation_dismissals_processed': 0,
+            'procedure_call_dismissals_processed': 0,
+            'shell_execution_dismissals_processed': 0,
             'resources_created': 0,
             'relationships_created': 0,
             'errors': 0
@@ -1139,6 +1168,220 @@ class ManualResourceAssociator:
             self.stats['errors'] += 1
             return False
 
+    def dismiss_db_operation(self, method_fqn: str, operation_type: str = None) -> bool:
+        """
+        Remove grey-area (UNKNOWN/DYNAMIC/PARAMETERIZED) entries from a JavaMethod's
+        dbOperations WITHOUT linking any Resource.  Use this when human review confirms
+        the method does NOT perform a real DB operation for the flagged type — e.g. the
+        enricher was misled by a procedure call that happens to contain SQL keywords.
+
+        Only grey-area entries are removed.  Any already-resolved entries (entries that
+        contain no UNKNOWN/DYNAMIC/PARAMETERIZED keyword) are left untouched.
+
+        Args:
+            method_fqn:      Fully-qualified method name.
+            operation_type:  Optional.  If supplied (e.g. "INSERT"), only grey-area entries
+                             whose operation prefix matches are removed.  If omitted, ALL
+                             grey-area entries are removed regardless of operation type.
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            resolved_fqn = self._resolve_method_fqn(method_fqn)
+            if not resolved_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
+            with self.driver.session(database=self.database) as session:
+                # Fetch current dbOperations so we can log what is being removed
+                result = session.run(
+                    "MATCH (m:JavaMethod {fqn: $fqn}) RETURN coalesce(m.dbOperations, []) AS ops",
+                    fqn=resolved_fqn)
+                record = result.single()
+                if not record:
+                    logger.error(f"   JavaMethod node not found: {resolved_fqn}")
+                    self.stats['errors'] += 1
+                    return False
+
+                current_ops = record['ops']
+                grey_keywords = CORE_KEYWORDS  # e.g. ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED']
+
+                def is_grey(op):
+                    return any(kw in op for kw in grey_keywords)
+
+                def matches_type(op):
+                    if not operation_type:
+                        return True
+                    return op.upper().startswith(operation_type.upper() + ":")
+
+                removed = [op for op in current_ops if is_grey(op) and matches_type(op)]
+                kept    = [op for op in current_ops if not (is_grey(op) and matches_type(op))]
+
+                if not removed:
+                    logger.warning(f"     No grey-area entries found to dismiss"
+                                   + (f" for operation type '{operation_type}'" if operation_type else "")
+                                   + f" on method: {resolved_fqn}")
+                    # Not an error — idempotent
+                    self.stats['db_operation_dismissals_processed'] += 1
+                    return True
+
+                for op in removed:
+                    logger.info(f"     Dismissing: {op}")
+
+                session.run(
+                    """
+                    MATCH (m:JavaMethod {fqn: $fqn})
+                    SET m.dbOperations = $kept,
+                        m.dbOperationCount = size($kept),
+                        m.furtherAnalysisRequired = false
+                    """,
+                    fqn=resolved_fqn, kept=kept)
+
+                logger.info(f"     Removed {len(removed)} grey-area entry(ies), kept {len(kept)} resolved entry(ies)")
+                self.stats['db_operation_dismissals_processed'] += 1
+                return True
+
+        except Exception as e:
+            logger.error(f"   Error dismissing DB operation: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    def dismiss_procedure_call(self, method_fqn: str) -> bool:
+        """
+        Remove grey-area (UNKNOWN/DYNAMIC/DYNAMIC_PROCEDURE/PARAMETERIZED) entries from
+        a JavaMethod's procedureCalls WITHOUT linking any Resource.  Use this when human
+        review confirms the method does NOT actually invoke a stored procedure/function —
+        e.g. the enricher was misled by a DB operation that resembled a procedure call.
+
+        Only grey-area entries are removed.  Already-resolved entries are left untouched.
+
+        Args:
+            method_fqn: Fully-qualified method name.
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            resolved_fqn = self._resolve_method_fqn(method_fqn)
+            if not resolved_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    "MATCH (m:JavaMethod {fqn: $fqn}) RETURN coalesce(m.procedureCalls, []) AS ops",
+                    fqn=resolved_fqn)
+                record = result.single()
+                if not record:
+                    logger.error(f"   JavaMethod node not found: {resolved_fqn}")
+                    self.stats['errors'] += 1
+                    return False
+
+                current_ops = record['ops']
+                grey_keywords = CORE_KEYWORDS + ['DYNAMIC_PROCEDURE']
+
+                def is_grey(op):
+                    return any(kw in op for kw in grey_keywords)
+
+                removed = [op for op in current_ops if is_grey(op)]
+                kept    = [op for op in current_ops if not is_grey(op)]
+
+                if not removed:
+                    logger.warning(f"     No grey-area procedure call entries found to dismiss on method: {resolved_fqn}")
+                    self.stats['procedure_call_dismissals_processed'] += 1
+                    return True
+
+                for op in removed:
+                    logger.info(f"     Dismissing: {op}")
+
+                session.run(
+                    """
+                    MATCH (m:JavaMethod {fqn: $fqn})
+                    SET m.procedureCalls = $kept,
+                        m.procedureCallCount = size($kept),
+                        m.furtherAnalysisRequired = false
+                    """,
+                    fqn=resolved_fqn, kept=kept)
+
+                logger.info(f"     Removed {len(removed)} grey-area entry(ies), kept {len(kept)} resolved entry(ies)")
+                self.stats['procedure_call_dismissals_processed'] += 1
+                return True
+
+        except Exception as e:
+            logger.error(f"   Error dismissing procedure call: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    def dismiss_shell_execution(self, method_fqn: str) -> bool:
+        """
+        Remove grey-area (UNKNOWN/DYNAMIC/PARAMETERIZED) entries from a JavaMethod's
+        shellExecutions WITHOUT linking any Resource.  Use this when human review confirms
+        the method does NOT execute a shell script — e.g. a false positive from the enricher.
+
+        Only grey-area entries are removed.  Already-resolved entries (starting with
+        'RESOLVED:') are left untouched.
+
+        Args:
+            method_fqn: Fully-qualified method name.
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            resolved_fqn = self._resolve_method_fqn(method_fqn)
+            if not resolved_fqn:
+                logger.error(f"   Method not found for fqn: {method_fqn}")
+                self.stats['errors'] += 1
+                return False
+
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    "MATCH (m:JavaMethod {fqn: $fqn}) RETURN coalesce(m.shellExecutions, []) AS ops",
+                    fqn=resolved_fqn)
+                record = result.single()
+                if not record:
+                    logger.error(f"   JavaMethod node not found: {resolved_fqn}")
+                    self.stats['errors'] += 1
+                    return False
+
+                current_ops = record['ops']
+                grey_keywords = CORE_KEYWORDS + SHELL_KEYWORDS
+
+                def is_grey(op):
+                    # A resolved entry starts with 'RESOLVED:'
+                    if op.startswith('RESOLVED:'):
+                        return False
+                    return any(kw in op for kw in grey_keywords)
+
+                removed = [op for op in current_ops if is_grey(op)]
+                kept    = [op for op in current_ops if not is_grey(op)]
+
+                if not removed:
+                    logger.warning(f"     No grey-area shell execution entries found to dismiss on method: {resolved_fqn}")
+                    self.stats['shell_execution_dismissals_processed'] += 1
+                    return True
+
+                for op in removed:
+                    logger.info(f"     Dismissing: {op}")
+
+                session.run(
+                    """
+                    MATCH (m:JavaMethod {fqn: $fqn})
+                    SET m.shellExecutions = $kept,
+                        m.shellExecutionCount = size($kept),
+                        m.furtherAnalysisRequired = false
+                    """,
+                    fqn=resolved_fqn, kept=kept)
+
+                logger.info(f"     Removed {len(removed)} grey-area entry(ies), kept {len(kept)} resolved entry(ies)")
+                self.stats['shell_execution_dismissals_processed'] += 1
+                return True
+
+        except Exception as e:
+            logger.error(f"   Error dismissing shell execution: {e}")
+            self.stats['errors'] += 1
+            return False
+
     def _consolidate_all_steps(self):
         """
         Consolidate all operations (DB, procedures, shell) at Step level.
@@ -1537,8 +1780,65 @@ class ManualResourceAssociator:
                     )
                 logger.info("")
         
+        # Process db_operation_dismissals — remove grey-area entries with no resource link
+        db_operation_dismissals = mappings.get('db_operation_dismissals', [])
+        if db_operation_dismissals:
+            logger.info(f"Processing {len(db_operation_dismissals)} DB operation dismissal(s):\n")
+            for idx, dismissal in enumerate(db_operation_dismissals, 1):
+                method_fqn = dismissal.get('method_fqn')
+                operation_type = dismissal.get('operation_type')  # optional
+
+                if not method_fqn:
+                    logger.error(f"  [{idx}]  Missing required field: method_fqn")
+                    self.stats['errors'] += 1
+                    continue
+
+                logger.info(f"  [{idx}] {method_fqn}")
+                if operation_type:
+                    logger.info(f"      Dismissing grey-area entries of type: {operation_type}")
+                else:
+                    logger.info(f"      Dismissing ALL grey-area entries (no operation_type filter)")
+                self.dismiss_db_operation(method_fqn, operation_type)
+                logger.info("")
+
+        # Process procedure_call_dismissals — remove grey-area procedure entries with no resource link
+        procedure_call_dismissals = mappings.get('procedure_call_dismissals', [])
+        if procedure_call_dismissals:
+            logger.info(f"Processing {len(procedure_call_dismissals)} procedure call dismissal(s):\n")
+            for idx, dismissal in enumerate(procedure_call_dismissals, 1):
+                method_fqn = dismissal.get('method_fqn')
+
+                if not method_fqn:
+                    logger.error(f"  [{idx}]  Missing required field: method_fqn")
+                    self.stats['errors'] += 1
+                    continue
+
+                logger.info(f"  [{idx}] {method_fqn}")
+                logger.info(f"      Dismissing ALL grey-area procedure call entries")
+                self.dismiss_procedure_call(method_fqn)
+                logger.info("")
+
+        # Process shell_execution_dismissals — remove grey-area shell entries with no resource link
+        shell_execution_dismissals = mappings.get('shell_execution_dismissals', [])
+        if shell_execution_dismissals:
+            logger.info(f"Processing {len(shell_execution_dismissals)} shell execution dismissal(s):\n")
+            for idx, dismissal in enumerate(shell_execution_dismissals, 1):
+                method_fqn = dismissal.get('method_fqn')
+
+                if not method_fqn:
+                    logger.error(f"  [{idx}]  Missing required field: method_fqn")
+                    self.stats['errors'] += 1
+                    continue
+
+                logger.info(f"  [{idx}] {method_fqn}")
+                logger.info(f"      Dismissing ALL grey-area shell execution entries")
+                self.dismiss_shell_execution(method_fqn)
+                logger.info("")
+
         # Consolidate all Step operations ONCE after all fixes
-        if db_operations or procedure_calls or shell_executions:
+        if (db_operations or procedure_calls or shell_executions
+                or db_operation_dismissals or procedure_call_dismissals
+                or shell_execution_dismissals):
             self._consolidate_all_steps()
         
         # Print statistics
@@ -1549,13 +1849,16 @@ class ManualResourceAssociator:
         logger.info("="*80)
         logger.info("STATISTICS")
         logger.info("="*80)
-        logger.info(f"  DB Operations Processed:     {self.stats['db_operations_processed']}")
-        logger.info(f"  Procedure Calls Processed:   {self.stats['procedure_calls_processed']}")
-        logger.info(f"  Shell Executions Processed:  {self.stats['shell_executions_processed']}")
-        logger.info(f"  SQL Executions Processed:    {self.stats['sql_executions_processed']}")
-        logger.info(f"  Resources Created/Updated:   {self.stats['resources_created']}")
-        logger.info(f"  Relationships Created:       {self.stats['relationships_created']}")
-        logger.info(f"  Errors:                      {self.stats['errors']}")
+        logger.info(f"  DB Operations Processed:       {self.stats['db_operations_processed']}")
+        logger.info(f"  Procedure Calls Processed:     {self.stats['procedure_calls_processed']}")
+        logger.info(f"  Shell Executions Processed:    {self.stats['shell_executions_processed']}")
+        logger.info(f"  SQL Executions Processed:      {self.stats['sql_executions_processed']}")
+        logger.info(f"  DB Operation Dismissals:       {self.stats['db_operation_dismissals_processed']}")
+        logger.info(f"  Procedure Call Dismissals:     {self.stats['procedure_call_dismissals_processed']}")
+        logger.info(f"  Shell Execution Dismissals:    {self.stats['shell_execution_dismissals_processed']}")
+        logger.info(f"  Resources Created/Updated:     {self.stats['resources_created']}")
+        logger.info(f"  Relationships Created:         {self.stats['relationships_created']}")
+        logger.info(f"  Errors:                        {self.stats['errors']}")
         logger.info("="*80)
         
         if self.stats['errors'] == 0:
