@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Sessions
     session_ttl_hours: int = 24
 
+    # Proxy configuration for external API Calls
+    http_proxy: Optional[str] = None
+    https_proxy: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:
