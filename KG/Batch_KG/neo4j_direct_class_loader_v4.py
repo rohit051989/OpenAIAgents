@@ -392,8 +392,11 @@ class Neo4jLoader:
     @staticmethod
     def _create_job_association(tx, data: Dict):
         """Transaction function to create Job and link to JobGroup"""
+        # Match by name OR id: regular jobs have id==name, dynamic jobs have
+        # a numeric id but the AssociatedJobs sheet stores the job name.
         query = """
-        MATCH (j:Job {id: $jobId})
+        MATCH (j:Job)
+        WHERE j.id = $jobId OR j.name = $jobId
         MATCH (jg:JobGroup {id: $jobGroupId})
         MERGE (jg)-[:HAS_JOB]->(j)
         RETURN j
