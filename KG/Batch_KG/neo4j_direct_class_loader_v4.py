@@ -1603,28 +1603,31 @@ class Neo4jLoader:
     
     @staticmethod
     def _associate_calendar(tx, data: Dict):
-        """Transaction function to create Calendar"""
-        allowed = data['Allowed']
-        contextType = data.get('contextType', None)
-        query = ""
-        # Create Allowed/Disallowed Calendar Association with JobGroup
-        if allowed == 'Y':
-            query += f"""
-            MATCH (c:Calendar {{id: $id}})
-            MATCH (entity:{contextType} {{id: $requiresContextId}})
-            MERGE (entity)-[:CAN_EXECUTE_ON]->(c)
+        """Transaction function to create Calendar associations.
+        requiresContextId may be blank (skip) or comma-separated (multiple entities).
+        """
+        allowed = data.get('Allowed')
+        contextType = data.get('contextType')
+
+        if allowed not in ('Y', 'N') or not contextType:
+            return
+
+        rel_type = 'CAN_EXECUTE_ON' if allowed == 'Y' else 'CANNOT_EXECUTE_ON'
+
+        # requiresContextId may be absent (blank cell filtered out) or comma-separated
+        raw_context_id = data.get('requiresContextId', '')
+        if not str(raw_context_id).strip():
+            return  # No entity to associate — skip
+
+        context_ids = [cid.strip() for cid in str(raw_context_id).split(',') if cid.strip()]
+
+        for context_id in context_ids:
+            query = f"""
+            MATCH (c:Calendar {{id: $calId}})
+            MATCH (entity:{contextType} {{id: $entityId}})
+            MERGE (entity)-[:{rel_type}]->(c)
             """
-        elif allowed == 'N':
-            query += f"""
-            MATCH (c:Calendar {{id: $id}})
-            MATCH (entity:{contextType} {{id: $requiresContextId}})
-            MERGE (entity)-[:CANNOT_EXECUTE_ON]->(c)
-            """
-        # Link to entity
-        query += f"""
-        RETURN c
-        """        
-        tx.run(query, **data)
+            tx.run(query, calId=data.get('id'), entityId=context_id)
 
     def _load_calendar(self, excel_file):
         """Load Calendar"""
@@ -1689,25 +1692,42 @@ class Neo4jLoader:
     
     @staticmethod
     def _create_holiday(tx, data: Dict):
-        """Transaction function to create Holiday"""
+        """Transaction function to create Holiday and link to one or more Calendars.
+        calendarId may be a single value or comma-separated list.
+        """
         node = HolidayNodeDef(
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
             date=str(data.get('date', '')),
             enabled=bool(data.get('enabled', True))
         )
-        query = """
-        MERGE (h:Holiday {id: $id})
-        SET h.name = $name,
-            h.date = date($date),
-            h.enabled = $enabled
-        WITH h
-        MATCH (c:Calendar {id: $calendarId})
-        MERGE (c)-[:BLOCKS_ON]->(h)
-        RETURN h
-        """
-        tx.run(query, id=node.id, name=node.name, date=node.date,
-               enabled=node.enabled, calendarId=data.get('calendarId'))
+
+        # Create / update the Holiday node
+        tx.run(
+            """
+            MERGE (h:Holiday {id: $id})
+            SET h.name    = $name,
+                h.date    = date($date),
+                h.enabled = $enabled
+            """,
+            id=node.id, name=node.name, date=node.date, enabled=node.enabled
+        )
+
+        # calendarId can be a single value or comma-separated; may also be NaN
+        raw_cal_id = data.get('calendarId')
+        if raw_cal_id is None or (isinstance(raw_cal_id, float) and pd.isna(raw_cal_id)):
+            return
+        cal_ids = [cid.strip() for cid in str(raw_cal_id).split(',') if cid.strip()]
+
+        for cal_id in cal_ids:
+            tx.run(
+                """
+                MATCH (h:Holiday {id: $holidayId})
+                MATCH (c:Calendar {id: $calId})
+                MERGE (c)-[:BLOCKS_ON]->(h)
+                """,
+                holidayId=node.id, calId=cal_id
+            )
     
     # ========================================================================
     # UTILITY METHODS
