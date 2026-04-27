@@ -356,10 +356,8 @@ class Neo4jInstanceLoaderV2:
             endTime=end_time_str,
             businessDate=business_date,
             durationMs=duration_ms,
-            volume=int(data.get('volume', 0)),
             exitCode=str(data.get('exitCode', '')),
             exitMessage=str(data.get('exitMessage', '')),
-            retryCount=int(data.get('retryCount', 0)),
             expectedStartTime=expected_start
         )
         query = """
@@ -368,11 +366,9 @@ class Neo4jInstanceLoaderV2:
             jce.startTime = time($startTime),
             jce.endTime = time($endTime),
             jce.durationMs = $durationMs,
-            jce.volume = $volume,
             jce.status = $status,
             jce.exitCode = $exitCode,
             jce.exitMessage = $exitMessage,
-            jce.retryCount = $retryCount,
             jce.expectedStartTime = time($expectedStartTime)
         WITH jce
         MATCH (jc:ScheduleInstanceContext {id: $jobContextId})
@@ -387,9 +383,9 @@ class Neo4jInstanceLoaderV2:
         """
         tx.run(query,
                id=node.id, businessDate=node.businessDate, startTime=node.startTime,
-               endTime=node.endTime, durationMs=node.durationMs, volume=node.volume,
+               endTime=node.endTime, durationMs=node.durationMs,
                status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
-               retryCount=node.retryCount, expectedStartTime=node.expectedStartTime,
+               expectedStartTime=node.expectedStartTime,
                jobContextId=job_context_id, jobGroupExecId=jge_id)
     
     def _load_resource_events(self, excel_file):

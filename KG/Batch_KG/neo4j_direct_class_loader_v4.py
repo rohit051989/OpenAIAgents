@@ -1573,7 +1573,7 @@ class Neo4jLoader:
             query += f"""
                 WITH sla
                 MATCH (relativeEntity:{relative_entity_type} {{id: $relativeEntityId}})
-                MERGE (sla)-[:RELATIVE_TO_RESOURCE]->(relativeEntity)
+                MERGE (sla)-[:RELATIVE_TO]->(relativeEntity)
             """
         entity_type = data['forEntityType']
         query += f"""
