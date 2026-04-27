@@ -137,7 +137,7 @@ class Neo4jInstanceLoaderV2:
         try:
             self._load_job_group_executions(excel_file)
             # Load resource events if they exist
-            self._load_resource_events(excel_file)
+            #self._load_resource_events(excel_file)
             
         except Exception as e:
             logger.warning(f"No resource events to load or error: {e}")
