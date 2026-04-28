@@ -1294,7 +1294,6 @@ class Neo4jLoader:
                r.enabled as enabled,
                r.schemaName as schemaName,
                r.packageName as packageName,
-               r.ddlSnippet as ddlSnippet,
                r.description as description
         ORDER BY r.name
         """
@@ -1310,7 +1309,6 @@ class Neo4jLoader:
                     'enabled': record.get('enabled', True),
                     'schemaName': record.get('schemaName', ''),
                     'packageName': record.get('packageName', ''),
-                    'ddlSnippet': record.get('ddlSnippet', ''),
                     'description': record.get('description', '')
                 })
         
