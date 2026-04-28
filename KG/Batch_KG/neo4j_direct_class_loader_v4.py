@@ -1700,6 +1700,15 @@ class Neo4jLoader:
             enabled=bool(data.get('enabled', True))
         )
 
+        # Normalise date to "YYYY-MM-DD": pandas reads Excel date cells as
+        # Timestamps ("2026-01-01 00:00:00"), which Neo4j date() cannot parse.
+        raw_date = data.get('date', '')
+        if hasattr(raw_date, 'strftime'):           # pandas Timestamp / datetime
+            date_str = raw_date.strftime('%Y-%m-%d')
+        else:
+            date_str = str(raw_date)[:10]           # trim " 00:00:00" if present
+        node.date = date_str
+
         # Create / update the Holiday node
         tx.run(
             """
