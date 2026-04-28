@@ -101,8 +101,6 @@ grey_area_indicators:
     - 'StringBuilder'
     
   parameterized:
-    - 'scriptDir'
-    - 'scriptFile'
     - 'scriptPath'
     - 'scriptCommand'
     - 'command'

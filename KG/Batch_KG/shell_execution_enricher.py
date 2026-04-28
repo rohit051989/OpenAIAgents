@@ -268,7 +268,7 @@ class ShellExecutionEnricher:
         
         # Check if script name looks like a variable name (camelCase or snake_case without extension)
         if re.match(r'^[a-z][a-zA-Z0-9_]*$', script_name) and '.' not in script_name:
-            # Could be a variable like scriptPath, scriptFile, etc.
+            # Could be a variable like scriptPath etc.
             variable_patterns = ['script', 'file', 'path', 'command', 'cmd', 'dir']
             if any(pattern in script_lower for pattern in variable_patterns):
                 return True
@@ -369,7 +369,7 @@ class ShellExecutionEnricher:
             }
         
         # Check for method parameters
-        if re.search(r'\b(scriptDir|scriptFile|scriptPath|hostname|user|command|cmd)\b', command_arg, re.IGNORECASE):
+        if re.search(r'\b(scriptPath|hostname|user|command|cmd)\b', command_arg, re.IGNORECASE):
             return {
                 'execution_method': execution_method,
                 'script_type': 'SHELL',

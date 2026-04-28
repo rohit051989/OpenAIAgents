@@ -967,8 +967,6 @@ class Neo4jLoader:
                r.type          AS resourceType,
                r.scriptType    AS scriptType,
                r.scriptPath    AS scriptPath,
-               r.scriptDir     AS scriptDir,
-               r.scriptFile    AS scriptFile,
                r.executionUser AS executionUser,
                r.scriptParams  AS scriptParams,
                m.fqn           AS methodFqn
@@ -987,8 +985,6 @@ class Neo4jLoader:
                r.type          AS resourceType,
                r.scriptType    AS scriptType,
                r.scriptPath    AS scriptPath,
-               r.scriptDir     AS scriptDir,
-               r.scriptFile    AS scriptFile,
                r.executionUser AS executionUser,
                r.scriptParams  AS scriptParams,
                m.fqn           AS methodFqn
@@ -1066,8 +1062,6 @@ class Neo4jLoader:
                 resource_name = row["resourceName"]
                 script_type   = row.get("scriptType")    or "SHELL"
                 script_path   = row.get("scriptPath")    or resource_name
-                script_dir    = row.get("scriptDir")     or ""
-                script_file   = row.get("scriptFile")    or resource_name
                 exec_user     = row.get("executionUser") or ""
                 script_params = row.get("scriptParams")  or ""
 
@@ -1084,8 +1078,6 @@ class Neo4jLoader:
                                   r.enabled       = true,
                                   r.scriptType    = $scriptType,
                                   r.scriptPath    = $scriptPath,
-                                  r.scriptDir     = $scriptDir,
-                                  r.scriptFile    = $scriptFile,
                                   r.executionUser = $execUser,
                                   r.scriptParams  = $scriptParams
                     ON MATCH SET  r.scriptType    = COALESCE(r.scriptType, $scriptType),
@@ -1093,7 +1085,6 @@ class Neo4jLoader:
                     """,
                     name=resource_name, resourceId=resource_id,
                     scriptType=script_type, scriptPath=script_path,
-                    scriptDir=script_dir, scriptFile=script_file,
                     execUser=exec_user, scriptParams=script_params,
                 )
 
@@ -1104,13 +1095,12 @@ class Neo4jLoader:
                     MATCH (r:Resource {name: $resourceName, type: 'SHELL_SCRIPT'})
                     MERGE (s)-[rel:EXECUTES {resourceName: $resourceName}]->(r)
                     SET rel.scriptType    = $scriptType,
-                        rel.scriptFile    = $scriptFile,
                         rel.scriptParams  = $scriptParams,
                         rel.executionUser = $execUser,
                         rel.confidence    = 'HIGH'
                     """,
                     stepName=step_name, resourceName=resource_name,
-                    scriptType=script_type, scriptFile=script_file,
+                    scriptType=script_type,
                     scriptParams=script_params, execUser=exec_user,
                 )
                 created_count += 1
