@@ -1400,11 +1400,11 @@ class Neo4jLoader:
                     MATCH (tg:Tag {{id: "{tagIdStrip}"}})
                     MERGE (r)-[:HAS_TAG]->(tg)
                 """
-                query += " RETURN r"
-                tx.run(query, id=node.id, name=node.name, type=node.type,
-                       enabled=node.enabled, checkInterval=node.checkInterval,
-                       resourceLocation=node.resourceLocation, schemaName=node.schemaName,
-                       packageName=node.packageName, description=description)
+            query += " RETURN r"
+            tx.run(query, id=node.id, name=node.name, type=node.type,
+                   enabled=node.enabled, checkInterval=node.checkInterval,
+                   resourceLocation=node.resourceLocation, schemaName=node.schemaName,
+                   packageName=node.packageName, description=description)
         else:
             query += " RETURN r"
             tx.run(query, id=node.id, name=node.name, type=node.type,
