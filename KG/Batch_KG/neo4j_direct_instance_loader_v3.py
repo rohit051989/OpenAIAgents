@@ -134,15 +134,14 @@ class Neo4jInstanceLoaderV2:
         if not Path(excel_file).exists():
             raise FileNotFoundError(f"Excel file not found: {excel_file}")
         
-        
-
-        # Load resource events if the sheet exists (optional)
         try:
             self._load_job_group_executions(excel_file)
+            # Load resource events if they exist
             #self._load_resource_events(excel_file)
+            
         except Exception as e:
-            logger.warning(f"Failure in loading instance data: {e}")
-
+            logger.warning(f"No resource events to load or error: {e}")
+        
         logger.info(" All instance data loaded")
     
     def _load_job_group_executions(self, excel_file):
@@ -156,7 +155,6 @@ class Neo4jInstanceLoaderV2:
                 data = {k: v for k, v in data.items() if pd.notna(v)}
                 session.execute_write(self._create_job_group_execution, data)
                 if 'jobGroupExecId' in data:
-                    logger.info(f"Creating JobContextExecution for jobGroupExecId='{data['jobGroupExecId']}'...")
                     session.execute_write(self._create_jobcontext_execution, data)
                 else:
                     logger.error(f" Missing jobGroupExecId for row with jobName='{data.get('jobName', '')}' and startTime='{data.get('startTime', '')}' — cannot create JobContextExecution without it")
@@ -180,7 +178,7 @@ class Neo4jInstanceLoaderV2:
         """
         job_name = str(data.get('jobName', data.get('JobName', ''))).strip()
         start_time_raw = data.get('startTime', data.get('StartTime', ''))
-        logger.info(f"Processing JobContextExecution for jobName='{job_name}' with startTime='{start_time_raw}' to create JobGroupExecution...")
+
         if not start_time_raw:
             logger.warning(
                 f"Skipping JobGroupExecution: missing startTime "
@@ -286,7 +284,7 @@ class Neo4jInstanceLoaderV2:
         """
         tx.run(query, id=node.id, businessDate=node.businessDate,
                startTime=node.startTime, jobGroupId=job_group_id)
-        logger.info(f"Created JobGroupExecution with id='{node.id}' for JobGroup '{job_group_id}' and businessDate '{business_date}'")
+
         # tagId is not yet present in JobContextExecutions but preserved for when it appears
         if 'tagId' in data:
             tagIds = data.get('tagId', None)
@@ -300,7 +298,7 @@ class Neo4jInstanceLoaderV2:
                 tx.run(tag_query, id=node.id, tagId=tagIdStrip)
 
         self._jge_cache.add(jge_id)
-        logger.info(f"Added JobGroupExecution '{jge_id}' to cache")
+        
     @staticmethod
     def _create_jobcontext_execution(tx, data: Dict):
         """Create JobContextExecution and link to JobContext, Job, and JobGroupExecution.
@@ -408,24 +406,20 @@ class Neo4jInstanceLoaderV2:
             exitMessage=str(data.get('exitMessage', '')),
             expectedStartTime=expected_start
         )
-        # Build SET clause — only convert non-empty strings to time()
-        time_sets = []
-        if start_time_str:
-            time_sets.append("jce.startTime = time($startTime)")
-        if end_time_str:
-            time_sets.append("jce.endTime = time($endTime)")
-        if expected_start:
-            time_sets.append("jce.expectedStartTime = time($expectedStartTime)")
-        time_set_clause = ("\n            " + ",\n            ".join(time_sets) + ",") if time_sets else ""
-
-        logger.info(f"Creating JobContextExecution with id='{node.id}' linked to jobContextId='{job_context_id}' and jobGroupExecId='{jge_id}'...")
-        query = f"""
-        MERGE (jce:JobContextExecution {{id: $id}})
-        SET jce.businessDate = date($businessDate),{time_set_clause}
+        logger.info(f"Creating JobContextExecution with node='{node}'")
+        query = """
+        MERGE (jce:JobContextExecution {id: $id})
+        SET jce.businessDate = date($businessDate),
+            jce.startTime = time($startTime),
+            jce.endTime = time($endTime),
             jce.durationMs = $durationMs,
             jce.status = $status,
             jce.exitCode = $exitCode,
             jce.exitMessage = $exitMessage
+        """
+        if expected_start:
+            query += ",\n            jce.expectedStartTime = time($expectedStartTime)"
+        query += """
         WITH jce
         MATCH (jc:ScheduleInstanceContext {id: $jobContextId})
         MERGE (jce)-[:EXECUTES_CONTEXT]->(jc)
@@ -443,7 +437,7 @@ class Neo4jInstanceLoaderV2:
                status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
                expectedStartTime=node.expectedStartTime,
                jobContextId=job_context_id, jobGroupExecId=jge_id)
-        logger.info(f"Created JobContextExecution with id='{node.id}' linked to ScheduleInstanceContext '{job_context_id}' and JobGroupExecution '{jge_id}'")
+        logger.info(f"JobContextExecution '{node.id}' created and linked to ScheduleInstanceContext '{job_context_id}' and JobGroupExecution '{jge_id}'")
     
     def _load_resource_events(self, excel_file):
         """Load ResourceAvailabilityEvent nodes"""
