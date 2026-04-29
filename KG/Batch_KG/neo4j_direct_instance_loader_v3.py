@@ -156,6 +156,8 @@ class Neo4jInstanceLoaderV2:
                 session.execute_write(self._create_job_group_execution, data)
                 if 'jobGroupExecId' in data:
                     session.execute_write(self._create_jobcontext_execution, data)
+                else:
+                    logger.error(f" Missing jobGroupExecId for row with jobName='{data.get('jobName', '')}' and startTime='{data.get('startTime', '')}' — cannot create JobContextExecution without it")
         
         logger.info(f" Loaded {len(df)} JobContextExecutions")
     
@@ -177,50 +179,89 @@ class Neo4jInstanceLoaderV2:
         job_name = str(data.get('jobName', data.get('JobName', ''))).strip()
         start_time_raw = data.get('startTime', data.get('StartTime', ''))
 
-        if not job_name or not start_time_raw:
+        if not start_time_raw:
             logger.warning(
-                f"Skipping JobGroupExecution: missing jobName or startTime "
+                f"Skipping JobGroupExecution: missing startTime "
                 f"(jobName={job_name!r}, startTime={start_time_raw!r})"
             )
             return
 
         # Parse the datetime value that pandas delivers from Excel
         start_dt = pd.Timestamp(start_time_raw)
-        business_date = start_dt.strftime('%Y-%m-%d')
         start_time_str = start_dt.strftime('%H:%M:%S')
+        # business_date default: derived from startTime; overridden if jge_id carries it
+        business_date = start_dt.strftime('%Y-%m-%d')
 
-        # Reverse-lookup: find JobGroup(s) that have a HAS_JOB edge to this Job
-        result = tx.run(
-            """
-            MATCH (jg:JobGroup)-[:HAS_JOB]->(j:Job {id: $jobName})
-            RETURN jg.id AS jobGroupId
-            """,
-            jobName=job_name
-        )
-        records = result.data()
-
-        if len(records) == 0:
-            logger.warning(
-                f"No JobGroup found for jobName='{job_name}' "
-                f"— skipping JobGroupExecution for businessDate={business_date}"
+        # ── Derive job_group_id and jge_id — three strategies ────────────────────────
+        if 'jobGroupId' in data:
+            # Excel supplies the JobGroup ID directly — combine with business_date from startTime
+            job_group_id = str(data['jobGroupId']).strip()
+            jge_id = f"{job_group_id}_{business_date}"
+            data['jobGroupExecId'] = jge_id
+        elif 'jobContextId' in data:
+            # Use ScheduleInstanceContext → FOR_GROUP → JobGroup
+            job_context_id_raw = str(data['jobContextId']).strip()
+            result = tx.run(
+                """
+                MATCH (sic:ScheduleInstanceContext {id: $jobContextId})-[:FOR_GROUP]->(jg:JobGroup)
+                RETURN jg.id AS jobGroupId
+                """,
+                jobContextId=job_context_id_raw
             )
-            return
-
-        if len(records) > 1:
-            jg_ids = [r['jobGroupId'] for r in records]
-            logger.warning(
-                f"Ambiguous JobGroup lookup for jobName='{job_name}': "
-                f"found {len(records)} JobGroups {jg_ids} "
-                f"— skipping JobGroupExecution for businessDate={business_date} "
-                f"to avoid incorrect associations"
+            records = result.data()
+            if len(records) == 0:
+                logger.warning(
+                    f"No JobGroup found via ScheduleInstanceContext id='{job_context_id_raw}' "
+                    f"— skipping JobGroupExecution for businessDate={business_date}"
+                )
+                return
+            if len(records) > 1:
+                jg_ids = [r['jobGroupId'] for r in records]
+                logger.warning(
+                    f"Ambiguous JobGroup lookup via ScheduleInstanceContext id='{job_context_id_raw}': "
+                    f"found {len(records)} JobGroups {jg_ids} "
+                    f"— skipping JobGroupExecution for businessDate={business_date}"
+                )
+                return
+            job_group_id = records[0]['jobGroupId']
+            jge_id = f"{job_group_id}_{business_date}"
+            data['jobGroupExecId'] = jge_id
+        else:
+            # Fallback: reverse-lookup via Job → JobGroup
+            if not job_name:
+                logger.warning(
+                    f"Skipping JobGroupExecution: missing jobName, jobGroupExecId, and jobContextId "
+                    f"(startTime={start_time_raw!r})"
+                )
+                return
+            result = tx.run(
+                """
+                MATCH (jg:JobGroup)-[:HAS_JOB]->(j:Job {id: $jobName})
+                RETURN jg.id AS jobGroupId
+                """,
+                jobName=job_name
             )
-            return
-
-        job_group_id = records[0]['jobGroupId']
-        jge_id = f"{job_group_id}_{business_date}"
-        # Inject for use by _create_jobcontext_execution in the same loop iteration
-        data['jobGroupExecId'] = jge_id
-
+            records = result.data()
+            if len(records) == 0:
+                logger.warning(
+                    f"No JobGroup found for jobName='{job_name}' "
+                    f"— skipping JobGroupExecution for businessDate={business_date}"
+                )
+                return
+            if len(records) > 1:
+                jg_ids = [r['jobGroupId'] for r in records]
+                logger.warning(
+                    f"Ambiguous JobGroup lookup for jobName='{job_name}': "
+                    f"found {len(records)} JobGroups {jg_ids} "
+                    f"— skipping JobGroupExecution for businessDate={business_date} "
+                    f"to avoid incorrect associations"
+                )
+                return
+            job_group_id = records[0]['jobGroupId']
+            jge_id = f"{job_group_id}_{business_date}"
+            data['jobGroupExecId'] = jge_id
+        # ── End: derive job_group_id and jge_id ──────────────────────────────────────
+        logger.info(f"Adding jobGroupExecId in the data dict for JobContextExecution: {jge_id}")
         # Cache check — this combination was already created earlier this session
         if jge_id in self._jge_cache:
             logger.debug(f"JobGroupExecution '{jge_id}' already in cache — skipping")
@@ -283,35 +324,40 @@ class Neo4jInstanceLoaderV2:
         # jobGroupExecId format: "{jobGroupId}_{YYYY-MM-DD}" — date is always last 10 chars
         job_group_id = jge_id[:-11]  # strip trailing "_YYYY-MM-DD" (11 chars)
 
-        # Reverse-lookup: ScheduleInstanceContext linked to BOTH the JobGroup and the Job
-        result = tx.run(
-            """
-            MATCH (sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg:JobGroup {id: $jobGroupId})
-            MATCH (sic)-[:FOR_JOB]->(j:Job {id: $jobName})
-            RETURN sic.id AS jobContextId
-            """,
-            jobGroupId=job_group_id,
-            jobName=job_name
-        )
-        records = result.data()
-
-        if len(records) == 0:
-            logger.warning(
-                f"No ScheduleInstanceContext found for jobName='{job_name}' "
-                f"and jobGroupId='{job_group_id}' — skipping JobContextExecution"
+        # If jobContextId is already provided (from Excel or injected via the jobContextId
+        # path in _create_job_group_execution), use it directly — no graph query needed
+        if 'jobContextId' in data:
+            job_context_id = str(data['jobContextId']).strip()
+        else:
+            # Reverse-lookup: ScheduleInstanceContext linked to BOTH the JobGroup and the Job
+            result = tx.run(
+                """
+                MATCH (sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg:JobGroup {id: $jobGroupId})
+                MATCH (sic)-[:FOR_JOB]->(j:Job {id: $jobName})
+                RETURN sic.id AS jobContextId
+                """,
+                jobGroupId=job_group_id,
+                jobName=job_name
             )
-            return
+            records = result.data()
 
-        if len(records) > 1:
-            sic_ids = [r['jobContextId'] for r in records]
-            logger.warning(
-                f"Ambiguous ScheduleInstanceContext lookup for jobName='{job_name}' "
-                f"and jobGroupId='{job_group_id}': found {len(records)} entries {sic_ids} "
-                f"— skipping JobContextExecution to avoid incorrect associations"
-            )
-            return
+            if len(records) == 0:
+                logger.warning(
+                    f"No ScheduleInstanceContext found for jobName='{job_name}' "
+                    f"and jobGroupId='{job_group_id}' — skipping JobContextExecution"
+                )
+                return
 
-        job_context_id = records[0]['jobContextId']
+            if len(records) > 1:
+                sic_ids = [r['jobContextId'] for r in records]
+                logger.warning(
+                    f"Ambiguous ScheduleInstanceContext lookup for jobName='{job_name}' "
+                    f"and jobGroupId='{job_group_id}': found {len(records)} entries {sic_ids} "
+                    f"— skipping JobContextExecution to avoid incorrect associations"
+                )
+                return
+
+            job_context_id = records[0]['jobContextId']
 
         # businessDate: derive from jobGroupExecId (last 10 chars = YYYY-MM-DD)
         business_date = jge_id[-10:]
