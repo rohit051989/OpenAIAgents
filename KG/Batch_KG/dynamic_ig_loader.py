@@ -84,8 +84,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import pandas as pd
 import yaml
-import openpyxl
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
@@ -123,20 +123,20 @@ def _parse_dynamic_jobs_excel(excel_file: str) -> Dict[str, Dict]:
       Shell     : DIR, FILE, PARAMS, USER
       Procedure : PROC_NAME, PROC_SCHEMA, PROC_PACKAGE, PROC_PARAMS
     """
-    wb = openpyxl.load_workbook(excel_file, data_only=True)
-    ws = wb["Dynamic_Jobs_Details"]
+    df = pd.read_excel(excel_file, sheet_name='Dynamic_Jobs_Details')
 
     jobs: Dict[str, Dict] = {}
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or row[0] is None:
+    for _, row in df.iterrows():
+        data = row.to_dict()
+        data = {k: v for k, v in data.items() if pd.notna(v)}
+        if 'JOB_NAME' not in data:
             continue
-        job_name, job_id, step_name, step_order, value_param, key_param = row
-        job_name    = str(job_name).strip()
-        job_id      = str(int(job_id)) if job_id is not None else ""
-        step_name   = str(step_name).strip()
-        step_order  = int(step_order) if step_order else 1
-        value_param = str(value_param).strip() if value_param else ""
-        key_param   = str(key_param).strip().upper() if key_param else ""
+        job_name    = str(data['JOB_NAME']).strip()
+        job_id      = str(int(data['JOB_ID'])) if 'JOB_ID' in data else ""
+        step_name   = str(data.get('STEP_NAME', '')).strip()
+        step_order  = int(data['STEP_ORDER']) if 'STEP_ORDER' in data else 1
+        value_param = str(data.get('VALUE_PARAM', '')).strip()
+        key_param   = str(data.get('KEY_PARAM', '')).strip().upper()
 
         if job_name not in jobs:
             jobs[job_name] = {"id": job_id, "steps": {}}
