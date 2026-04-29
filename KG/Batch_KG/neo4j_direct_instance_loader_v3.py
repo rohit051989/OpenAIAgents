@@ -147,7 +147,7 @@ class Neo4jInstanceLoaderV2:
     def _load_job_group_executions(self, excel_file):
         """Load JobGroupExecution nodes"""
         df = pd.read_excel(excel_file, 'JobContextExecutions')
-        logger.info(f"Loading {len(df)} JobGroupExecutions...")
+        logger.info(f"Loading {len(df)} JobContextExecutions...")
         
         with self.driver.session(database=self.database) as session:
             for _, row in df.iterrows():
@@ -157,7 +157,7 @@ class Neo4jInstanceLoaderV2:
                 if 'jobGroupExecId' in data:
                     session.execute_write(self._create_jobcontext_execution, data)
         
-        logger.info(f" Loaded {len(df)} JobGroupExecutions")
+        logger.info(f" Loaded {len(df)} JobContextExecutions")
     
     def _create_job_group_execution(self, tx, data: Dict):
         """Create JobGroupExecution derived from JobContextExecution row data.
@@ -488,20 +488,30 @@ class Neo4jInstanceLoaderV2:
             """)
         logger.info(" Instance data cleared")
     
-    def compute_cpm_for_jobgroup_execution(self, excel_file: str, analyzer: ExecutionCPMAnalyzer):
-        df = pd.read_excel(excel_file, 'JobGroupExecutions')
-        logger.info(f"Loading {len(df)} JobGroupExecutions...")
-        for _, row in df.iterrows():
-            data = row.to_dict()
-            data = {k: v for k, v in data.items() if pd.notna(v)}
-            if 'id' in data:
-                jobgroup_execution_id = data.get('id', '')
+    def compute_cpm_for_jobgroup_execution(self, analyzer: ExecutionCPMAnalyzer):
+        """Compute CPM for every JobGroupExecution currently in the KG.
+
+        JobGroupExecution IDs are fetched directly from Neo4j — the 'JobGroupExecutions'
+        Excel tab no longer exists; IDs are generated dynamically during instance loading.
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                "MATCH (jge:JobGroupExecution) RETURN jge.id AS id ORDER BY jge.id"
+            )
+            jge_ids = [record["id"] for record in result]
+
+        logger.info(f"Computing CPM for {len(jge_ids)} JobGroupExecution(s) from KG...")
+
+        for jobgroup_execution_id in jge_ids:
+            try:
                 res = analyzer.compute_for_jobgroup_execution(jobgroup_execution_id, persist=True)
                 logger.info(f"\n=== CPM Summary for {jobgroup_execution_id} ===")
-                logger.info("SLA(ms):", res.group_sla_ms)
-                logger.info("Completion(ms):", res.completion_ms)
-                logger.info("Total Buffer(ms):", res.total_buffer_ms)
-                logger.info("Longest Path:", " -> ".join(res.longest_path))   
+                logger.info(f"  SLA(ms):        {res.group_sla_ms}")
+                logger.info(f"  Completion(ms): {res.completion_ms}")
+                logger.info(f"  Total Buffer(ms): {res.total_buffer_ms}")
+                logger.info(f"  Longest Path:   {' -> '.join(res.longest_path)}")
+            except Exception as e:
+                logger.warning(f"  CPM skipped for '{jobgroup_execution_id}': {e}")   
 
 
 def main():
@@ -530,7 +540,7 @@ def main():
             logger.info(f" Loading instance data from {excel_file}...")
             loader.load_instance_data(excel_file)
             analyzer = ExecutionCPMAnalyzer(loader.driver, database=loader.database)
-            loader.compute_cpm_for_jobgroup_execution(excel_file, analyzer)
+            loader.compute_cpm_for_jobgroup_execution(analyzer)
             logger.info("=" * 80)
             logger.info(" LOADING COMPLETE!")
             logger.info("=" * 80)

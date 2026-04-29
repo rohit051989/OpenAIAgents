@@ -434,7 +434,7 @@ class DynamicIGLoader:
 
         Step carries ONLY summary execution arrays (stepShellExecutions,
         stepProcedureCalls and their counts).  Per-resource detail properties
-        like scriptDir, scriptParams, remoteUser, schemaName, manuallyResolved etc. live on
+        like scriptPath, scriptParams, remoteUser, schemaName, manuallyResolved etc. live on
         Resource nodes — NOT on the Step.
         """
         shell_exec_strs = [
