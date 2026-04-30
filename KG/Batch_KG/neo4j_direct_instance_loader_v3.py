@@ -236,7 +236,7 @@ class Neo4jInstanceLoaderV2:
                 return
             result = tx.run(
                 """
-                MATCH (jg:JobGroup)-[:HAS_JOB]->(j:Job {id: $jobName})
+                MATCH (jg:JobGroup)-[:HAS_JOB]->(j:Job {name: $jobName})
                 RETURN jg.id AS jobGroupId
                 """,
                 jobName=job_name
@@ -333,7 +333,7 @@ class Neo4jInstanceLoaderV2:
             result = tx.run(
                 """
                 MATCH (sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg:JobGroup {id: $jobGroupId})
-                MATCH (sic)-[:FOR_JOB]->(j:Job {id: $jobName})
+                MATCH (sic)-[:FOR_JOB]->(j:Job {name: $jobName})
                 RETURN sic.id AS jobContextId
                 """,
                 jobGroupId=job_group_id,

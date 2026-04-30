@@ -1500,7 +1500,7 @@ class Neo4jLoader:
                 ctx.contextForEntityId = $contextForEntityId,
                 ctx.estimatedDurationMs = $estimatedDurationMs
                 WITH ctx
-                    MATCH (entity:Job {id: $contextForEntityId})
+                    MATCH (entity:Job {name: $contextForEntityId})
                     MERGE (ctx)-[:FOR_JOB]->(entity)
         """
         if job_group_id is not None:
