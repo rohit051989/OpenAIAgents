@@ -1444,7 +1444,6 @@ class InformationGraphBuilder:
             n.gitRepoName = $git_repo_name,
             n.gitBranchName = $git_branch_name,
             n.gitFileExists = $git_file_exists,
-            n.dynamicJavaClass = false,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -1557,8 +1556,7 @@ class InformationGraphBuilder:
                 m.procedureCalls = $procedure_calls,
                 m.shellExecutions = $shell_executions,
                 m.sourceCode = $source_code,
-                m.javaLineCount = $java_line_count,
-                m.dynamicJavaMethod = false
+                m.javaLineCount = $java_line_count
             MERGE (c)-[:HAS_METHOD]->(m)
             RETURN m
             """
@@ -2143,7 +2141,6 @@ class InformationGraphBuilder:
                 b.gitRepoName = bean.gitRepoName,
                 b.gitBranchName = bean.gitBranchName,
                 b.gitFileExists = true,
-                b.dynamicBean = false,
                 b.created_at = datetime()
             ON MATCH SET
                 b.beanId = bean.beanId,

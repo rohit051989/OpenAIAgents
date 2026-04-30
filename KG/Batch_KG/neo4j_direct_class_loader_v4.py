@@ -318,7 +318,7 @@ class Neo4jLoader:
                j.name         as name,
                j.enabled      as enabled,
                j.sourceFile   as sourceFile,
-               j.dynamicJob   as dynamicJob
+               j.type         as type
         ORDER BY j.name
         """
         
@@ -331,7 +331,7 @@ class Neo4jLoader:
                     'name':       record['name'],
                     'enabled':    record.get('enabled', True),
                     'sourceFile': record.get('sourceFile', ''),
-                    'dynamicJob': record.get('dynamicJob', False) or False,
+                    'type':       record.get('type', 'spring_xml_config_job') or 'spring_xml_config_job',
                 })
         
         logger.info(f"  Found {len(jobs)} Job nodes in information graph")
@@ -363,19 +363,19 @@ class Neo4jLoader:
             enabled=bool(data.get('enabled', True)),
             source_file=str(data.get('sourceFile', ''))
         )
-        dynamic_job = bool(data.get('dynamicJob', False))
+        job_type = data.get('type', 'spring_xml_config_job') or 'spring_xml_config_job'
         query = """
         MERGE (j:Job {name: $name})
         SET j.id         = $id,
             j.enabled    = $enabled,
-            j.dynamicJob = $dynamicJob,
+            j.type       = $type,
             j.createdAt  = datetime()
         """
         if node.source_file:
             query += ", j.sourceFile = $sourceFile"
         query += " RETURN j"
         tx.run(query, name=node.name, id=node.id, enabled=node.enabled,
-               sourceFile=node.source_file, dynamicJob=dynamic_job)
+               sourceFile=node.source_file, type=job_type)
     
     def _load_jobs_association(self, excel_file):
         """Load Jobs and create relationships to JobGroups"""
@@ -447,8 +447,6 @@ class Neo4jLoader:
                s.implBean                         as implBean,
                s.className                        as className,
                s.path                             as path,
-               coalesce(s.dynamicJob,  false)     as dynamicJob,
-               coalesce(s.dynamicStep, false)     as dynamicStep,
                coalesce(s.stepOrder,   0)         as stepOrder,
                s.lastUpdated                      as lastUpdated,
                coalesce(s.stepDbOperationCount,       0)  as stepDbOperationCount,
@@ -610,8 +608,6 @@ class Neo4jLoader:
         with self.driver.session(database=self.database) as session:
             # Shared execution-summary properties added to every Step regardless of kind
             _STEP_STATS_CLAUSE = """
-                        s.dynamicJob                  = $dynamicJob,
-                        s.dynamicStep                 = $dynamicStep,
                         s.stepOrder                   = $stepOrder,
                         s.lastUpdated                 = $lastUpdated,
                         s.stepDbOperationCount        = $stepDbOperationCount,
@@ -1179,8 +1175,7 @@ class Neo4jLoader:
         RETURN r.name       AS name,
                r.id         AS id,
                r.scriptPath AS scriptPath,
-               r.enabled    AS enabled,
-               r.dynamicJob AS dynamicJob
+               r.enabled    AS enabled
         """
 
         # ── 2. Fetch all shell→SQL INVOKES relationships from IG ────────────
@@ -1188,8 +1183,7 @@ class Neo4jLoader:
         MATCH (sh:Resource {type: 'SHELL_SCRIPT'})-[r:INVOKES]->(sql:Resource {type: 'SQL_SCRIPT'})
         RETURN sh.name                AS shellName,
                sql.name               AS sqlName,
-               r.executionType        AS executionType,
-               coalesce(r.dynamicJob, false) AS dynamicJob
+               r.executionType        AS executionType
         """
 
         sql_rows    = []
@@ -1216,15 +1210,13 @@ class Neo4jLoader:
                     MERGE (r:Resource {name: $name, type: 'SQL_SCRIPT'})
                     ON CREATE SET r.id          = $id,
                                   r.scriptPath  = $scriptPath,
-                                  r.enabled     = $enabled,
-                                  r.dynamicJob  = $dynamicJob
+                                  r.enabled     = $enabled
                     ON MATCH  SET r.scriptPath  = COALESCE(r.scriptPath, $scriptPath)
                     """,
                     name=row["name"],
                     id=row["id"] or f"RES_SQL_{row['name'].replace('.','_').upper()}",
                     scriptPath=row.get("scriptPath") or "",
                     enabled=row.get("enabled", True),
-                    dynamicJob=row.get("dynamicJob", False) or False,
                 )
 
             logger.info(f"    Merged {len(sql_rows)} SQL_SCRIPT Resource(s) into KG")

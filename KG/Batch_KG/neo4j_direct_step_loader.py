@@ -489,9 +489,9 @@ def generate_cypher(job: JobDef) -> str:
                                j.gitRepoName = '{git_repo_name}',
                                j.gitBranchName = '{git_branch_name}',
                                j.gitFileExists = true,
-                               j.dynamicJob = false
+                               j.type = 'spring_xml_config_job'
                  ON MATCH SET j.lastSeenAt = datetime(),
-                              j.dynamicJob = COALESCE(j.dynamicJob, false);""")
+                              j.type = COALESCE(j.type, 'spring_xml_config_job');""")
 
     # Steps
     for step in job.steps.values():
@@ -511,7 +511,7 @@ def generate_cypher(job: JobDef) -> str:
                 "processorBean: '%s', processorClass: '%s', processorSourcePath: '%s', "
                 "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'})"
                 " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s',"
-                " s.gitFileExists = true, s.dynamicStep = false;" %
+                " s.gitFileExists = true;" %
                 (step.name, step.step_kind,
                  step.reader_bean, step.reader_class, reader_src,
                  step.processor_bean, step.processor_class, processor_src,
@@ -527,7 +527,7 @@ def generate_cypher(job: JobDef) -> str:
             lines.append(
                 "MERGE (s:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'})"
                 " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s',"
-                " s.gitFileExists = true, s.dynamicStep = false;" %
+                " s.gitFileExists = true;" %
                 (step.name, step.step_kind, step.impl_bean, step.class_name, class_src,
                  step_git_repo, step_git_branch)
             )

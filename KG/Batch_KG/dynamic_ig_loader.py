@@ -17,11 +17,11 @@ Per step  (one dedicated Bean/JavaClass/JavaMethod per dynamic step):
                 carries only THIS step's shellExecutions / procedureCalls
 
 Per dynamic job:
-  Job           name=JOB_NAME, id=JOB_ID, dynamicJob=true
+Job           name=JOB_NAME, id=JOB_ID, type='dynamic_job'
 
-Per step  (summary arrays only — no script/procedure details on Step):
+ Per step  (summary arrays only — no script/procedure details on Step):
   Step          name=STEP_NAME, stepShellExecutions=[...], stepShellExecutionCount,
-                stepProcedureCalls=[...], stepProcedureCallCount, dynamicJob=true
+                stepProcedureCalls=[...], stepProcedureCallCount
 
 Per FILE param  -> SHELL_SCRIPT Resource  (all script details live here, not on Step):
   Resource      name=FILE, type=SHELL_SCRIPT, scriptPath=DIR/FILE,
@@ -284,12 +284,9 @@ class DynamicIGLoader:
                 b.simpleClassName = $simpleClassName,
                 b.path            = $path,
                 b.hasSource       = false,
-                b.dynamicJob      = true,
-                b.dynamicBean     = true,
                 b.created_at      = datetime()
             ON MATCH SET
-                b.dynamicJob  = true,
-                b.dynamicBean = true
+                b.beanId = $beanId
             """,
             compositeKey=composite_key,
             beanId=bean.bean_id,
@@ -319,13 +316,9 @@ class DynamicIGLoader:
                 c.isShellExecutorClass = $isShellExecutorClass,
                 c.isTestClass          = false,
                 c.method_count         = 1,
-                c.dynamicJob           = true,
-                c.dynamicJavaClass     = true,
                 c.created_at           = datetime()
             ON MATCH SET
-                c.isShellExecutorClass = $isShellExecutorClass,
-                c.dynamicJob           = true,
-                c.dynamicJavaClass     = true
+                c.isShellExecutorClass = $isShellExecutorClass
             """,
             fqn=cls_info.fqn,
             className=cls_info.class_name,
@@ -369,12 +362,9 @@ class DynamicIGLoader:
                 m.procedureCallCount  = 0,
                 m.dbOperations        = [],
                 m.procedureCalls      = [],
-                m.dynamicJob          = true,
-                m.dynamicJavaMethod   = true,
                 m.created_at          = datetime()
             ON MATCH SET
-                m.dynamicJob        = true,
-                m.dynamicJavaMethod = true
+                m.methodName = $methodName
             """,
             fqn=method_fqn,
             methodName=method.method_name,
@@ -405,12 +395,12 @@ class DynamicIGLoader:
             ON CREATE SET
                 j.id         = $id,
                 j.enabled    = $enabled,
-                j.dynamicJob = true,
+                j.type       = 'dynamic_job',
                 j.sourceFile = $sourceFile,
                 j.createdAt  = datetime()
             ON MATCH SET
                 j.id         = $id,
-                j.dynamicJob = true
+                j.type       = 'dynamic_job'
             """,
             name=job_def.name,
             id=job_def.id,
@@ -453,8 +443,6 @@ class DynamicIGLoader:
                 s.implBean                = $implBean,
                 s.className               = $className,
                 s.path                    = $path,
-                s.dynamicJob              = true,
-                s.dynamicStep             = true,
                 s.stepOrder               = $stepOrder,
                 s.stepShellExecutions     = $shellExecs,
                 s.stepShellExecutionCount = $shellCount,
@@ -562,8 +550,7 @@ class DynamicIGLoader:
                 MERGE (m)-[:EXECUTES {
                     scriptType:    $scriptType,
                     confidence:    $confidence,
-                    executionType: 'REMOTE',
-                    dynamicJob:    true
+                    executionType: 'REMOTE'
                 }]->(r)
                 """,
                 methodFqn=method_fqn,
@@ -584,14 +571,12 @@ class DynamicIGLoader:
                     r.scriptParams  = $scriptParams,
                     r.executionType = 'REMOTE',
                     r.executionUser = $execUser,
-                    r.dynamicJob    = true,
                     r.foundInRepo   = false
                 ON MATCH SET
                     r.scriptType    = $scriptType,
                     r.scriptPath    = COALESCE(r.scriptPath, $scriptPath),
                     r.scriptParams  = $scriptParams,
-                    r.executionUser = $execUser,
-                    r.dynamicJob    = true
+                    r.executionUser = $execUser
                 """,
                 name=resource.name,
                 id=resource.id,
@@ -607,8 +592,7 @@ class DynamicIGLoader:
                 MERGE (m)-[:EXECUTES {
                     scriptType:    $scriptType,
                     confidence:    $confidence,
-                    executionType: 'REMOTE',
-                    dynamicJob:    true
+                    executionType: 'REMOTE'
                 }]->(r)
                 """,
                 methodFqn=method_fqn,
@@ -711,7 +695,7 @@ class DynamicIGLoader:
                         """
                         MATCH (sh) WHERE sh.path = $shPath
                         MATCH (sql) WHERE sql.path = $sqlPath
-                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT', dynamicJob: true}]->(sql)
+                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql)
                         """,
                         shPath=shell_existing_path, sqlPath=sql_node_path,
                     )
@@ -720,7 +704,7 @@ class DynamicIGLoader:
                         """
                         MATCH (sh:Resource {name: $shName, type: 'SHELL_SCRIPT'})
                         MATCH (sql) WHERE sql.path = $sqlPath
-                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT', dynamicJob: true}]->(sql)
+                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql)
                         """,
                         shName=shell_resource_name, sqlPath=sql_node_path,
                     )
@@ -732,7 +716,6 @@ class DynamicIGLoader:
                         r.id          = $id,
                         r.enabled     = true,
                         r.scriptPath  = $scriptPath,
-                        r.dynamicJob  = true,
                         r.foundInRepo = false
                     ON MATCH SET
                         r.scriptPath = COALESCE(r.scriptPath, $scriptPath),
@@ -747,7 +730,7 @@ class DynamicIGLoader:
                         """
                         MATCH (sh) WHERE sh.path = $shPath
                         MATCH (sql:Resource {name: $sqlName, type: 'SQL_SCRIPT'})
-                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT', dynamicJob: true}]->(sql)
+                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql)
                         """,
                         shPath=shell_existing_path, sqlName=sql_filename,
                     )
@@ -756,7 +739,7 @@ class DynamicIGLoader:
                         """
                         MATCH (sh:Resource {name: $shName, type: 'SHELL_SCRIPT'})
                         MATCH (sql:Resource {name: $sqlName, type: 'SQL_SCRIPT'})
-                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT', dynamicJob: true}]->(sql)
+                        MERGE (sh)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql)
                         """,
                         shName=shell_resource_name, sqlName=sql_filename,
                     )
@@ -792,12 +775,10 @@ class DynamicIGLoader:
                 r.databaseType = $dbType,
                 r.schemaName   = $schemaName,
                 r.packageName  = $packageName,
-                r.dynamicJob   = true,
                 r.foundInRepo  = false
             ON MATCH SET
                 r.databaseType = COALESCE(r.databaseType, $dbType),
-                r.schemaName   = COALESCE(r.schemaName, $schemaName),
-                r.dynamicJob   = true
+                r.schemaName   = COALESCE(r.schemaName, $schemaName)
             """,
             name=resource.name,
             rtype=resource_type,
@@ -812,8 +793,7 @@ class DynamicIGLoader:
             MATCH (r:Resource {name: $name, type: $rtype})
             MERGE (m)-[:INVOKES {
                 databaseType: $dbType,
-                confidence:   $confidence,
-                dynamicJob:   true
+                confidence:   $confidence
             }]->(r)
             """,
             methodFqn=method_fqn,
