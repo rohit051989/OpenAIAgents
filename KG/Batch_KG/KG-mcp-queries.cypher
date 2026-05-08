@@ -183,12 +183,14 @@ RETURN collect({
   readerClass         : s.readerClass,
   writerClass         : s.writerClass,
   processorClass      : s.processorClass,
-  dbOperationCount    : coalesce(s.stepDbOperationCount,   0),
+  dbOperationCount    : coalesce(s.stepDbOperationCount,       0),
   dbOperations        : s.stepDbOperations,
-  procedureCallCount  : coalesce(s.stepProcedureCallCount, 0),
+  procedureCallCount  : coalesce(s.stepProcedureCallCount,     0),
   procedureCalls      : s.stepProcedureCalls,
-  shellExecutionCount : coalesce(s.stepShellExecutionCount,0),
+  shellExecutionCount : coalesce(s.stepShellExecutionCount,    0),
   shellExecutions     : s.stepShellExecutions,
+  sqlFileInvocationCount : coalesce(s.stepSqlFileInvocationCount, 0),
+  sqlFileInvocations  : s.stepSqlFileInvocations,
   isDAOClass          : c.isDAOClass,
   isShellExecutorClass: c.isShellExecutorClass
 }) AS steps;
@@ -456,32 +458,80 @@ RETURN
   } AS codeSummary;
 
 
-// Q10 [JSON] — Step DB / Procedure / Shell Operations Detail
+// Q10 [JSON] — Step DB / Procedure / Shell / SQL Operations Detail
 // Parameter : $jobName
-// Returns all steps in the job that have at least one operation (DB/proc/shell).
-// MCP use : "what database operations does job X perform?"
+// Returns all steps in the job that have at least one operation.
+// Includes dynamic steps (direct Step-to-Resource) alongside regular steps.
+// MCP use : "what operations does job X perform?"
 // ─────────────────────────────────────────────────────────────────────────────
 MATCH (j:Job {name: $jobName})-[:CONTAINS]->(s:Step)
-WHERE coalesce(s.stepDbOperationCount, 0)
-    + coalesce(s.stepProcedureCallCount, 0)
-    + coalesce(s.stepShellExecutionCount, 0) > 0
+WHERE coalesce(s.stepDbOperationCount,       0)
+    + coalesce(s.stepProcedureCallCount,     0)
+    + coalesce(s.stepShellExecutionCount,    0)
+    + coalesce(s.stepSqlFileInvocationCount, 0) > 0
 WITH s
 ORDER BY s.name
 RETURN collect({
-  stepName           : s.name,
-  stepKind           : s.stepKind,
-  dbOperationCount   : coalesce(s.stepDbOperationCount,   0),
-  dbOperations       : s.stepDbOperations,
-  procedureCallCount : coalesce(s.stepProcedureCallCount, 0),
-  procedureCalls     : s.stepProcedureCalls,
-  shellExecutionCount: coalesce(s.stepShellExecutionCount,0),
-  shellExecutions    : s.stepShellExecutions
+  stepName              : s.name,
+  stepKind              : s.stepKind,
+  dbOperationCount      : coalesce(s.stepDbOperationCount,       0),
+  dbOperations          : s.stepDbOperations,
+  procedureCallCount    : coalesce(s.stepProcedureCallCount,     0),
+  procedureCalls        : s.stepProcedureCalls,
+  shellExecutionCount   : coalesce(s.stepShellExecutionCount,    0),
+  shellExecutions       : s.stepShellExecutions,
+  sqlFileInvocationCount: coalesce(s.stepSqlFileInvocationCount, 0),
+  sqlFileInvocations    : s.stepSqlFileInvocations
 }) AS stepOperations;
 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 5 : RESOURCE & DATA LINEAGE
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Q18 [JSON] — Dynamic Step Resource Associations
+// Parameter : $jobName
+// Returns all dynamic steps in the job with their directly linked Resources
+// (EXECUTES → SHELL_SCRIPT, INVOKES → PROCEDURE/FUNCTION/SQL_SCRIPT).
+// For dynamic jobs there is no Java class intermediary — the Step links Resources directly.
+// MCP use : "what scripts and procedures do the dynamic steps in job X run?"
+// ─────────────────────────────────────────────────────────────────────────────
+MATCH (j:Job {name: $jobName})-[:CONTAINS]->(s:Step)
+WHERE coalesce(j.type, 'dynamic_job') = 'dynamic_job'
+OPTIONAL MATCH (s)-[:EXECUTES]->(shell:Resource {type: 'SHELL_SCRIPT'})
+OPTIONAL MATCH (s)-[:INVOKES]->(proc:Resource)
+  WHERE proc.type IN ['PROCEDURE', 'FUNCTION']
+OPTIONAL MATCH (shell)-[:INVOKES {executionType: 'SQL_SCRIPT'}]->(sql:Resource {type: 'SQL_SCRIPT'})
+WITH s,
+     collect(DISTINCT {
+       name       : shell.name,
+       type       : shell.type,
+       scriptType : shell.scriptType,
+       scriptPath : shell.scriptPath,
+       scriptParams: shell.scriptParams,
+       executionUser: shell.executionUser
+     }) AS shellResources,
+     collect(DISTINCT {
+       name       : proc.name,
+       type       : proc.type,
+       databaseType: proc.databaseType,
+       schemaName : proc.schemaName,
+       packageName: proc.packageName
+     }) AS procResources,
+     collect(DISTINCT {
+       name       : sql.name,
+       type       : sql.type,
+       scriptPath : sql.scriptPath
+     }) AS sqlResources
+ORDER BY s.stepOrder
+RETURN collect({
+  stepName          : s.name,
+  stepOrder         : s.stepOrder,
+  dynamicStepKind   : s.dynamicStepKind,
+  shellResources    : [r IN shellResources WHERE r.name IS NOT NULL],
+  procResources     : [r IN procResources  WHERE r.name IS NOT NULL],
+  sqlFileInvocations: [r IN sqlResources   WHERE r.name IS NOT NULL]
+}) AS dynamicStepResources;
 
 // Q11 [JSON] — Job Data Footprint
 // Parameter : $jobName

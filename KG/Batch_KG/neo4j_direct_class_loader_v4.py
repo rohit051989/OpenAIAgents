@@ -16,6 +16,9 @@ Author: Rohit Khanna
 Date: 2025-01-03
 """
 
+import calendar as cal_lib
+from datetime import date, timedelta
+import json
 import pandas as pd
 from neo4j import GraphDatabase
 from typing import Dict, List, Tuple
@@ -27,7 +30,7 @@ from cpm_analyzer_v1 import CPMAnalyzer
 from classes.DataClasses import JobDef
 from classes.KGNodeDefs import (
     JobGroupNodeDef, TagNodeDef, ScheduleInstanceContextNodeDef,
-    SLANodeDef, CalendarNodeDef, HolidayNodeDef, ResourceNodeDef
+    SLANodeDef, CalendarNodeDef, ResourceNodeDef
 )
 
 
@@ -188,9 +191,13 @@ class Neo4jLoader:
         self._copy_sql_resource_invokes_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
-        self._load_calendar(excel_file)
-        self._load_associate_calendar(excel_file)
+        #self._load_calendar(excel_file)
+        #self._load_associate_calendar(excel_file)
+        self._load_calendar_layer1()
+        self._load_calendar_patterns(excel_file)
         self._load_holidays(excel_file)
+        self._load_job_rules(excel_file)
+        self._load_job_rules_association(excel_file)
         logger.info(" Class-level data loaded successfully")
     
     def _load_job_groups(self, excel_file):
@@ -228,14 +235,12 @@ class Neo4jLoader:
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
             description=str(data.get('description', '')),
-            priority=str(data.get('priority', '')),
             enabled=bool(data.get('enabled', True))
         )
         query = """
         MERGE (jg:JobGroup {id: $id})
         SET jg.name = $name,
             jg.description = $description,
-            jg.priority = $priority,
             jg.enabled = $enabled,
             jg.createdAt = datetime()
         RETURN jg
@@ -938,7 +943,7 @@ class Neo4jLoader:
         IG source:
           JavaMethod -[:EXECUTES]->(r:Resource {type:'SHELL_SCRIPT'})
           JavaMethod -[:INVOKES]->(r:Resource {type:'PROCEDURE'|'FUNCTION'})
-
+          Step -[:EXECUTES]->(r:Resource {type:'SHELL_SCRIPT'})  // For dynamic steps without JavaClass intermediary
         KG structure created (direct, no DataAsset intermediary):
           Step -[:EXECUTES  {scriptType, confidence, scriptPath, executionUser, scriptParams}]-> Resource {type:'SHELL_SCRIPT'}
           Step -[:INVOKES   {databaseType, schemaName, packageName, confidence}]->             Resource {type:'PROCEDURE'|'FUNCTION'}
@@ -984,6 +989,21 @@ class Neo4jLoader:
                r.executionUser AS executionUser,
                r.scriptParams  AS scriptParams,
                m.fqn           AS methodFqn
+
+        UNION
+
+        // Dynamic steps: direct Step -[:EXECUTES]-> Resource (no JavaClass intermediary)
+        MATCH (s:Step)-[:EXECUTES]->(r:Resource)
+        WHERE r.type = 'SHELL_SCRIPT'
+          AND s.stepKind = 'SHELL_EXECUTION'
+        RETURN s.name          AS stepName,
+               r.name          AS resourceName,
+               r.type          AS resourceType,
+               r.scriptType    AS scriptType,
+               r.scriptPath    AS scriptPath,
+               r.executionUser AS executionUser,
+               r.scriptParams  AS scriptParams,
+               null            AS methodFqn
         """
 
         # ── Procedure / Function calls ────────────────────────────────────────
@@ -1018,6 +1038,20 @@ class Neo4jLoader:
                r.schemaName     AS schemaName,
                r.packageName    AS packageName,
                m.fqn            AS methodFqn
+
+        UNION
+
+        // Dynamic steps: direct Step -[:INVOKES]-> Resource (no JavaClass intermediary)
+        MATCH (s:Step)-[:INVOKES]->(r:Resource)
+        WHERE r.type IN ['PROCEDURE', 'FUNCTION']
+          AND s.stepKind = 'SHELL_EXECUTION'
+        RETURN s.name           AS stepName,
+               r.name           AS resourceName,
+               r.type           AS resourceType,
+               r.databaseType   AS databaseType,
+               r.schemaName     AS schemaName,
+               r.packageName    AS packageName,
+               null             AS methodFqn
         """
 
         shell_rows = []
@@ -1526,7 +1560,6 @@ class Neo4jLoader:
         node = SLANodeDef(
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
-            policy=str(data.get('policy', '')),
             severity=str(data.get('severity', '')),
             enabled=bool(data.get('enabled', True)),
             type=str(data.get('type', '')),
@@ -1537,7 +1570,6 @@ class Neo4jLoader:
         query = """
         MERGE (sla:SLA {id: $id})
         SET sla.name = $name,
-            sla.policy = $policy,
             sla.severity = $severity,
             sla.enabled = $enabled,
             sla.type = $type
@@ -1562,7 +1594,7 @@ class Neo4jLoader:
         MERGE (entity)-[:HAS_SLA]->(sla)
         RETURN sla
         """
-        tx.run(query, id=node.id, name=node.name, policy=node.policy,
+        tx.run(query, id=node.id, name=node.name,
                severity=node.severity, enabled=node.enabled, type=node.type,
                time=node.time, durationMs=node.durationMs, tz=node.tz,
                relativeEntityId=data.get('relativeEntityId'),
@@ -1658,66 +1690,675 @@ class Neo4jLoader:
                blockedDays=node.blockedDays, startTime=node.startTime,
                endTime=node.endTime, tz=node.tz)
     
-    def _load_holidays(self, excel_file):
-        """Load Holidays and link to constraints"""
-        df = pd.read_excel(excel_file, 'Holidays')
-        logger.info(f"Loading {len(df)} Holidays...")
-        
-        with self.driver.session(database=self.database) as session:
-            for _, row in df.iterrows():
-                data = row.to_dict()
-                session.execute_write(self._create_holiday, data)
-        
-        logger.info(f" Loaded {len(df)} Holidays")
-    
-    @staticmethod
-    def _create_holiday(tx, data: Dict):
-        """Transaction function to create Holiday and link to one or more Calendars.
-        calendarId may be a single value or comma-separated list.
+    def _load_calendar_patterns(self, excel_file):
         """
-        node = HolidayNodeDef(
-            id=str(data.get('id', '')),
-            name=str(data.get('name', '')),
-            date=str(data.get('date', '')),
-            enabled=bool(data.get('enabled', True))
-        )
+        Load CalendarPattern nodes from the 'CalendarPatterns' Excel tab.
 
-        # Normalise date to "YYYY-MM-DD": pandas reads Excel date cells as
-        # Timestamps ("2026-01-01 00:00:00"), which Neo4j date() cannot parse.
-        raw_date = data.get('date', '')
-        if hasattr(raw_date, 'strftime'):           # pandas Timestamp / datetime
-            date_str = raw_date.strftime('%Y-%m-%d')
-        else:
-            date_str = str(raw_date)[:10]           # trim " 00:00:00" if present
-        node.date = date_str
+        Expected columns:
+          patternId        - Unique identifier (e.g. PAT_HOLIDAY)
+          matchExpression  - Runtime evaluator key (e.g. HOLIDAY)
+          name             - Human-readable name
+          runtimeParams    - Comma-separated params the CALLING AGENT must supply
+                             from the user's question/context at evaluation time.
+                             e.g. "date,region"
+                             These are NEVER stored on JobRule.params.  The agentic
+                             backend extracts them from the incoming request (target
+                             date, region scope) and passes them directly to the
+                             evaluator function.
+          configParams     - Comma-separated params that must be present in
+                             JobRule.params (the static, rule-authored values).
+                             e.g. "dayOfWeek,occurrences"
+                             The agentic backend reads these from JobRule.params
+                             (a JSON string) and passes them to the evaluator.
+          evaluatorFn      - Python evaluator function name in the registry
+          description      - Human-readable description
+          isActive         - true / false
+          version          - Integer
 
-        # Create / update the Holiday node
-        tx.run(
-            """
-            MERGE (h:Holiday {id: $id})
-            SET h.name    = $name,
-                h.date    = date($date),
-                h.enabled = $enabled
-            """,
-            id=node.id, name=node.name, date=node.date, enabled=node.enabled
-        )
+        Evaluation contract for the agentic backend:
+          full_args = {**runtime_context}           # {date, region} from user question
+                    | json.loads(rule.params)        # {dayOfWeek, occurrences, ...}
+          result = evaluator_registry[pattern.evaluatorFn](**full_args)
 
-        # calendarId can be a single value or comma-separated; may also be NaN
-        raw_cal_id = data.get('calendarId')
-        if raw_cal_id is None or (isinstance(raw_cal_id, float) and pd.isna(raw_cal_id)):
-            return
-        cal_ids = [cid.strip() for cid in str(raw_cal_id).split(',') if cid.strip()]
+        Always use ON MATCH SET so re-runs update all properties in place.
+        """
+        df = pd.read_excel(excel_file, 'CalendarPatterns')
+        logger.info(f"Loading {len(df)} calendar pattern(s) from Excel...")
 
-        for cal_id in cal_ids:
-            tx.run(
+        rows = []
+        for _, row in df.iterrows():
+            data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                    for k, v in row.to_dict().items()}
+
+            def _split_csv(col):
+                raw = data.get(col, '') or ''
+                return [p.strip() for p in str(raw).split(',') if p.strip()]
+
+            # isActive may come in as True/False bool or 'true'/'false' string
+            raw_active = data.get('isActive', True)
+            if isinstance(raw_active, str):
+                is_active = raw_active.strip().lower() in ('true', 'yes', '1')
+            else:
+                is_active = bool(raw_active) if raw_active is not None else True
+
+            rows.append({
+                'patternId':       str(data.get('patternId', '')).strip(),
+                'matchExpression': str(data.get('matchExpression', '')).strip(),
+                'name':            str(data.get('name', '')).strip(),
+                'runtimeParams':   _split_csv('runtimeParams'),   # agent supplies at call time
+                'configParams':    _split_csv('configParams'),    # baked into JobRule.params
+                'evaluatorFn':     str(data.get('evaluatorFn', '')).strip(),
+                'description':     str(data.get('description', '')).strip(),
+                'isActive':        is_active,
+                'version':         int(data.get('version', 1)),
+            })
+
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
                 """
-                MATCH (h:Holiday {id: $holidayId})
-                MATCH (c:Calendar {id: $calId})
-                MERGE (c)-[:BLOCKS_ON]->(h)
+                UNWIND $rows AS row
+                MERGE (cp:CalendarPattern {matchExpression: row.matchExpression})
+                ON CREATE SET
+                    cp.patternId      = row.patternId,
+                    cp.name           = row.name,
+                    cp.runtimeParams  = row.runtimeParams,
+                    cp.configParams   = row.configParams,
+                    cp.evaluatorFn    = row.evaluatorFn,
+                    cp.description    = row.description,
+                    cp.isActive       = row.isActive,
+                    cp.version        = row.version
+                ON MATCH SET
+                    cp.patternId      = row.patternId,
+                    cp.name           = row.name,
+                    cp.runtimeParams  = row.runtimeParams,
+                    cp.configParams   = row.configParams,
+                    cp.evaluatorFn    = row.evaluatorFn,
+                    cp.description    = row.description,
+                    cp.isActive       = row.isActive,
+                    cp.version        = row.version
+                RETURN count(cp) AS loaded
                 """,
-                holidayId=node.id, calId=cal_id
+                rows=rows,
             )
-    
+            record = result.single()
+            loaded = record['loaded'] if record else 0
+
+        logger.info(f" Loaded/updated {loaded} CalendarPattern node(s)")
+
+    def _load_holidays(self, excel_file):
+        """
+        Load holiday calendar from the 'Holidays' Excel tab and create
+        IS_HOLIDAY_ON edges on the HOLIDAY CalendarPattern node.
+        Requires _load_calendar_patterns to have run first so the HOLIDAY
+        CalendarPattern node already exists.
+
+        Expected columns: id, date, region, name
+        Region codes:
+          US  — United States Federal holidays only
+          CA  — Canadian Federal and major provincial holidays only
+          ALL — Universal financial market closures (applies to every region)
+
+        Querying: always combine ALL + the specific region so that global
+        holidays are automatically included without duplicating rows.
+        """
+        df = pd.read_excel(excel_file, 'Holidays')
+        logger.info(f"Loading {len(df)} holiday entries from Excel...")
+
+        rows = []
+        for _, row in df.iterrows():
+            data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                    for k, v in row.to_dict().items()}
+
+            # Normalise date: pandas reads Excel date cells as Timestamps
+            raw_date = data.get('date', '')
+            if hasattr(raw_date, 'strftime'):
+                date_str = raw_date.strftime('%Y-%m-%d')
+            else:
+                date_str = str(raw_date)[:10]
+
+            rows.append({
+                'date':   date_str,
+                'region': str(data.get('region', '')).strip(),
+                'name':   str(data.get('name', '')).strip(),
+            })
+
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (cp:CalendarPattern {matchExpression: "HOLIDAY"})
+                UNWIND $rows AS row
+                MATCH (d:Day {date: date(row.date)})
+                MERGE (cp)-[r:IS_HOLIDAY_ON {region: row.region, name: row.name}]->(d)
+                RETURN count(r) AS loaded
+                """,
+                rows=rows,
+            )
+            record = result.single()
+            loaded = record['loaded'] if record else 0
+
+        logger.info(f" Loaded {loaded} IS_HOLIDAY_ON edge(s) onto HOLIDAY CalendarPattern")
+
+    def _load_job_rules(self, excel_file):
+        """
+        Load JobRule nodes from the 'JobRules' Excel tab and link each to its
+        CalendarPattern via USES_PATTERN.
+        Requires _load_calendar_patterns to have run first.
+
+        Expected columns:
+          ruleId          - Unique identifier (e.g. RULE_1ST_SUNDAY)
+          name            - Human-readable name
+          matchExpression - CalendarPattern.matchExpression to link to
+          region          - Region code (US, CA, ALL) or blank for no region restriction
+          params          - JSON object of pattern-specific parameters
+          isActive        - true / false
+          description     - Human-readable description
+
+        params examples (stored as JSON string in graph):
+          NTH_DOW_MONTH        : {"dayOfWeek": 7, "occurrences": [1]}
+          NTH_DOWS_MONTH       : {"daysOfWeek": [1,2,3,4,5], "occurrences": [1,2,3,4,5]}
+          NTH_FIRST_BIZ_MONTH  : {"occurrences": [1,2,3,4,5,6,7,8,9,10,11,12]}
+          HOLIDAY              : {} (region drives the filter at query time)
+        """
+        df = pd.read_excel(excel_file, 'JobRules')
+        logger.info(f"Loading {len(df)} job rule(s) from Excel...")
+
+        rows = []
+        for _, row in df.iterrows():
+            data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                    for k, v in row.to_dict().items()}
+
+            # Parse params: Excel stores as JSON string
+            raw_params = data.get('params', '') or ''
+            if isinstance(raw_params, str) and raw_params.strip():
+                try:
+                    params_dict = json.loads(raw_params)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        f"  Invalid JSON params for ruleId={data.get('ruleId')!r}: "
+                        f"{raw_params!r} — using {{}}"
+                    )
+                    params_dict = {}
+            else:
+                params_dict = {}
+
+            # isActive normalisation
+            raw_active = data.get('isActive', True)
+            if isinstance(raw_active, str):
+                is_active = raw_active.strip().lower() in ('true', 'yes', '1')
+            else:
+                is_active = bool(raw_active) if raw_active is not None else True
+
+            # region: blank/null -> None so graph stores null, not empty string
+            region = data.get('region')
+            if region is not None:
+                region = str(region).strip() or None
+
+            rows.append({
+                'ruleId':          str(data.get('ruleId', '')).strip(),
+                'name':            str(data.get('name', '')).strip(),
+                'matchExpression': str(data.get('matchExpression', '')).strip(),
+                'region':          region,
+                # Neo4j doesn't support map properties; store params as JSON string
+                'params':          json.dumps(params_dict),
+                'isActive':        is_active,
+                'description':     str(data.get('description', '')).strip(),
+            })
+
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                UNWIND $rows AS row
+                MERGE (r:JobRule {ruleId: row.ruleId})
+                ON CREATE SET
+                    r.name        = row.name,
+                    r.region      = row.region,
+                    r.params      = row.params,
+                    r.isActive    = row.isActive,
+                    r.description = row.description
+                ON MATCH SET
+                    r.name        = row.name,
+                    r.region      = row.region,
+                    r.params      = row.params,
+                    r.isActive    = row.isActive,
+                    r.description = row.description
+                WITH r, row
+                MATCH (cp:CalendarPattern {matchExpression: row.matchExpression})
+                MERGE (r)-[:USES_PATTERN]->(cp)
+                RETURN count(r) AS loaded
+                """,
+                rows=rows,
+            )
+            record = result.single()
+            loaded = record['loaded'] if record else 0
+
+        logger.info(f" Loaded/updated {loaded} JobRule node(s)")
+
+    def _load_job_rules_association(self, excel_file):
+        """
+        Load JobRule associations from the 'JobRulesAssociation' Excel tab.
+        Creates ALLOWS or DENIES relationships between JobGroup /
+        ScheduleInstanceContext nodes and JobRule nodes.
+        Requires _load_job_rules to have run first.
+
+        Expected columns:
+          id                - ruleId from the JobRules tab
+          name              - Human-readable label (informational only)
+          contextType       - 'JobGroup' or 'ScheduleInstanceContext'
+          requiresContextId - id of the JobGroup or ScheduleInstanceContext node
+          Allowed           - 'Y' → ALLOWS relationship, 'N' → DENIES relationship
+          enabled           - Whether this association row is active
+          action            - For DENIES only: what to do when the rule fires.
+                              SKIP | RUN_PREVIOUS_BUSINESS_DAY | RUN_NEXT_BUSINESS_DAY
+                              (default: 'SKIP')
+
+        Evaluation precedence (enforced by the agentic backend, not stored here):
+          DENIES always wins over ALLOWS — if ANY DENIES rule matches on a given
+          date, the JobGroup/Context is blocked regardless of how many ALLOWS
+          rules matched.  No priority column is needed.
+        """
+        # Only these two labels are valid to prevent Cypher label injection
+        VALID_CONTEXT_TYPES = {'JobGroup', 'ScheduleInstanceContext'}
+
+        df = pd.read_excel(excel_file, 'JobRulesAssociation')
+        logger.info(f"Loading {len(df)} job rule association(s) from Excel...")
+
+        allows_rows = []
+        denies_rows = []
+
+        for _, row in df.iterrows():
+            data = {k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                    for k, v in row.to_dict().items()}
+
+            rule_id      = str(data.get('id', '') or '').strip()
+            context_type = str(data.get('contextType', '') or '').strip()
+            context_id   = str(data.get('requiresContextId', '') or '').strip()
+            allowed      = str(data.get('Allowed', '') or '').strip().upper()
+
+            if not rule_id or not context_type or not context_id:
+                logger.warning(
+                    f"  Skipping incomplete row: ruleId={rule_id!r}, "
+                    f"contextType={context_type!r}, contextId={context_id!r}"
+                )
+                continue
+
+            if context_type not in VALID_CONTEXT_TYPES:
+                logger.warning(
+                    f"  Invalid contextType {context_type!r} — must be one of "
+                    f"{sorted(VALID_CONTEXT_TYPES)}. Skipping."
+                )
+                continue
+
+            action = str(data.get('action') or 'SKIP').strip()
+
+            if allowed == 'Y':
+                allows_rows.append({
+                    'ruleId':      rule_id,
+                    'contextType': context_type,
+                    'contextId':   context_id,
+                })
+            elif allowed == 'N':
+                denies_rows.append({
+                    'ruleId':      rule_id,
+                    'contextType': context_type,
+                    'contextId':   context_id,
+                    'action':      action,
+                })
+            else:
+                logger.warning(
+                    f"  Unknown Allowed value {allowed!r} for ruleId={rule_id!r} — skipping"
+                )
+
+        allows_created = 0
+        denies_created = 0
+
+        with self.driver.session(database=self.database) as session:
+
+            # ALLOWS: JobGroup/SIC -[:ALLOWS]-> JobRule
+            # Group by contextType to keep dynamic label in Python, not Cypher
+            for ctx_type in VALID_CONTEXT_TYPES:
+                batch = [r for r in allows_rows if r['contextType'] == ctx_type]
+                if not batch:
+                    continue
+                result = session.run(
+                    f"""
+                    UNWIND $rows AS row
+                    MATCH (ctx:{ctx_type} {{id: row.contextId}})
+                    MATCH (r:JobRule {{ruleId: row.ruleId}})
+                    MERGE (ctx)-[rel:ALLOWS {{ruleId: row.ruleId}}]->(r)
+                    RETURN count(rel) AS created
+                    """,
+                    rows=batch,
+                )
+                record = result.single()
+                allows_created += record['created'] if record else 0
+
+            # DENIES: JobGroup/SIC -[:DENIES {action}]-> JobRule
+            # DENIES always takes precedence over ALLOWS — no priority needed.
+            for ctx_type in VALID_CONTEXT_TYPES:
+                batch = [r for r in denies_rows if r['contextType'] == ctx_type]
+                if not batch:
+                    continue
+                result = session.run(
+                    f"""
+                    UNWIND $rows AS row
+                    MATCH (ctx:{ctx_type} {{id: row.contextId}})
+                    MATCH (r:JobRule {{ruleId: row.ruleId}})
+                    MERGE (ctx)-[rel:DENIES {{ruleId: row.ruleId}}]->(r)
+                    SET rel.action = row.action
+                    RETURN count(rel) AS created
+                    """,
+                    rows=batch,
+                )
+                record = result.single()
+                denies_created += record['created'] if record else 0
+
+        logger.info(
+            f" Created/updated {allows_created} ALLOWS and {denies_created} DENIES "
+            f"relationship(s) between JobGroups/Contexts and JobRules"
+        )
+
+    # ========================================================================
+    # UTILITY METHODS
+    # ========================================================================
+
+    def _load_calendar_layer1(self, year: int = 2026):
+        """
+        Generate and load Layer 1 calendar nodes for a given year entirely
+        from Python's standard datetime/calendar libraries — no Excel required.
+
+        Node hierarchy created:
+          Year -[:HAS_QUARTER]-> Quarter -[:HAS_MONTH]-> Month
+          Month -[:HAS_WEEK {weekOfMonth}]-> Week
+          Month -[:HAS_DAY]->  Day
+          Week  -[:HAS_DAY]->  Day
+
+        The Week node uses ISO-8601 week numbers.  A week that spans two calendar
+        months is linked to BOTH months via HAS_WEEK (with the appropriate
+        weekOfMonth ordinal for each month).
+
+        Args:
+            year: Calendar year to generate.  Defaults to 2026.
+        """
+        logger.info(f"Loading Layer 1 calendar nodes for year {year}...")
+
+        # ── 0. Constraints for Layer 1 node types ───────────────────────────
+        layer1_constraints = [
+            "CREATE CONSTRAINT year_year   IF NOT EXISTS FOR (n:Year)    REQUIRE n.year IS UNIQUE",
+            "CREATE CONSTRAINT quarter_id  IF NOT EXISTS FOR (n:Quarter) REQUIRE n.id   IS UNIQUE",
+            "CREATE CONSTRAINT month_id    IF NOT EXISTS FOR (n:Month)   REQUIRE n.id   IS UNIQUE",
+            "CREATE CONSTRAINT week_id     IF NOT EXISTS FOR (n:Week)    REQUIRE n.id   IS UNIQUE",
+            "CREATE CONSTRAINT day_date    IF NOT EXISTS FOR (n:Day)     REQUIRE n.date IS UNIQUE",
+        ]
+        with self.driver.session(database=self.database) as session:
+            for stmt in layer1_constraints:
+                try:
+                    session.run(stmt)
+                except Exception as e:
+                    logger.warning(f"Constraint may already exist: {str(e)[:80]}")
+
+        MONTH_NAMES = [
+            "", "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+
+        # ── 1. Year ─────────────────────────────────────────────────────────
+        is_leap = cal_lib.isleap(year)
+        total_days_year = 366 if is_leap else 365
+
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MERGE (y:Year {year: $year})
+                SET y.isLeapYear = $isLeapYear,
+                    y.totalDays  = $totalDays
+                """,
+                year=year, isLeapYear=is_leap, totalDays=total_days_year,
+            )
+        logger.info(f"  Created Year {year} (leap={is_leap}, days={total_days_year})")
+
+        # ── 2. Quarters ──────────────────────────────────────────────────────
+        quarter_bounds = {1: (1, 3), 2: (4, 6), 3: (7, 9), 4: (10, 12)}
+        quarter_rows = []
+        for q, (start_m, end_m) in quarter_bounds.items():
+            q_start = date(year, start_m, 1)
+            q_end   = date(year, end_m, cal_lib.monthrange(year, end_m)[1])
+            quarter_rows.append({
+                "id":        f"{year}-Q{q}",
+                "year":      year,
+                "quarter":   q,
+                "startDate": str(q_start),
+                "endDate":   str(q_end),
+                "totalDays": (q_end - q_start).days + 1,
+            })
+
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                UNWIND $rows AS row
+                MERGE (q:Quarter {id: row.id})
+                SET q.year      = row.year,
+                    q.quarter   = row.quarter,
+                    q.startDate = date(row.startDate),
+                    q.endDate   = date(row.endDate),
+                    q.totalDays = row.totalDays
+                WITH q, row
+                MATCH (y:Year {year: row.year})
+                MERGE (y)-[:HAS_QUARTER]->(q)
+                """,
+                rows=quarter_rows,
+            )
+        logger.info(f"  Created 4 Quarters")
+
+        # ── 3. Months ────────────────────────────────────────────────────────
+        month_rows = []
+        for m in range(1, 13):
+            m_start  = date(year, m, 1)
+            last_day = cal_lib.monthrange(year, m)[1]
+            m_end    = date(year, m, last_day)
+            quarter  = (m - 1) // 3 + 1
+            month_rows.append({
+                "id":        f"{year}-{m:02d}",
+                "year":      year,
+                "month":     m,
+                "name":      MONTH_NAMES[m],
+                "quarter":   quarter,
+                "startDate": str(m_start),
+                "endDate":   str(m_end),
+                "totalDays": last_day,
+                "quarterId": f"{year}-Q{quarter}",
+            })
+
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                UNWIND $rows AS row
+                MERGE (mo:Month {id: row.id})
+                SET mo.year      = row.year,
+                    mo.month     = row.month,
+                    mo.name      = row.name,
+                    mo.quarter   = row.quarter,
+                    mo.startDate = date(row.startDate),
+                    mo.endDate   = date(row.endDate),
+                    mo.totalDays = row.totalDays
+                WITH mo, row
+                MATCH (q:Quarter {id: row.quarterId})
+                MERGE (q)-[:HAS_MONTH]->(mo)
+                """,
+                rows=month_rows,
+            )
+        logger.info(f"  Created 12 Months")
+
+        # ── 4. Weeks ─────────────────────────────────────────────────────────
+        # All calendar days of the year
+        all_days = [date(year, 1, 1) + timedelta(days=i) for i in range(total_days_year)]
+
+        # Group days by ISO (year, week) key
+        iso_week_days: Dict[tuple, list] = {}
+        for d in all_days:
+            iso_yr, iso_wk, _ = d.isocalendar()
+            iso_week_days.setdefault((iso_yr, iso_wk), []).append(d)
+
+        # Monday of any ISO week — used for stable sort ordering
+        def _week_monday(iso_yr: int, iso_wk: int) -> date:
+            jan4 = date(iso_yr, 1, 4)           # Jan 4 is always in ISO week 1
+            return jan4 - timedelta(days=jan4.weekday()) + timedelta(weeks=iso_wk - 1)
+
+        # For each calendar month, collect the ISO week keys that touch it
+        # (ordered chronologically so we can assign weekOfMonth ordinals)
+        month_week_order: Dict[int, list] = {}
+        for key, days in iso_week_days.items():
+            for d in days:
+                month_week_order.setdefault(d.month, set()).add(key)
+        for m in month_week_order:
+            month_week_order[m] = sorted(
+                month_week_order[m], key=lambda k: _week_monday(k[0], k[1])
+            )
+
+        # weekOfMonth lookup: (iso_yr, iso_wk, month) -> ordinal 1-based
+        wom_lookup: Dict[tuple, int] = {}
+        for m, keys in month_week_order.items():
+            for idx, key in enumerate(keys):
+                wom_lookup[(key[0], key[1], m)] = idx + 1
+
+        # Build Week node rows and HAS_WEEK relationship rows
+        week_rows = []
+        week_month_rel_rows = []
+        for key in sorted(iso_week_days.keys()):
+            iso_yr, iso_wk = key
+            days_in_year = iso_week_days[key]
+            w_start = _week_monday(iso_yr, iso_wk)
+            w_end   = w_start + timedelta(days=6)
+
+            # Primary month: month with the most days in this calendar year
+            # (ties broken by the earlier month number)
+            month_counts: Dict[int, int] = {}
+            for d in days_in_year:
+                month_counts[d.month] = month_counts.get(d.month, 0) + 1
+            primary_month = max(month_counts, key=lambda m: (month_counts[m], -m))
+
+            wom_primary    = wom_lookup[(iso_yr, iso_wk, primary_month)]
+            is_last_wom    = (wom_primary == len(month_week_order[primary_month]))
+
+            week_rows.append({
+                "id":                f"{iso_yr}-W{iso_wk:02d}",
+                "year":              iso_yr,
+                "weekOfYear":        iso_wk,
+                "weekOfMonth":       wom_primary,
+                "isLastWeekOfMonth": is_last_wom,
+                "startDate":         str(w_start),
+                "endDate":           str(w_end),
+                "month":             primary_month,
+            })
+
+            # One HAS_WEEK relationship per month this week touches
+            for m in set(d.month for d in days_in_year):
+                week_month_rel_rows.append({
+                    "weekId":      f"{iso_yr}-W{iso_wk:02d}",
+                    "monthId":     f"{year}-{m:02d}",
+                    "weekOfMonth": wom_lookup[(iso_yr, iso_wk, m)],
+                })
+
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                UNWIND $rows AS row
+                MERGE (w:Week {id: row.id})
+                SET w.year              = row.year,
+                    w.weekOfYear        = row.weekOfYear,
+                    w.weekOfMonth       = row.weekOfMonth,
+                    w.isLastWeekOfMonth = row.isLastWeekOfMonth,
+                    w.startDate         = date(row.startDate),
+                    w.endDate           = date(row.endDate),
+                    w.month             = row.month
+                """,
+                rows=week_rows,
+            )
+            session.run(
+                """
+                UNWIND $rows AS row
+                MATCH (mo:Month {id: row.monthId})
+                MATCH (w:Week   {id: row.weekId})
+                MERGE (mo)-[:HAS_WEEK {weekOfMonth: row.weekOfMonth}]->(w)
+                """,
+                rows=week_month_rel_rows,
+            )
+        logger.info(f"  Created {len(week_rows)} Weeks")
+
+        # ── 5. Days ──────────────────────────────────────────────────────────
+        day_rows = []
+        for d in all_days:
+            iso_yr, iso_wk, iso_dow = d.isocalendar()
+            last_day_of_month = cal_lib.monthrange(d.year, d.month)[1]
+            day_rows.append({
+                "date":           str(d),
+                "year":           d.year,
+                "month":          d.month,
+                "dayOfMonth":     d.day,
+                "dayOfWeek":      iso_dow,
+                "dayOfYear":      d.timetuple().tm_yday,
+                "weekOfMonth":    wom_lookup.get((iso_yr, iso_wk, d.month), 1),
+                "weekOfYear":     iso_wk,
+                "day_type":       "WEEKEND" if iso_dow >= 6 else "WEEKDAY",
+                "isFirstOfMonth":    d.day == 1,
+                "isLastOfMonth":     d.day == last_day_of_month,
+                "isFirstOfYear":     d.month == 1 and d.day == 1,
+                "isLastOfYear":      d.month == 12 and d.day == 31,
+                "isFirstOfQuarter":  d.day == 1 and d.month in (1, 4, 7, 10),
+                "isLastOfQuarter":   d.day == last_day_of_month and d.month in (3, 6, 9, 12),
+                "monthId":           f"{d.year}-{d.month:02d}",
+                "weekId":         f"{iso_yr}-W{iso_wk:02d}",
+            })
+
+        with self.driver.session(database=self.database) as session:
+            # Create all Day nodes
+            session.run(
+                """
+                UNWIND $rows AS row
+                MERGE (day:Day {date: date(row.date)})
+                SET day.year           = row.year,
+                    day.month          = row.month,
+                    day.dayOfMonth     = row.dayOfMonth,
+                    day.dayOfWeek      = row.dayOfWeek,
+                    day.dayOfYear      = row.dayOfYear,
+                    day.weekOfMonth    = row.weekOfMonth,
+                    day.weekOfYear     = row.weekOfYear,
+                    day.day_type       = row.day_type,
+                    day.isFirstOfMonth = row.isFirstOfMonth,
+                    day.isLastOfMonth  = row.isLastOfMonth,
+                    day.isFirstOfYear     = row.isFirstOfYear,
+                    day.isLastOfYear      = row.isLastOfYear,
+                    day.isFirstOfQuarter  = row.isFirstOfQuarter,
+                    day.isLastOfQuarter   = row.isLastOfQuarter
+                """,
+                rows=day_rows,
+            )
+            # Month -[:HAS_DAY]-> Day
+            session.run(
+                """
+                UNWIND $rows AS row
+                MATCH (mo:Month {id: row.monthId})
+                MATCH (day:Day  {date: date(row.date)})
+                MERGE (mo)-[:HAS_DAY]->(day)
+                """,
+                rows=day_rows,
+            )
+            # Week -[:HAS_DAY]-> Day
+            session.run(
+                """
+                UNWIND $rows AS row
+                MATCH (w:Week  {id: row.weekId})
+                MATCH (day:Day {date: date(row.date)})
+                MERGE (w)-[:HAS_DAY]->(day)
+                """,
+                rows=day_rows,
+            )
+        logger.info(f"  Created {len(day_rows)} Days")
+
+        logger.info(
+            f" Layer 1 calendar loaded for {year}: "
+            f"1 Year + 4 Quarters + 12 Months + {len(week_rows)} Weeks + {len(day_rows)} Days"
+        )
+
     # ========================================================================
     # UTILITY METHODS
     # ========================================================================

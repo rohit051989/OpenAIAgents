@@ -111,6 +111,16 @@ shell_executions:
   confidence: HIGH
   description: "Local data validation script"
 
+- method_fqn: com.companyname.util.BatchUtils.executeAsSeperateProcess(String)
+  tasklet_fqn: com.companyname.batch.tasklet.CustomerProcessingTasklet
+  bean_id: customerProcessingTasklet
+  script_name: customer_user_validation.sh
+  script_path: /opt/batch/scripts/customer_user_validation.sh
+  script_type: BASH
+  remote_host: null  # null means local execution
+  confidence: HIGH
+  description: "Local data validation script"
+
 - method_fqn: com.companyname.service.ShellScriptService.executeShellScript(String)
   script_name: customer_dump.sh
   script_path: /opt/batch/scripts/customer_dump.sh

@@ -90,7 +90,7 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 from classes.DataClasses import (
-    JobDef, StepDef, BeanDef, ClassInfo, MethodDef,
+    JobDef, StepDef,
     ShellScriptExecution, ProcedureCall,
 )
 from classes.KGNodeDefs import ResourceNodeDef
@@ -135,13 +135,16 @@ def _parse_dynamic_jobs_excel(excel_file: str) -> Dict[str, Dict]:
         job_id      = str(int(data['JOB_ID'])) if 'JOB_ID' in data else ""
         step_name   = str(data.get('STEP_NAME', '')).strip()
         step_order  = int(data['STEP_ORDER']) if 'STEP_ORDER' in data else 1
+        step_kind   = str(data.get('STEP_KIND', 'SHELL_EXECUTION')).strip().upper()
         value_param = str(data.get('VALUE_PARAM', '')).strip()
         key_param   = str(data.get('KEY_PARAM', '')).strip().upper()
 
         if job_name not in jobs:
             jobs[job_name] = {"id": job_id, "steps": {}}
         if step_name not in jobs[job_name]["steps"]:
-            jobs[job_name]["steps"][step_name] = {"order": step_order, "params": {}}
+            jobs[job_name]["steps"][step_name] = {
+                "order": step_order, "kind": step_kind, "params": {}
+            }
         if key_param:
             jobs[job_name]["steps"][step_name]["params"][key_param] = value_param
 
@@ -183,26 +186,6 @@ class DynamicIGLoader:
     def close(self):
         if self.driver:
             self.driver.close()
-
-    # ── per-step identity helpers ──────────────────────────────────────────────
-
-    @staticmethod
-    def _step_ident(step_name: str) -> str:
-        """Sanitize a step name into a valid Java identifier suffix."""
-        import re
-        return re.sub(r"[^A-Za-z0-9_]", "_", step_name)
-
-    def _step_fqn(self, step_ident: str) -> str:
-        return f"{self.tasklet_fqn}_{step_ident}"
-
-    def _step_bean_id(self, step_ident: str) -> str:
-        return f"{self.tasklet_bean_id}_{step_ident}"
-
-    def _step_composite_key(self, step_ident: str) -> str:
-        return f"{self._step_bean_id(step_ident)}___{self._step_fqn(step_ident)}"
-
-    def _step_method_fqn(self, step_ident: str) -> str:
-        return f"{self._step_fqn(step_ident)}.execute()"
 
     # ── common-path helpers for shell resource matching ────────────────────────
 
@@ -251,140 +234,6 @@ class DynamicIGLoader:
         )
         return result.single()
 
-    # ── per-step infrastructure nodes ─────────────────────────────────────────
-
-    def _ensure_step_nodes(self, session, step_name: str, has_shell: bool, has_procedure: bool):
-        """
-        Create/update the Bean, JavaClass, and JavaMethod for a single dynamic step.
-        Each step gets its own uniquely-named set so execution arrays remain
-        step-scoped (avoids one giant execute() method accumulating 1000+ entries).
-        """
-        step_ident    = self._step_ident(step_name)
-        step_fqn      = self._step_fqn(step_ident)
-        bean_id       = self._step_bean_id(step_ident)
-        composite_key = self._step_composite_key(step_ident)
-        method_fqn    = self._step_method_fqn(step_ident)
-        class_name    = f"{self.tasklet_class_name}_{step_ident}"
-
-        logger.debug(f"    [IG] Ensuring nodes for step '{step_name}' (ident={step_ident})")
-
-        # Bean
-        bean = BeanDef(
-            bean_id=bean_id,
-            bean_class=step_fqn,
-            bean_class_name=class_name,
-            source_xml_file=self.spring_config_path,
-        )
-        session.run(
-            """
-            MERGE (b:Bean {compositeKey: $compositeKey})
-            ON CREATE SET
-                b.beanId          = $beanId,
-                b.beanClass       = $beanClass,
-                b.simpleClassName = $simpleClassName,
-                b.path            = $path,
-                b.hasSource       = false,
-                b.created_at      = datetime()
-            ON MATCH SET
-                b.beanId = $beanId
-            """,
-            compositeKey=composite_key,
-            beanId=bean.bean_id,
-            beanClass=bean.bean_class,
-            simpleClassName=bean.bean_class_name,
-            path=self.tasklet_path,
-        )
-
-        # JavaClass
-        cls_info = ClassInfo(
-            package=self.tasklet_package,
-            class_name=class_name,
-            fqn=step_fqn,
-            source_path=self.tasklet_path,
-            isShellExecutorClass=has_shell,
-        )
-        session.run(
-            """
-            MERGE (c:JavaClass {fqn: $fqn})
-            ON CREATE SET
-                c.className            = $className,
-                c.package              = $package,
-                c.path                 = $path,
-                c.extends              = '',
-                c.isInterface          = false,
-                c.isDAOClass           = $isDAOClass,
-                c.isShellExecutorClass = $isShellExecutorClass,
-                c.isTestClass          = false,
-                c.method_count         = 1,
-                c.created_at           = datetime()
-            ON MATCH SET
-                c.isShellExecutorClass = $isShellExecutorClass
-            """,
-            fqn=cls_info.fqn,
-            className=cls_info.class_name,
-            package=cls_info.package,
-            path=cls_info.source_path,
-            isDAOClass=cls_info.isDAOClass,
-            isShellExecutorClass=cls_info.isShellExecutorClass,
-        )
-
-        # Bean -[:IMPLEMENTS]-> JavaClass
-        session.run(
-            """
-            MATCH (b:Bean {compositeKey: $compositeKey})
-            MATCH (c:JavaClass {fqn: $fqn})
-            MERGE (b)-[:IMPLEMENTS]->(c)
-            """,
-            compositeKey=composite_key,
-            fqn=step_fqn,
-        )
-
-        # JavaMethod
-        method = MethodDef(
-            class_fqn=step_fqn,
-            method_name="execute",
-            return_type="RepeatStatus",
-            modifiers=["public"],
-        )
-        session.run(
-            """
-            MERGE (m:JavaMethod {fqn: $fqn})
-            ON CREATE SET
-                m.methodName          = $methodName,
-                m.classFqn            = $classFqn,
-                m.returnType          = $returnType,
-                m.signature           = $signature,
-                m.modifiers           = $modifiers,
-                m.sourceCode          = '',
-                m.shellExecutionCount = 0,
-                m.shellExecutions     = [],
-                m.dbOperationCount    = 0,
-                m.procedureCallCount  = 0,
-                m.dbOperations        = [],
-                m.procedureCalls      = [],
-                m.created_at          = datetime()
-            ON MATCH SET
-                m.methodName = $methodName
-            """,
-            fqn=method_fqn,
-            methodName=method.method_name,
-            classFqn=step_fqn,
-            returnType=method.return_type,
-            signature="RepeatStatus execute(StepContribution, ChunkContext)",
-            modifiers=" ".join(method.modifiers),
-        )
-
-        # JavaClass -[:HAS_METHOD]-> JavaMethod
-        session.run(
-            """
-            MATCH (c:JavaClass {fqn: $classFqn})
-            MATCH (m:JavaMethod {fqn: $methodFqn})
-            MERGE (c)-[:HAS_METHOD]->(m)
-            """,
-            classFqn=step_fqn,
-            methodFqn=method_fqn,
-        )
-
     # ── per-job ────────────────────────────────────────────────────────────────
 
     def _create_job(self, session, job_def: JobDef):
@@ -413,19 +262,19 @@ class DynamicIGLoader:
     def _create_step(
         self,
         session,
-        step_def: StepDef,
+        step_name: str,
+        step_kind: str,
         step_order: int,
         shell_execs: List[ShellScriptExecution],
         proc_calls: List[ProcedureCall],
         sql_invocations: List[str],
     ):
         """
-        Write a Step node using StepDef fields.
+        Write a Step node for a dynamic job.
 
-        Step carries ONLY summary execution arrays (stepShellExecutions,
-        stepProcedureCalls and their counts).  Per-resource detail properties
-        like scriptPath, scriptParams, remoteUser, schemaName, manuallyResolved etc. live on
-        Resource nodes — NOT on the Step.
+        Dynamic steps have no Bean / JavaClass / JavaMethod.  All resource
+        links (EXECUTES, INVOKES) go directly from the Step to the Resource.
+        Step carries summary execution arrays only — detail lives on Resource nodes.
         """
         shell_exec_strs = [
             f"{se.execution_method or 'RESOLVED'}:{se.script_name}:{se.confidence}"
@@ -439,23 +288,17 @@ class DynamicIGLoader:
         session.run(
             """
             MERGE (s:Step {name: $name})
-            SET s.stepKind                = $stepKind,
-                s.implBean                = $implBean,
-                s.className               = $className,
-                s.path                    = $path,
-                s.stepOrder               = $stepOrder,
-                s.stepShellExecutions     = $shellExecs,
-                s.stepShellExecutionCount = $shellCount,
+            SET s.stepKind                    = $stepKind,
+                s.stepOrder                   = $stepOrder,
+                s.stepShellExecutions         = $shellExecs,
+                s.stepShellExecutionCount     = $shellCount,
                 s.stepProcedureCalls          = $procCalls,
                 s.stepProcedureCallCount      = $procCount,
                 s.stepSqlFileInvocations      = $sqlFiles,
                 s.stepSqlFileInvocationCount  = $sqlCount
             """,
-            name=step_def.name,
-            stepKind=step_def.step_kind,
-            implBean=step_def.impl_bean,
-            className=step_def.class_name,
-            path=step_def.class_source_path,
+            name=step_name,
+            stepKind=step_kind,
             stepOrder=step_order,
             shellExecs=shell_exec_strs,
             shellCount=len(shell_exec_strs),
@@ -463,32 +306,6 @@ class DynamicIGLoader:
             procCount=len(proc_call_strs),
             sqlFiles=sql_invocations,
             sqlCount=len(sql_invocations),
-        )
-
-        step_ident    = self._step_ident(step_def.name)
-        composite_key = self._step_composite_key(step_ident)
-        step_fqn      = self._step_fqn(step_ident)
-
-        # Step -[:USES_BEAN]-> Bean  (step-specific bean)
-        session.run(
-            """
-            MATCH (s:Step {name: $stepName})
-            MATCH (b:Bean {compositeKey: $compositeKey})
-            MERGE (s)-[:USES_BEAN {role: 'tasklet'}]->(b)
-            """,
-            stepName=step_def.name,
-            compositeKey=composite_key,
-        )
-
-        # Step -[:IMPLEMENTED_BY]-> JavaClass  (step-specific class)
-        session.run(
-            """
-            MATCH (s:Step {name: $stepName})
-            MATCH (c:JavaClass {fqn: $fqn})
-            MERGE (s)-[:IMPLEMENTED_BY]->(c)
-            """,
-            stepName=step_def.name,
-            fqn=step_fqn,
         )
 
     # ── shell resource ─────────────────────────────────────────────────────────
@@ -500,12 +317,11 @@ class DynamicIGLoader:
         shell_exec: ShellScriptExecution,
         script_params: List[str],
         exec_user: str,
-        method_fqn: str,
+        step_name: str,
     ):
         """
-        Create or locate a SHELL_SCRIPT Resource, then link from the step-specific
-        JavaMethod:
-          JavaMethod -[:EXECUTES {scriptType, confidence, executionType}]-> Resource
+        Create or locate a SHELL_SCRIPT Resource, then link from the Step directly:
+          Step -[:EXECUTES {scriptType, confidence, executionType}]-> Resource
 
         Smart-match: if the Excel path contains *common/<Folder>/<File> and an
         existing IG node (Resource or File:ShellScript) has the same
@@ -542,18 +358,18 @@ class DynamicIGLoader:
                 scriptType=shell_exec.script_type,
                 execUser=exec_user,
             )
-            # Link step-specific JavaMethod to the existing node
+            # Link Step directly to the existing node
             session.run(
                 """
-                MATCH (m:JavaMethod {fqn: $methodFqn})
+                MATCH (s:Step {name: $stepName})
                 MATCH (r) WHERE r.path = $path
-                MERGE (m)-[:EXECUTES {
+                MERGE (s)-[:EXECUTES {
                     scriptType:    $scriptType,
                     confidence:    $confidence,
                     executionType: 'REMOTE'
                 }]->(r)
                 """,
-                methodFqn=method_fqn,
+                stepName=step_name,
                 path=existing_path,
                 scriptType=shell_exec.script_type,
                 confidence=shell_exec.confidence,
@@ -587,15 +403,15 @@ class DynamicIGLoader:
             )
             session.run(
                 """
-                MATCH (m:JavaMethod {fqn: $methodFqn})
+                MATCH (s:Step {name: $stepName})
                 MATCH (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
-                MERGE (m)-[:EXECUTES {
+                MERGE (s)-[:EXECUTES {
                     scriptType:    $scriptType,
                     confidence:    $confidence,
                     executionType: 'REMOTE'
                 }]->(r)
                 """,
-                methodFqn=method_fqn,
+                stepName=step_name,
                 name=resource.name,
                 scriptType=shell_exec.script_type,
                 confidence=shell_exec.confidence,
@@ -758,12 +574,12 @@ class DynamicIGLoader:
         session,
         resource: ResourceNodeDef,
         proc_call: ProcedureCall,
-        method_fqn: str,
+        step_name: str,
     ):
         """
         Create a PROCEDURE/FUNCTION Resource with procedure detail properties, then
-        link from the step-specific JavaMethod:
-          JavaMethod -[:INVOKES {databaseType, confidence}]-> Resource
+        link from the Step directly:
+          Step -[:INVOKES {databaseType, confidence}]-> Resource
         """
         resource_type = "FUNCTION" if proc_call.is_function else "PROCEDURE"
         session.run(
@@ -789,18 +605,62 @@ class DynamicIGLoader:
         )
         session.run(
             """
-            MATCH (m:JavaMethod {fqn: $methodFqn})
+            MATCH (s:Step {name: $stepName})
             MATCH (r:Resource {name: $name, type: $rtype})
-            MERGE (m)-[:INVOKES {
+            MERGE (s)-[:INVOKES {
                 databaseType: $dbType,
                 confidence:   $confidence
             }]->(r)
             """,
-            methodFqn=method_fqn,
+            stepName=step_name,
             name=resource.name,
             rtype=resource_type,
             dbType=proc_call.database_type,
             confidence=proc_call.confidence,
+        )
+
+    # ── job-step structure ─────────────────────────────────────────────────────
+
+    def _create_file_resource_and_link(
+        self,
+        session,
+        file_name: str,
+        file_dir: str,
+        step_name: str,
+        transfer_type: str = "FTP_DOWNLOAD",
+    ):
+        """
+        Create a FILE Resource for FTP/file-transfer steps and link from the Step:
+          Step -[:TRANSFERS {transferType}]-> Resource(FILE)
+        """
+        file_path = f"{file_dir.rstrip('/')}/{file_name}" if file_dir else file_name
+        session.run(
+            """
+            MERGE (r:Resource {name: $name, type: 'FILE'})
+            ON CREATE SET
+                r.id           = $id,
+                r.enabled      = true,
+                r.filePath     = $filePath,
+                r.foundInRepo  = false
+            ON MATCH SET
+                r.filePath     = COALESCE(r.filePath, $filePath)
+            """,
+            name=file_name,
+            id=f"RES_FILE_{uuid.uuid4().hex[:8].upper()}",
+            filePath=file_path,
+            transferType=transfer_type,
+        )
+        session.run(
+            """
+            MATCH (s:Step {name: $stepName})
+            MATCH (r:Resource {name: $name, type: 'FILE'})
+            MERGE (s)-[:TRANSFERS {
+                transferType: $transferType
+            }]->(r)
+            """,
+            stepName=step_name,
+            name=file_name,
+            transferType=transfer_type,
         )
 
     # ── job-step structure ─────────────────────────────────────────────────────
@@ -836,39 +696,6 @@ class DynamicIGLoader:
                     """,
                     srcName=ordered[i][0], dstName=ordered[i + 1][0],
                 )
-
-    # ── per-step execute() method update ─────────────────────────────────────
-
-    def _update_step_method_executions(
-        self,
-        session,
-        step_ident: str,
-        shell_execs: List[ShellScriptExecution],
-        proc_calls: List[ProcedureCall],
-    ):
-        """Set this step's execute() shellExecutions and procedureCalls arrays."""
-        shell_strs = [
-            f"{se.execution_method or 'RESOLVED'}:{se.script_name}:{se.confidence}"
-            for se in shell_execs if se.script_name
-        ]
-        proc_strs = [
-            f"{pc.database_type}:{pc.procedure_name}:{pc.confidence}"
-            for pc in proc_calls if pc.procedure_name
-        ]
-        session.run(
-            """
-            MATCH (m:JavaMethod {fqn: $fqn})
-            SET m.shellExecutions     = $shellExecs,
-                m.shellExecutionCount = $shellCount,
-                m.procedureCalls      = $procCalls,
-                m.procedureCallCount  = $procCount
-            """,
-            fqn=self._step_method_fqn(step_ident),
-            shellExecs=shell_strs,
-            shellCount=len(shell_strs),
-            procCalls=proc_strs,
-            procCount=len(proc_strs),
-        )
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -912,125 +739,120 @@ class DynamicIGLoader:
                     params     = step_raw.get("params", {})
                     step_order = step_raw.get("order", 1)
 
-                    step_ident         = self._step_ident(step_name)
-                    step_method_fqn    = self._step_method_fqn(step_ident)
-                    step_has_shell     = "FILE" in params
-                    step_has_procedure = "PROC_NAME" in params
-
-                    # Ensure per-step Bean, JavaClass, JavaMethod
-                    self._ensure_step_nodes(
-                        session, step_name, step_has_shell, step_has_procedure
-                    )
-
+                    dynamic_step_kind    = step_raw.get("kind", "SHELL_EXECUTION")
                     step_shell_execs: List[ShellScriptExecution] = []
                     step_proc_calls:  List[ProcedureCall] = []
                     step_sql_invocations: List[str] = []
 
-                    # ── shell execution ──────────────────────────────────────
-                    script_file = params.get("FILE", "")
-                    if script_file:
-                        script_dir         = params.get("DIR",  "")
-                        exec_user          = params.get("USER", "")
-                        script_type        = _detect_script_type(script_file)
-                        script_path        = (
-                            f"{script_dir.rstrip('/')}/{script_file}"
-                            if script_dir else script_file
-                        )
-                        # PARAMS split by whitespace → stored as a list on Resource
-                        raw_params         = params.get("PARAMS", "")
-                        script_params_list = raw_params.split() if raw_params else []
-
-                        sh_exec = ShellScriptExecution(
-                            script_name=script_file,
-                            method_fqn=step_method_fqn,
-                            script_type=script_type,
-                            execution_method="RESOLVED",
-                            confidence="HIGH",
-                        )
-                        step_shell_execs.append(sh_exec)
-
-                        shell_res = ResourceNodeDef(
-                            id=f"RES_SHELL_{uuid.uuid4().hex[:8].upper()}",
-                            name=script_file,
-                            type="SHELL_SCRIPT",
-                            enabled=True,
-                            foundInRepo=False,
-                            resourceLocation=script_path,
-                        )
-                        shell_existing_path = self._create_shell_resource_and_link(
-                            session, shell_res, sh_exec,
-                            script_params=script_params_list,
-                            exec_user=exec_user,
-                            method_fqn=step_method_fqn,
-                        )
-                        total_shell += 1
-
-                        # Parse SQL invocations from shell script if file is in the IG
-                        abs_shell_path = self._to_absolute_path(shell_existing_path) if shell_existing_path else None
-                        if abs_shell_path:
-                            try:
-                                shell_content = Path(abs_shell_path).read_text(encoding='utf-8', errors='ignore')
-                                sql_paths_found = self._extract_sql_invocations(shell_content)
-                                if sql_paths_found:
-                                    found_sql = self._process_sql_invocations(
-                                        session, sql_paths_found, shell_existing_path, script_file
-                                    )
-                                    step_sql_invocations.extend(found_sql)
-                                    logger.debug(
-                                        f"    [IG] Step '{step_name}': "
-                                        f"{len(found_sql)} SQL invocation(s) via shell"
-                                    )
-                            except Exception as e:
-                                logger.debug(f"    [IG] Could not parse SQL from '{abs_shell_path}': {e}")
-
-                    # ── procedure call ───────────────────────────────────────
-                    proc_name = params.get("PROC_NAME", "")
-                    if proc_name:
-                        proc_schema  = params.get("PROC_SCHEMA",  "UNKNOWN")
-                        proc_package = params.get("PROC_PACKAGE", "")
-                        pc = ProcedureCall(
-                            procedure_name=proc_name.upper(),
-                            database_type="ORACLE",
-                            method_fqn=step_method_fqn,
-                            schema_name=proc_schema.upper(),
-                            package_name=proc_package.upper() if proc_package else None,
-                            confidence="HIGH",
-                        )
-                        step_proc_calls.append(pc)
-
-                        proc_res = ResourceNodeDef(
-                            id=f"RES_PROC_{uuid.uuid4().hex[:8].upper()}",
-                            name=pc.procedure_name,
-                            type="FUNCTION" if pc.is_function else "PROCEDURE",
-                            enabled=True,
-                            foundInRepo=False,
-                            schemaName=pc.schema_name or "",
-                            packageName=pc.package_name or "",
-                        )
-                        self._create_procedure_resource_and_link(
-                            session, proc_res, pc,
-                            method_fqn=step_method_fqn,
-                        )
-                        total_proc += 1
-
-                    # ── step node (after resources so links can be created) ──
-                    step_def = StepDef(
-                        name=step_name,
-                        step_kind="TASKLET",
-                        impl_bean=self._step_bean_id(step_ident),
-                        class_name=self._step_fqn(step_ident),
-                        class_source_path=self.tasklet_path,
-                    )
+                    # ── Step node FIRST (resource links MATCH it) ───────────
                     self._create_step(
-                        session, step_def, step_order,
-                        step_shell_execs, step_proc_calls,
+                        session, step_name, dynamic_step_kind,
+                        step_order, step_shell_execs, step_proc_calls,
                         step_sql_invocations,
                     )
 
-                    # Update this step's execute() with its own execution summary
-                    self._update_step_method_executions(
-                        session, step_ident, step_shell_execs, step_proc_calls
-                    )
+                    # ── Resources depend on STEP_KIND enum ──────────────────
+                    if dynamic_step_kind == "SHELL_EXECUTION":
+                        script_file = params.get("FILE", "")
+                        if script_file:
+                            script_dir         = params.get("DIR",  "")
+                            exec_user          = params.get("USER", "")
+                            script_type        = _detect_script_type(script_file)
+                            script_path        = (
+                                f"{script_dir.rstrip('/')}/{script_file}"
+                                if script_dir else script_file
+                            )
+                            raw_params         = params.get("PARAMS", "")
+                            script_params_list = raw_params.split() if raw_params else []
+
+                            sh_exec = ShellScriptExecution(
+                                script_name=script_file,
+                                script_type=script_type,
+                                execution_method="RESOLVED",
+                                confidence="HIGH",
+                                method_fqn="NA"
+                            )
+                            step_shell_execs.append(sh_exec)
+
+                            shell_res = ResourceNodeDef(
+                                id=f"RES_SHELL_{uuid.uuid4().hex[:8].upper()}",
+                                name=script_file,
+                                type="SHELL_SCRIPT",
+                                enabled=True,
+                                foundInRepo=False,
+                                resourceLocation=script_path,
+                            )
+                            shell_existing_path = self._create_shell_resource_and_link(
+                                session, shell_res, sh_exec,
+                                script_params=script_params_list,
+                                exec_user=exec_user,
+                                step_name=step_name,
+                            )
+                            total_shell += 1
+
+                            # Parse SQL invocations from shell script if found in IG
+                            abs_shell_path = self._to_absolute_path(shell_existing_path) if shell_existing_path else None
+                            if abs_shell_path:
+                                try:
+                                    shell_content = Path(abs_shell_path).read_text(encoding='utf-8', errors='ignore')
+                                    sql_paths_found = self._extract_sql_invocations(shell_content)
+                                    if sql_paths_found:
+                                        found_sql = self._process_sql_invocations(
+                                            session, sql_paths_found, shell_existing_path, script_file
+                                        )
+                                        step_sql_invocations.extend(found_sql)
+                                        logger.debug(
+                                            f"    [IG] Step '{step_name}': "
+                                            f"{len(found_sql)} SQL invocation(s) via shell"
+                                        )
+                                except Exception as e:
+                                    logger.debug(f"    [IG] Could not parse SQL from '{abs_shell_path}': {e}")
+                        else:
+                            logger.debug(
+                                f"    [IG] Step '{step_name}' (SHELL_EXECUTION) "
+                                f"has no FILE param — step created with no shell resource."
+                            )
+
+                    elif dynamic_step_kind == "DO_NOTHING":
+                        logger.debug(
+                            f"    [IG] Step '{step_name}' is DO_NOTHING — no resources created."
+                        )
+
+                    elif dynamic_step_kind == "FTP_FILE_DOWNLOAD":
+                        file_name = params.get("FILE", "")
+                        if file_name:
+                            file_dir = params.get("DIR", "")
+                            self._create_file_resource_and_link(
+                                session,
+                                file_name=file_name,
+                                file_dir=file_dir,
+                                step_name=step_name,
+                                transfer_type="FTP_DOWNLOAD",
+                            )
+                            logger.debug(
+                                f"    [IG] Step '{step_name}' (FTP_FILE_DOWNLOAD): "
+                                f"FILE resource '{file_name}' linked."
+                            )
+                        else:
+                            logger.debug(
+                                f"    [IG] Step '{step_name}' (FTP_FILE_DOWNLOAD) "
+                                f"has no FILE param — step created with no resource."
+                            )
+
+                    else:
+                        logger.warning(
+                            f"    [IG] Unknown STEP_KIND '{dynamic_step_kind}' for step "
+                            f"'{step_name}' in job '{job_name}' — step created with no "
+                            f"resource links. Add handling in dynamic_ig_loader.py if needed."
+                        )
+
+                    # ── Update step summary arrays after resource processing ─
+                    if step_shell_execs or step_sql_invocations:
+                        self._create_step(
+                            session, step_name, dynamic_step_kind,
+                            step_order, step_shell_execs, step_proc_calls,
+                            step_sql_invocations,
+                        )
 
                 self._create_job_step_relationships(session, job_name, job_raw["steps"])
 
