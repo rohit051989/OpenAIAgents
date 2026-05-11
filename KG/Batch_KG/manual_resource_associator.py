@@ -103,6 +103,9 @@ from dotenv import load_dotenv
 
 import logging
 
+# Import DB Operation Consistency Validator
+from db_operation_consistency_validator import validate_and_repair_db_operations
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -1938,9 +1941,40 @@ def main():
     
     try:
         associator.process_config_file(manual_mappings_file_path)
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # AFTER manual association completes, fix DB operation consistency issues
+        # ─────────────────────────────────────────────────────────────────────────
+        logger.info("\n" + "=" * 80)
+        logger.info("PHASE 2: DB Operation Consistency Validation & Repair")
+        logger.info("=" * 80)
+        logger.info("Checking for orphaned DB_OPERATION relationships...")
+        logger.info("(This happens when enricher re-runs on already-enriched methods)")
+        logger.info("=" * 80 + "\n")
+        
+        # Run validator to detect and repair orphaned relationships
+        stats = validate_and_repair_db_operations(
+            config_path=config_file_path,
+            repair=True,
+            logger_instance=logger
+        )
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("PHASE 2 COMPLETE: DB Operation Consistency")
+        logger.info("=" * 80)
+        logger.info(f"  Orphaned methods found:        {stats['orphaned_methods']}")
+        logger.info(f"  Orphaned relationships:        {stats['orphaned_relationships']}")
+        logger.info(f"  Consistency violations:        {stats['consistency_violations']}")
+        logger.info(f"  Methods rebuilt:               {stats['rebuilt_methods']}")
+        logger.info("=" * 80 + "\n")
+        
+        if stats['orphaned_methods'] > 0:
+            logger.warning(f"⚠️  Fixed {stats['orphaned_methods']} methods with orphaned relationships")
+        else:
+            logger.info("✓ No orphaned relationships found - Information Graph is consistent")
+        
     finally:
         associator.close()
-
 
 if __name__ == "__main__":
     main()
