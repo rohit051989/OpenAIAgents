@@ -1952,7 +1952,9 @@ class Neo4jLoader:
           id                - ruleId from the JobRules tab
           name              - Human-readable label (informational only)
           contextType       - 'JobGroup' or 'ScheduleInstanceContext'
-          requiresContextId - id of the JobGroup or ScheduleInstanceContext node
+                    requiresContextId - id of the JobGroup or ScheduleInstanceContext node;
+                                                            supports comma-separated IDs in a single row
+                                                            (e.g. "JG_EOD,JG_MID")
           Allowed           - 'Y' → ALLOWS relationship, 'N' → DENIES relationship
           enabled           - Whether this association row is active
           action            - For DENIES only: what to do when the rule fires.
@@ -1979,13 +1981,13 @@ class Neo4jLoader:
 
             rule_id      = str(data.get('id', '') or '').strip()
             context_type = str(data.get('contextType', '') or '').strip()
-            context_id   = str(data.get('requiresContextId', '') or '').strip()
+            raw_context_ids = str(data.get('requiresContextId', '') or '').strip()
             allowed      = str(data.get('Allowed', '') or '').strip().upper()
 
-            if not rule_id or not context_type or not context_id:
+            if not rule_id or not context_type or not raw_context_ids:
                 logger.warning(
                     f"  Skipping incomplete row: ruleId={rule_id!r}, "
-                    f"contextType={context_type!r}, contextId={context_id!r}"
+                    f"contextType={context_type!r}, contextId={raw_context_ids!r}"
                 )
                 continue
 
@@ -1998,23 +2000,33 @@ class Neo4jLoader:
 
             action = str(data.get('action') or 'SKIP').strip()
 
-            if allowed == 'Y':
-                allows_rows.append({
-                    'ruleId':      rule_id,
-                    'contextType': context_type,
-                    'contextId':   context_id,
-                })
-            elif allowed == 'N':
-                denies_rows.append({
-                    'ruleId':      rule_id,
-                    'contextType': context_type,
-                    'contextId':   context_id,
-                    'action':      action,
-                })
-            else:
+            # Allow a single row to target multiple contexts, e.g. "JG_EOD,JG_MID"
+            context_ids = [cid.strip() for cid in raw_context_ids.split(',') if cid.strip()]
+            if not context_ids:
                 logger.warning(
-                    f"  Unknown Allowed value {allowed!r} for ruleId={rule_id!r} — skipping"
+                    f"  No valid requiresContextId values for ruleId={rule_id!r} — skipping"
                 )
+                continue
+
+            for context_id in context_ids:
+                if allowed == 'Y':
+                    allows_rows.append({
+                        'ruleId':      rule_id,
+                        'contextType': context_type,
+                        'contextId':   context_id,
+                    })
+                elif allowed == 'N':
+                    denies_rows.append({
+                        'ruleId':      rule_id,
+                        'contextType': context_type,
+                        'contextId':   context_id,
+                        'action':      action,
+                    })
+                else:
+                    logger.warning(
+                        f"  Unknown Allowed value {allowed!r} for ruleId={rule_id!r} — skipping"
+                    )
+                    break
 
         allows_created = 0
         denies_created = 0
