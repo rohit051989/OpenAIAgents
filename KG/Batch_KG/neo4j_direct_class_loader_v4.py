@@ -1793,13 +1793,21 @@ class Neo4jLoader:
         CalendarPattern node already exists.
 
         Expected columns: id, date, region, name
-        Region codes:
-          US  — United States Federal holidays only
-          CA  — Canadian Federal and major provincial holidays only
-          ALL — Universal financial market closures (applies to every region)
+                Region is usually explicit (e.g. US, CA, UK, IN).
+                Optional: region='ALL' can be used for truly global market closures.
 
-        Querying: always combine ALL + the specific region so that global
-        holidays are automatically included without duplicating rows.
+                Important semantics:
+                - The same holiday name may appear on different dates in different years.
+                - The same calendar date may have multiple holiday rows for the same
+                    region when more than one holiday falls on that day.
+                - The same holiday (e.g. New Year's Day) can be entered separately for
+                    each region, and/or once under ALL if the closure is truly global.
+
+                Loader behavior:
+                - MERGE is done on (region, name, date-via-Day node) so re-runs are
+                    idempotent.
+                - Multiple holidays on the same date for the same region are supported
+                    because each edge is keyed by both region and holiday name.
         """
         df = pd.read_excel(excel_file, 'Holidays')
         logger.info(f"Loading {len(df)} holiday entries from Excel...")
@@ -1848,7 +1856,7 @@ class Neo4jLoader:
           ruleId          - Unique identifier (e.g. RULE_1ST_SUNDAY)
           name            - Human-readable name
           matchExpression - CalendarPattern.matchExpression to link to
-          region          - Region code (US, CA, ALL) or blank for no region restriction
+                    region          - Region code (US, CA, UK, IN, etc.) or blank for no region restriction
           params          - JSON object of pattern-specific parameters
           isActive        - true / false
           description     - Human-readable description
@@ -1857,7 +1865,7 @@ class Neo4jLoader:
           NTH_DOW_MONTH        : {"dayOfWeek": 7, "occurrences": [1]}
           NTH_DOWS_MONTH       : {"daysOfWeek": [1,2,3,4,5], "occurrences": [1,2,3,4,5]}
           NTH_FIRST_BIZ_MONTH  : {"occurrences": [1,2,3,4,5,6,7,8,9,10,11,12]}
-          HOLIDAY              : {} (region drives the filter at query time)
+                    HOLIDAY              : {} (region drives the holiday lookup at query time)
         """
         df = pd.read_excel(excel_file, 'JobRules')
         logger.info(f"Loading {len(df)} job rule(s) from Excel...")

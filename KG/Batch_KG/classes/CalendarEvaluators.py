@@ -12,17 +12,37 @@ in the Neo4j knowledge graph.  The agentic backend calls them via:
 runtime_context is built by the agent from the incoming request and always
 contains at minimum:
     date    (str YYYY-MM-DD or datetime.date)  — the candidate date
-    region  (str)                              — e.g. 'US', 'CA', 'ALL'
+    region  (str)                              — e.g. 'US', 'CA', 'UK'
 
 rule.params (configParams) are baked in by the rule author and vary per pattern.
 
 All functions accept **kwargs so that extra context keys never cause TypeErrors.
+
+Parameter design
+----------------
+weekOccurrences  — used in DOW patterns: which occurrence of the weekday within
+                   the month (1 = first, 2 = second, … 5 = fifth).  A list so
+                   multiple occurrences can be matched by one rule.
+
+months           — used in month-scoped patterns: which months to apply to
+                   (1=Jan … 12=Dec).  Empty list / null means ALL months.
+
+quarters         — used in quarter-scoped patterns: which quarters (1-4).
+                   Empty list / null means ALL quarters.
+
+bizDayFromStart  — list of BD ordinals from the START of the period.
+                   [1] = first BD, [4] = 4th BD, [1,2] = 1st or 2nd BD.
+
+bizDayFromEnd    — list of BD ordinals from the END of the period.
+                   [1] = last BD, [2] = 2nd-to-last BD.
+
+daysOfMonth      — list of calendar day numbers for DOM pattern (e.g. [1, 15]).
 """
 
 from __future__ import annotations
 
 import calendar as _cal
-from datetime import date as _date
+from datetime import date as _date, timedelta as _td
 from typing import Union
 
 # ---------------------------------------------------------------------------
@@ -50,6 +70,35 @@ def _quarter_months(quarter: int) -> tuple[int, int]:
     return first, first + 2
 
 
+def _matches_months(d: _date, months: list) -> bool:
+    """True when months is empty/null (all months) or d.month is in the list."""
+    if not months:
+        return True
+    return d.month in months
+
+
+def _matches_quarters(d: _date, quarters: list) -> bool:
+    """True when quarters is empty/null (all quarters) or d's quarter is in the list."""
+    if not quarters:
+        return True
+    return _quarter_of(d) in quarters
+
+
+def _holiday_region_match(entry_region: str, rule_region: str) -> bool:
+    """
+    Region matching policy for holiday evaluators.
+
+    - rule_region='US' matches US + ALL
+    - rule_region='CA' matches CA + ALL
+    - rule_region='ALL' matches ALL only
+    """
+    er = str(entry_region or "").strip().upper()
+    rr = str(rule_region or "").strip().upper()
+    if rr == "ALL":
+        return er == "ALL"
+    return er in (rr, "ALL")
+
+
 # ---------------------------------------------------------------------------
 # Core evaluators
 # ---------------------------------------------------------------------------
@@ -57,39 +106,52 @@ def _quarter_months(quarter: int) -> tuple[int, int]:
 def evaluate_nth_dow_month(
     date: Union[str, _date],
     dayOfWeek: int,
-    occurrences: list[int],
+    weekOccurrences: list[int],
+    months: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
-    Match the Nth occurrence(s) of a specific weekday within the month.
+    Match the Nth occurrence(s) of a specific weekday within the month,
+    optionally restricted to specific months.
 
     Args:
-        date:        Candidate date.
-        dayOfWeek:   ISO weekday (1=Mon … 7=Sun).
-        occurrences: List of occurrence indices to match, e.g. [1] = first,
-                     [-1] = last (not supported yet — use positive integers).
+        date:            Candidate date.
+        dayOfWeek:       ISO weekday (1=Mon … 7=Sun).
+        weekOccurrences: Which occurrence(s) of that weekday in the month.
+                         e.g. [1] = first, [1,2] = first or second occurrence.
+        months:          Restrict to these month numbers (1-12).
+                         Empty list / null = all months.
     """
     d = _to_date(date)
+    if not _matches_months(d, months or []):
+        return False
     if d.isoweekday() != dayOfWeek:
         return False
-    week_of_month = (d.day - 1) // 7 + 1
-    return week_of_month in occurrences
+    occurrence = (d.day - 1) // 7 + 1
+    return occurrence in weekOccurrences
 
 
 def evaluate_nth_multi_dow_month(
     date: Union[str, _date],
     daysOfWeek: list[int],
-    occurrences: list[int],
+    weekOccurrences: list[int],
+    months: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
-    Match any of the first N weekdays (Mon-Fri) of the month.
+    Match any of the given weekday(s) on their Nth occurrence within the month,
+    optionally restricted to specific months.
 
-    Counts Mon-Fri occurrences only; skips weekends.
-    e.g. occurrences=[1,2,3,4,5] + daysOfWeek=[1,2,3,4,5] → first 5 business
-    days of the month.
+    Args:
+        date:            Candidate date.
+        daysOfWeek:      ISO weekdays to match (e.g. [1,2,3,4,5] = Mon–Fri).
+        weekOccurrences: Which occurrence(s) of those days in the month.
+                         e.g. [1,2,3,4,5] = every occurrence across all weeks.
+        months:          Restrict to these months (1-12). Empty = all months.
     """
     d = _to_date(date)
+    if not _matches_months(d, months or []):
+        return False
     if d.isoweekday() not in daysOfWeek:
         return False
     # Count qualifying weekdays from the 1st up to and including d
@@ -98,52 +160,77 @@ def evaluate_nth_multi_dow_month(
         for day in range(1, d.day + 1)
         if _date(d.year, d.month, day).isoweekday() in daysOfWeek
     )
-    return count in occurrences
+    return count in weekOccurrences
 
 
-def evaluate_nth_dom_month(
+def evaluate_nth_dom(
     date: Union[str, _date],
-    dayOfMonth: int,
+    daysOfMonth: list[int],
+    months: list[int] | None = None,
     **kwargs,
 ) -> bool:
-    """Match a fixed day-of-month (e.g. the 15th of every month)."""
+    """
+    Match specific calendar day number(s), optionally restricted to specific months.
+
+    Args:
+        date:        Candidate date.
+        daysOfMonth: Calendar day numbers to match (e.g. [1, 15] = 1st and 15th).
+        months:      Restrict to these months (1-12). Empty = all months.
+    """
     d = _to_date(date)
-    return d.day == dayOfMonth
+    if not _matches_months(d, months or []):
+        return False
+    return d.day in daysOfMonth
 
 
 def evaluate_nth_first_biz_month(
     date: Union[str, _date],
-    occurrences: list[int],
+    bizDayFromStart: list[int],
+    months: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
-    Match the Nth business day(s) from the start of the month.
+    Match the Nth business day(s) from the START of the month.
 
-    Business day = Monday-Friday (holidays not considered here; use a
-    compound rule or the HOLIDAY deny-rule to block holidays separately).
+    Args:
+        date:            Candidate date.
+        bizDayFromStart: Which BD ordinal(s) from start to match.
+                         [1] = 1st BD, [4] = 4th BD, [1,2] = 1st or 2nd BD.
+        months:          Restrict to these months (1-12). Empty = all months.
+
+    Business day = Mon–Fri. To exclude holidays, add a DENIES rule on HOLIDAY.
     """
     d = _to_date(date)
-    if d.isoweekday() > 5:          # weekend — never a business day
+    if not _matches_months(d, months or []):
+        return False
+    if d.isoweekday() > 5:
         return False
     biz_count = sum(
         1
         for day in range(1, d.day + 1)
         if _date(d.year, d.month, day).isoweekday() <= 5
     )
-    return biz_count in occurrences
+    return biz_count in bizDayFromStart
 
 
 def evaluate_nth_last_biz_month(
     date: Union[str, _date],
-    occurrences: list[int],
+    bizDayFromEnd: list[int],
+    months: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
     Match the Nth business day(s) from the END of the month.
 
-    occurrence=1 → last business day, occurrence=2 → second-to-last, etc.
+    Args:
+        date:          Candidate date.
+        bizDayFromEnd: Which BD ordinal(s) from end to match.
+                       [1] = last BD, [2] = 2nd-to-last BD.
+        months:        Restrict to these months (1-12). Empty = all months.
     """
     d = _to_date(date)
+    if not _matches_months(d, months or []):
+        return False
     if d.isoweekday() > 5:
         return False
     last_day = _last_day_of_month(d.year, d.month)
@@ -152,20 +239,26 @@ def evaluate_nth_last_biz_month(
         for day in range(d.day, last_day + 1)
         if _date(d.year, d.month, day).isoweekday() <= 5
     )
-    return biz_count in occurrences
+    return biz_count in bizDayFromEnd
 
 
 def evaluate_nth_first_biz_quarter(
     date: Union[str, _date],
-    occurrences: list[int],
+    bizDayFromStart: list[int],
+    quarters: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
-    Match the Nth business day(s) from the start of the quarter.
+    Match the Nth business day(s) from the START of the quarter.
 
-    Counts Monday-Friday from the first day of the quarter's first month.
+    Args:
+        date:            Candidate date.
+        bizDayFromStart: Which BD ordinal(s) from start to match. [1] = first BD.
+        quarters:        Restrict to these quarters (1-4). Empty = all quarters.
     """
     d = _to_date(date)
+    if not _matches_quarters(d, quarters or []):
+        return False
     if d.isoweekday() > 5:
         return False
     q = _quarter_of(d)
@@ -178,34 +271,40 @@ def evaluate_nth_first_biz_quarter(
             biz_count += 1
         if cur == d:
             break
-        from datetime import timedelta
-        cur += timedelta(days=1)
-    return biz_count in occurrences
+        cur += _td(days=1)
+    return biz_count in bizDayFromStart
 
 
 def evaluate_nth_last_biz_quarter(
     date: Union[str, _date],
-    occurrences: list[int],
+    bizDayFromEnd: list[int],
+    quarters: list[int] | None = None,
     **kwargs,
 ) -> bool:
     """
     Match the Nth business day(s) from the END of the quarter.
 
-    occurrence=1 → last business day of the quarter.
+    Args:
+        date:          Candidate date.
+        bizDayFromEnd: Which BD ordinal(s) from end to match. [1] = last BD.
+        quarters:      Restrict to these quarters (1-4). Empty = all quarters.
     """
     d = _to_date(date)
+    if not _matches_quarters(d, quarters or []):
+        return False
     if d.isoweekday() > 5:
         return False
     q = _quarter_of(d)
     _, last_month = _quarter_months(q)
     last_day_of_q = _last_day_of_month(d.year, last_month)
     quarter_end = _date(d.year, last_month, last_day_of_q)
-    biz_count = sum(
-        1
-        for offset in range((quarter_end - d).days + 1)
-        if (d + __import__('datetime').timedelta(days=offset)).isoweekday() <= 5
-    )
-    return biz_count in occurrences
+    biz_count = 0
+    cur = d
+    while cur <= quarter_end:
+        if cur.isoweekday() <= 5:
+            biz_count += 1
+        cur += _td(days=1)
+    return biz_count in bizDayFromEnd
 
 
 def evaluate_first_biz_year(
@@ -216,11 +315,10 @@ def evaluate_first_biz_year(
     d = _to_date(date)
     if d.isoweekday() > 5:
         return False
-    for day in range(1, d.day + 1 if d.month == 1 else 0):
-        candidate = _date(d.year, 1, day)
-        if candidate.isoweekday() <= 5:
-            return candidate == d
-    return False
+    cur = _date(d.year, 1, 1)
+    while cur.isoweekday() > 5:
+        cur += _td(days=1)
+    return cur == d
 
 
 def evaluate_last_biz_year(
@@ -231,38 +329,57 @@ def evaluate_last_biz_year(
     d = _to_date(date)
     if d.isoweekday() > 5:
         return False
-    # Walk backward from Dec 31 to find the first weekday
-    last_day = _date(d.year, 12, 31)
-    candidate = last_day
-    while candidate.isoweekday() > 5:
-        from datetime import timedelta
-        candidate -= timedelta(days=1)
-    return candidate == d
+    cur = _date(d.year, 12, 31)
+    while cur.isoweekday() > 5:
+        cur -= _td(days=1)
+    return cur == d
 
 
 def evaluate_holiday(
     date: Union[str, _date],
     region: str,
-    holiday_set: set[str] | None = None,
+    holiday_set: set[str] | list[dict] | None = None,
     **kwargs,
 ) -> bool:
     """
     True if the date is a holiday in the given region.
 
-    The agent resolves the holiday set from the graph before calling evaluators:
+    Holiday rows are primarily region-specific. Optionally, global closures can
+    be modeled using region='ALL' rows.
+
+    The agent may resolve holiday data in either of these shapes before calling
+    evaluators:
+
         holiday_set = {edge.date for edge in pattern.IS_HOLIDAY_ON
-                       if edge.region in (region, 'ALL')}
-    and passes it as runtime_context['holiday_set'].
+                   if edge.region in (region, 'ALL')}
+
+    or:
+
+        holiday_set = [
+            {"date": edge.date, "region": edge.region, "name": edge.name}
+            for edge in pattern.IS_HOLIDAY_ON
+            if edge.region in (region, 'ALL')
+        ]
 
     Args:
         date:        Candidate date.
-        region:      Region code (e.g. 'US', 'CA').
-        holiday_set: Set of ISO date strings pre-fetched by the agent.
+        region:      Region code (e.g. 'US', 'CA', 'UK', 'ALL').
+        holiday_set: Either a set of ISO date strings or a list of dict rows
+                     pre-fetched by the agent.
     """
     if not holiday_set:
         return False
     d = _to_date(date)
-    return d.isoformat() in holiday_set
+    d_str = d.isoformat()
+    if isinstance(holiday_set, set):
+        return d_str in holiday_set
+    for entry in holiday_set:
+        if not _holiday_region_match(entry.get("region", ""), region):
+            continue
+        if entry.get("date", "") != d_str:
+            continue
+        return True
+    return False
 
 
 def evaluate_graph_property(
@@ -401,7 +518,7 @@ def evaluate_named_holiday(
 
     Args:
         date:          Candidate date.
-        region:        Region code (e.g. 'US', 'CA').
+        region:        Region code (e.g. 'US', 'CA', 'UK', 'ALL').
         holidayNames:  List of exact holiday names as stored in IS_HOLIDAY_ON.name.
                        Stored in JobRule.params as:
                          {"holidayNames": ["Christmas Day", "New Year's Day"]}
@@ -414,7 +531,7 @@ def evaluate_named_holiday(
     d_str = _to_date(date).isoformat()
     name_set = set(holidayNames)
     for entry in holiday_set:
-        if entry.get("region", "") not in (region, "ALL"):
+        if not _holiday_region_match(entry.get("region", ""), region):
             continue
         if entry.get("date", "") != d_str:
             continue
@@ -461,17 +578,22 @@ def evaluate_specific_date(
 # ---------------------------------------------------------------------------
 
 EVALUATOR_REGISTRY: dict[str, callable] = {
-    "nth_dow_month":           evaluate_nth_dow_month,
-    "nth_multi_dow_month":     evaluate_nth_multi_dow_month,
-    "nth_dom_month":           evaluate_nth_dom_month,
-    "nth_first_biz_month":     evaluate_nth_first_biz_month,
-    "nth_last_biz_month":      evaluate_nth_last_biz_month,
-    "nth_first_biz_quarter":   evaluate_nth_first_biz_quarter,
-    "nth_last_biz_quarter":    evaluate_nth_last_biz_quarter,
-    "first_biz_year":          evaluate_first_biz_year,
-    "last_biz_year":           evaluate_last_biz_year,
-    "holiday":                 evaluate_holiday,
-    "evaluate_graph_property": evaluate_graph_property,
-    "named_holiday":           evaluate_named_holiday,
-    "specific_date":           evaluate_specific_date,
+    # DOW / calendar-day patterns
+    "nth_dow_month":           evaluate_nth_dow_month,       # params: dayOfWeek, weekOccurrences, months?
+    "nth_multi_dow_month":     evaluate_nth_multi_dow_month, # params: daysOfWeek, weekOccurrences, months?
+    "nth_dom":                 evaluate_nth_dom,             # params: daysOfMonth, months?
+    # Business-day month patterns
+    "nth_first_biz_month":     evaluate_nth_first_biz_month, # params: bizDayFromStart, months?
+    "nth_last_biz_month":      evaluate_nth_last_biz_month,  # params: bizDayFromEnd,   months?
+    # Business-day quarter patterns
+    "nth_first_biz_quarter":   evaluate_nth_first_biz_quarter, # params: bizDayFromStart, quarters?
+    "nth_last_biz_quarter":    evaluate_nth_last_biz_quarter,  # params: bizDayFromEnd,   quarters?
+    # Business-day year patterns
+    "first_biz_year":          evaluate_first_biz_year,      # params: (none)
+    "last_biz_year":           evaluate_last_biz_year,       # params: (none)
+    # Holiday / structural patterns
+    "holiday":                 evaluate_holiday,              # runtime: date, region, holiday_set
+    "evaluate_graph_property": evaluate_graph_property,      # params: nodeName, propertyName
+    "named_holiday":           evaluate_named_holiday,        # params: holidayNames
+    "specific_date":           evaluate_specific_date,        # params: targetDates
 }
