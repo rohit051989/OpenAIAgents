@@ -495,49 +495,29 @@ def evaluate_graph_property(
 
 def evaluate_named_holiday(
     date: Union[str, _date],
-    region: str,
-    holidayNames: "list[str]",
-    holiday_set: "list[dict] | None" = None,
+    holidayDates: "list[str]",
     **kwargs,
 ) -> bool:
     """
-    True if the date falls on ANY of the named holidays in the given region.
+    True if the date falls on ANY of the named dates
 
     A single rule can cover multiple holidays so the rule catalog stays compact.
-    e.g. RULE_FEDERAL_BANK_HOLIDAYS with holidayNames = ["Christmas Day",
-    "New Year's Day", "Independence Day", "Thanksgiving Day"].
-
-    The agent resolves holiday_set from IS_HOLIDAY_ON edges before calling
-    evaluators:
-
-        holiday_set = [
-            {"date": edge.date, "region": edge.region, "name": edge.name}
-            for edge in pattern.IS_HOLIDAY_ON
-            if edge.region in (region, 'ALL')
-        ]
+    e.g. RULE_FEDERAL_BANK_HOLIDAYS with holidayDates = ["2026-12-25",
+    "2027-01-01", "2027-07-04", "2027-11-25"].
 
     Args:
         date:          Candidate date.
-        region:        Region code (e.g. 'US', 'CA', 'UK', 'ALL').
-        holidayNames:  List of exact holiday names as stored in IS_HOLIDAY_ON.name.
+        holidayDates:  List of exact holiday dates as stored in IS_HOLIDAY_ON.date.
                        Stored in JobRule.params as:
-                         {"holidayNames": ["Christmas Day", "New Year's Day"]}
-        holiday_set:   List of dicts pre-fetched by the agent.
+                         {"holidayDates": ["2026-12-25", "2027-01-01"]}
 
-    Returns True if the date matches ANY entry whose name is in holidayNames.
+    Returns True if the date matches ANY entry in holidayDates.
     """
-    if not holiday_set or not holidayNames:
+    if not holidayDates:
         return False
     d_str = _to_date(date).isoformat()
-    name_set = set(holidayNames)
-    for entry in holiday_set:
-        if not _holiday_region_match(entry.get("region", ""), region):
-            continue
-        if entry.get("date", "") != d_str:
-            continue
-        if entry.get("name", "") in name_set:
-            return True
-    return False
+    date_set = set(holidayDates)
+    return d_str in date_set
 
 
 def evaluate_specific_date(
@@ -594,6 +574,6 @@ EVALUATOR_REGISTRY: dict[str, callable] = {
     # Holiday / structural patterns
     "holiday":                 evaluate_holiday,              # runtime: date, region, holiday_set
     "evaluate_graph_property": evaluate_graph_property,      # params: nodeName, propertyName
-    "named_holiday":           evaluate_named_holiday,        # params: holidayNames
+    "named_holiday":           evaluate_named_holiday,        # params: holidayDates
     "specific_date":           evaluate_specific_date,        # params: targetDates
 }

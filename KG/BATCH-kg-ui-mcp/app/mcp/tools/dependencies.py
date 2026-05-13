@@ -42,20 +42,23 @@ async def tool_get_job_dependency_chain(job_name: str) -> dict:
 
 @mcp.tool(name="get_jobgroup_execution_flow")
 async def tool_get_jobgroup_execution_flow(job_group_id: str) -> dict:
-    """Compute the topological execution order of all jobs in a JobGroup.
+    """Return the execution-flow graphlet for a JobGroup.
 
-    Uses Kahn's algorithm on the PRECEDES-relationship DAG to assign a
-    ``distance`` (execution wave) and ``orderIndex`` to every
-    ``ScheduleInstanceContext`` within the group.
+    Traverses the PRECEDES chain starting from the JobGroup's ENTRY
+    ScheduleInstanceContext (up to depth 30). Each node is enriched with
+    its minimum path distance from ENTRY and an orderIndex (position in
+    ascending-distance / topological-wave order). Returns a graphlet for
+    visual rendering and a flowSummary with aggregate statistics.
 
     Args:
         job_group_id: The unique ``id`` property of the target JobGroup node.
 
     Returns:
-        ``{"jobGroupId": ..., "jobGroupName": ..., "nodeCount": N, "nodes": [...]}``
-        Each node has ``jobContextId``, ``jobId``, ``jobName``,
-        ``distance``, ``orderIndex``. ``hasCycle`` is ``true`` if a cycle
-        was detected (Kahn's algorithm could not order all nodes).
+        ``{"graphlet": {"nodes": [...], "links": [...]},
+        "flowSummary": {"jobGroupId": ..., "jobGroupName": ..., "nodeCount": N}}``
+        Each graphlet node has ``id`` (elementId), ``labels``, ``name``,
+        ``jobName``, ``enabled``, ``distance``, ``orderIndex``.
+        Each graphlet link has ``source``, ``target``, ``on``.
     """
     logger.info("MCP tool get_jobgroup_execution_flow job_group_id=%s", job_group_id)
     driver = await get_driver()

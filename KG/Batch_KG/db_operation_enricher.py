@@ -17,7 +17,8 @@ Architecture:
     - Agent 1 (Evaluator): Determines if method source is sufficient
     - Agent 2 (Extractor): Extracts DB operations
     - Agent 3 (Gatherer): Finds additional required Java classes from graph
-- Updates Neo4j with dbOperations and dbOperationCount
+- Stores DB operations as DB_OPERATION relationships only
+- Leaves JavaMethod dbOperations/dbOperationCount as derived cache rebuilt later
 - Consolidates operations at Step level
 """
 
@@ -443,9 +444,12 @@ class DBOperationEnricher:
                     else:
                         operations = []
                 
-                # Update Neo4j
+                # Refresh relationship-backed DB operation state for this method.
+                # JavaMethod dbOperations/dbOperationCount are treated as derived cache,
+                # so we do not persist them here.
+                self._update_method_operations(method_fqn, operations)
+
                 if operations:
-                    self._update_method_operations(method_fqn, operations)
                     methods_with_ops += 1
                     
                     for op in operations:
@@ -516,44 +520,41 @@ class DBOperationEnricher:
         return parser.parse_java_file(path)
     
     def _update_method_operations(self, method_fqn: str, operations: List):
-        """Update JavaMethod node with DB operations and create Resource nodes"""
-        # Convert operations to proper format
-        op_strings = []
+        """Refresh DB_OPERATION relationships for a JavaMethod."""
         requires_further_analysis = False
+        normalized_operations = []
         
         for op in operations:
             if isinstance(op, dict):
                 table_name = op.get('table_name', 'UNKNOWN')
-                op_str = f"{op['operation_type']}:{table_name}:{op.get('confidence', 'MEDIUM')}"
+                operation_type = op.get('operation_type', 'UNKNOWN')
+                confidence = op.get('confidence', 'MEDIUM')
+                schema_name = op.get('schema_name', 'UNKNOWN')
                 # Check if table name is unknown or dynamic
                 if table_name == 'UNKNOWN' or table_name is None or 'DYNAMIC' in str(table_name).upper():
                     requires_further_analysis = True
             else:
                 table_name = op.table_name or 'UNKNOWN'
-                op_str = f"{op.operation_type}:{table_name}:{op.confidence}"
+                operation_type = op.operation_type
+                confidence = op.confidence
+                schema_name = op.schema_name if hasattr(op, 'schema_name') else 'UNKNOWN'
                 # Check if table name is unknown or dynamic
                 if table_name == 'UNKNOWN' or table_name is None or 'DYNAMIC' in str(table_name).upper():
                     requires_further_analysis = True
-            op_strings.append(op_str)
-        
-        # Update JavaMethod node
-        query = """
+            normalized_operations.append({
+                'table_name': table_name,
+                'operation_type': operation_type,
+                'confidence': confidence,
+                'schema_name': schema_name,
+            })
+
+        reset_query = """
         MATCH (m:JavaMethod {fqn: $fqn})
-        SET m.dbOperations = $operations,
-            m.dbOperationCount = $count,
-            m.furtherAnalysisRequired = $furtherAnalysisRequired
+        OPTIONAL MATCH (m)-[old:DB_OPERATION]->(:Resource {type: 'TABLE'})
+        WITH m, collect(old) as oldRels
+        FOREACH (rel IN oldRels | DELETE rel)
+        SET m.furtherAnalysisRequired = $furtherAnalysisRequired
         """
-        
-        with self.driver.session(database=self.database) as session:
-            session.run(query, fqn=method_fqn, operations=op_strings, count=len(op_strings), furtherAnalysisRequired=requires_further_analysis)
-        
-        # Create Resource nodes and relationships
-        self._create_resource_relationships(method_fqn, operations)
-    
-    def _create_resource_relationships(self, method_fqn: str, operations: List):
-        """Create Resource nodes and DB_OPERATION relationships for each database table"""
-        if not operations:
-            return
         
         resource_query = """
         MERGE (r:Resource {name: $name, type: 'TABLE'})
@@ -572,18 +573,18 @@ class DBOperationEnricher:
         """
 
         with self.driver.session(database=self.database) as session:
-            for op in operations:
+            session.run(
+                reset_query,
+                fqn=method_fqn,
+                furtherAnalysisRequired=requires_further_analysis,
+            )
+
+            for op in normalized_operations:
                 # Extract operation details
-                if isinstance(op, dict):
-                    table_name = op.get('table_name', 'UNKNOWN')
-                    operation_type = op.get('operation_type', 'UNKNOWN')
-                    confidence = op.get('confidence', 'MEDIUM')
-                    schema_name = op.get('schema_name', 'UNKNOWN')
-                else:
-                    table_name = op.table_name if hasattr(op, 'table_name') else 'UNKNOWN'
-                    operation_type = op.operation_type if hasattr(op, 'operation_type') else 'UNKNOWN'
-                    confidence = op.confidence if hasattr(op, 'confidence') else 'MEDIUM'
-                    schema_name = op.schema_name if hasattr(op, 'schema_name') else 'UNKNOWN'
+                table_name = op.get('table_name', 'UNKNOWN')
+                operation_type = op.get('operation_type', 'UNKNOWN')
+                confidence = op.get('confidence', 'MEDIUM')
+                schema_name = op.get('schema_name', 'UNKNOWN')
                 
                 # Normalize values
                 table_name = (table_name or 'UNKNOWN').upper()
@@ -667,10 +668,11 @@ class DBOperationEnricher:
                 // Check direct methods first (closest in hierarchy)
                 MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
+                  OPTIONAL MATCH (m)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                  WITH m, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                 RETURN elementId(m) as methodId, 
                        m.methodName as methodName,
-                       m.dbOperations as dbOps,
-                       m.dbOperationCount as dbOpCount,
+                      dbOps as dbOps,
                        0 as inheritanceDepth
                 
                 UNION
@@ -679,17 +681,18 @@ class DBOperationEnricher:
                 MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
                 MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
+                  OPTIONAL MATCH (m)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                  WITH m, path, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                 RETURN elementId(m) as methodId, 
                        m.methodName as methodName,
-                       m.dbOperations as dbOps,
-                       m.dbOperationCount as dbOpCount,
+                      dbOps as dbOps,
                        length(path) as inheritanceDepth
             }
             
             // Return the method closest in the inheritance hierarchy (prefer child overrides)
-            WITH methodId, methodName, dbOps, dbOpCount, inheritanceDepth
+                 WITH methodId, methodName, dbOps, inheritanceDepth
             ORDER BY inheritanceDepth ASC
-            RETURN methodId, methodName, dbOps, dbOpCount
+                 RETURN methodId, methodName, dbOps
             LIMIT 3  // For TASKLET: 1 execute, For CHUNK: read, write, process
             """
             
@@ -708,7 +711,7 @@ class DBOperationEnricher:
             for entry_method in entry_methods:
                 method_id = entry_method['methodId']
                 
-                if entry_method.get('dbOps') and entry_method.get('dbOpCount', 0) > 0:
+                if entry_method.get('dbOps'):
                     all_db_operations.update(entry_method['dbOps'])
                 
                 # BFS traversal
@@ -722,9 +725,10 @@ class DBOperationEnricher:
                     query_calls = """
                     MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
                     WHERE elementId(m) = $methodId
+                      OPTIONAL MATCH (called)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                      WITH called, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                     RETURN elementId(called) as calledId,
-                           called.dbOperations as dbOps,
-                           called.dbOperationCount as dbOpCount
+                           dbOps as dbOps
                     """
                     
                     with self.driver.session(database=self.database) as session:
@@ -738,7 +742,7 @@ class DBOperationEnricher:
                             visited.add(called_id)
                             queue.append(called_id)
                             
-                            if called.get('dbOps') and called.get('dbOpCount', 0) > 0:
+                            if called.get('dbOps'):
                                 all_db_operations.update(called['dbOps'])
             
             # Update Step — always write the property so the key exists in the schema

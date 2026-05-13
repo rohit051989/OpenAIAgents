@@ -1,39 +1,9 @@
-"""
-DB Operation Consistency Validator
-
-Detects and repairs orphaned DB_OPERATION relationships in the Information Graph.
-
-PROBLEM:
-When db_operation_enricher.py runs multiple times or encounters partial failures,
-JavaMethod nodes can end up with:
-  - DB_OPERATION relationships to Table resources
-  - BUT dbOperationCount = 0 or dbOperations = []
-
-This causes the KG builder (_copy_step_db_operations_from_info_graph) to miss these
-methods because it filters by: m.dbOperationCount > 0
-
-ROOT CAUSE:
-In db_operation_enricher.py, enrichment happens in two separate transactions:
-1. _update_method_operations() -> sets count & array
-2. _create_resource_relationships() -> creates relationships
-
-If enricher runs on already-enriched method with NO NEW OPERATIONS FOUND:
-- Properties get overwritten to count=0, array=[]
-- Relationships are NOT deleted (early return in _create_resource_relationships)
-- Result: orphaned relationships
-
-SOLUTION:
-1. Detect orphaned relationships
-2. Log warnings about inconsistencies
-3. Rebuild properties from actual relationships
-4. Make KG builder query resilient (fallback to relationship check)
-"""
+"""Rebuild JavaMethod DB-operation properties from DB_OPERATION relationships."""
 
 import logging
 from neo4j import GraphDatabase
-from typing import Dict, List, Optional
+from typing import Dict
 import yaml
-from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class DBOperationConsistencyValidator:
-    """Validates and repairs DB operation consistency in Information Graph"""
+    """Rebuilds JavaMethod DB-operation properties from relationship data."""
     
     def __init__(self, config_path: str):
         with open(config_path, 'r') as f:
@@ -57,151 +27,51 @@ class DBOperationConsistencyValidator:
         self.database = neo4j_config.get('database_ig', 'informationgraph')
         
         self.stats = {
-            'orphaned_methods': 0,
-            'orphaned_relationships': 0,
             'rebuilt_methods': 0,
-            'consistency_violations': 0
+            'methods_with_relationships': 0
         }
-    
-    def validate_and_repair(self, repair: bool = True) -> Dict:
-        """
-        Validate DB operations consistency.
-        
-        Args:
-            repair: If True, rebuild properties from relationships
-        
-        Returns:
-            Dict with statistics about orphaned methods found and repaired
-        """
+
+    def rebuild_all_method_properties(self) -> Dict:
+        """Rebuild dbOperationCount/dbOperations for every JavaMethod from relationships."""
         logger.info(" " + "=" * 80)
-        logger.info("DB OPERATIONS CONSISTENCY VALIDATION")
+        logger.info("JAVA METHOD DB OPERATION CONSOLIDATION")
         logger.info("=" * 80)
-        
-        # Step 1: Find orphaned relationships
-        orphaned_methods = self._find_orphaned_relationships()
-        
-        if orphaned_methods:
-            logger.warning(f"  ⚠️  Found {len(orphaned_methods)} methods with inconsistent DB operations")
-            self._log_orphaned_methods(orphaned_methods)
-            self.stats['consistency_violations'] = len(orphaned_methods)
-            
-            # Count total orphaned relationships
-            total_orphaned_rels = sum(len(m['actualRels']) for m in orphaned_methods)
-            self.stats['orphaned_relationships'] = total_orphaned_rels
-            
-            # Step 2: Optionally repair
-            if repair:
-                self._rebuild_properties_from_relationships(orphaned_methods)
-        else:
-            logger.info("  ✓ No consistency violations found")
-        
+        logger.info("  Rebuilding DB operation properties for ALL JavaMethods from relationships...")
+
+        rebuild_all_query = """
+        MATCH (m:JavaMethod)
+        OPTIONAL MATCH (m)-[rel:DB_OPERATION]->(r:Resource {type: 'TABLE'})
+        WITH m,
+             collect(DISTINCT CASE
+                 WHEN rel IS NULL THEN NULL
+                 ELSE rel.operationType + ':' + r.name + ':' + coalesce(rel.confidence, 'MEDIUM')
+             END) as rawOps
+        WITH m, [op IN rawOps WHERE op IS NOT NULL] as opStrings
+        SET m.dbOperationCount = size(opStrings),
+            m.dbOperations = opStrings
+        RETURN count(m) as totalMethods,
+               sum(CASE WHEN size(opStrings) > 0 THEN 1 ELSE 0 END) as methodsWithOps
+        """
+
+        with self.driver.session(database=self.database) as session:
+            record = session.run(rebuild_all_query).single()
+
+        self.stats['rebuilt_methods'] = record['totalMethods'] if record else 0
+        self.stats['methods_with_relationships'] = record['methodsWithOps'] if record else 0
+        logger.info(
+            f"  ✓ Rebuilt JavaMethod DB properties for {self.stats['rebuilt_methods']} methods "
+            f"({self.stats['methods_with_relationships']} with DB relationships)"
+        )
         logger.info("=" * 80)
         return self.stats
-    
-    def _find_orphaned_relationships(self) -> List[Dict]:
-        """
-        Find methods with DB_OPERATION relationships but empty/zero count.
-        
-        Returns list of dicts with:
-          - methodFqn
-          - recordedCount
-          - recordedOps (array stored on node)
-          - actualRels (relationships that actually exist)
-        """
-        orphan_query = """
-        MATCH (m:JavaMethod)-[rel:DB_OPERATION]->(r:Resource {type: 'TABLE'})
-        WHERE (m.dbOperationCount = 0 OR m.dbOperationCount IS NULL OR 
-               m.dbOperations IS NULL OR size(m.dbOperations) = 0)
-        RETURN m.fqn as methodFqn,
-               m.dbOperationCount as count,
-               m.dbOperations as ops,
-               collect(DISTINCT {
-                   operationType: rel.operationType,
-                   tableName: r.name,
-                   confidence: rel.confidence
-               }) as relOps
-        ORDER BY m.fqn
-        """
-        
-        orphaned_methods = []
-        with self.driver.session(database=self.database) as session:
-            result = session.run(orphan_query)
-            for record in result:
-                orphaned_methods.append({
-                    'methodFqn': record['methodFqn'],
-                    'recordedCount': record['count'] or 0,
-                    'recordedOps': record['ops'] or [],
-                    'actualRels': record['relOps'] or []
-                })
-        
-        self.stats['orphaned_methods'] = len(orphaned_methods)
-        return orphaned_methods
-    
-    def _log_orphaned_methods(self, orphaned_methods: List[Dict]) -> None:
-        """Log detailed information about orphaned methods"""
-        for method in orphaned_methods:
-            rel_count = len(method['actualRels'])
-            logger.warning(
-                f"  ⚠️  {method['methodFqn']}: "
-                f"recorded_count={method['recordedCount']}, "
-                f"actual_relationships={rel_count}"
-            )
-            for rel in method['actualRels']:
-                logger.warning(
-                    f"      → {rel['operationType']} on {rel['tableName']} "
-                    f"(confidence: {rel['confidence']})"
-                )
-    
-    def _rebuild_properties_from_relationships(self, orphaned_methods: List[Dict]) -> None:
-        """
-        Rebuild dbOperationCount and dbOperations from actual relationships.
-        
-        This sets:
-        - dbOperationCount = number of DB_OPERATION relationships
-        - dbOperations = array of "OPERATION:TABLE:CONFIDENCE" strings
-        """
-        logger.info("  Rebuilding dbOperations properties from relationships...")
-        
-        rebuild_query = """
-        MATCH (m:JavaMethod)-[rel:DB_OPERATION]->(r:Resource {type: 'TABLE'})
-        WHERE m.fqn IN $methodFqns
-        WITH m, collect(DISTINCT {
-            operationType: rel.operationType,
-            tableName: r.name,
-            confidence: rel.confidence
-        }) as relOps
-        WITH m, relOps,
-             [op IN relOps | op.operationType + ':' + op.tableName + ':' + op.confidence] as opStrings
-        SET m.dbOperationCount = size(relOps),
-            m.dbOperations = opStrings
-        RETURN m.fqn, m.dbOperationCount, m.dbOperations
-        """
-        
-        method_fqns = [m['methodFqn'] for m in orphaned_methods]
-        
-        with self.driver.session(database=self.database) as session:
-            result = session.run(rebuild_query, methodFqns=method_fqns)
-            rebuild_count = 0
-            for record in result:
-                rebuild_count += 1
-                logger.info(
-                    f"    ✓ Rebuilt {record['fqn']}: "
-                    f"count={record['dbOperationCount']}, "
-                    f"ops_count={len(record['dbOperations'])}"
-                )
-            self.stats['rebuilt_methods'] = rebuild_count
-        
-        logger.info(f"  ✓ Successfully rebuilt {rebuild_count} method properties")
     
     def print_statistics(self) -> None:
         """Print validation statistics"""
         logger.info("\n" + "=" * 80)
-        logger.info("CONSISTENCY VALIDATION STATISTICS")
+        logger.info("DB OPERATION CONSOLIDATION STATISTICS")
         logger.info("=" * 80)
-        logger.info(f"  Orphaned methods found:        {self.stats['orphaned_methods']}")
-        logger.info(f"  Orphaned relationships:        {self.stats['orphaned_relationships']}")
-        logger.info(f"  Consistency violations:        {self.stats['consistency_violations']}")
-        logger.info(f"  Methods rebuilt:               {self.stats['rebuilt_methods']}")
+        logger.info(f"  Methods consolidated:          {self.stats['rebuilt_methods']}")
+        logger.info(f"  Methods with DB relationships: {self.stats['methods_with_relationships']}")
         logger.info("=" * 80 + "\n")
     
     def close(self):
@@ -209,23 +79,20 @@ class DBOperationConsistencyValidator:
         self.driver.close()
 
 
-def validate_and_repair_db_operations(config_path: str = None, repair: bool = True, logger_instance=None) -> Dict:
+def validate_and_repair_db_operations(config_path: str = None, logger_instance=None) -> Dict:
     """
-    Standalone function to validate and repair DB operation consistency.
+    Standalone function to rebuild JavaMethod DB-operation properties.
     
     Can be called from other modules (e.g., manual_resource_associator.py)
     
     Args:
         config_path: Path to information_graph_config.yaml (default: env var or default path)
-        repair: Whether to repair orphaned relationships (default: True)
         logger_instance: Logger instance to use (default: module logger)
     
     Returns:
         Dictionary with statistics: {
-            'orphaned_methods': count,
-            'orphaned_relationships': count,
-            'consistency_violations': count,
-            'rebuilt_methods': count
+            'rebuilt_methods': count,
+            'methods_with_relationships': count
         }
     """
     import os
@@ -235,12 +102,13 @@ def validate_and_repair_db_operations(config_path: str = None, repair: bool = Tr
     
     validator = DBOperationConsistencyValidator(config_path)
     try:
-        stats = validator.validate_and_repair(repair=repair)
+        stats = validator.rebuild_all_method_properties()
         
-        # Log summary if caller provided logger
         if logger_instance:
-            logger_instance.info(f"DB Operation Consistency Check: {stats['orphaned_methods']} orphaned methods found, "
-                               f"{stats['rebuilt_methods']} rebuilt")
+            logger_instance.info(
+                f"DB Operation Consolidation: {stats['rebuilt_methods']} methods consolidated, "
+                f"{stats['methods_with_relationships']} with DB relationships"
+            )
         else:
             validator.print_statistics()
         
@@ -258,8 +126,7 @@ def main():
     
     validator = DBOperationConsistencyValidator(config_path)
     try:
-        # Run validation and repair
-        stats = validator.validate_and_repair(repair=True)
+        stats = validator.rebuild_all_method_properties()
         validator.print_statistics()
     finally:
         validator.close()

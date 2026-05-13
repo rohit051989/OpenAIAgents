@@ -225,7 +225,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                     "MERGE (m:JavaMethod {fqn: $method_fqn})"
                     " ON CREATE SET m.methodName = $method_name, m.returnType = $return_type,"
                     " m.signature = $signature, m.modifiers = $modifiers, m.classFqn = $class_fqn,"
-                    " m.dbOperationCount = 0, m.procedureCallCount = 0, m.shellExecutionCount = 0",
+                    " m.procedureCallCount = 0, m.shellExecutionCount = 0",
                     {
                         "method_fqn": method_fqn,
                         "method_name": method_name,
@@ -379,7 +379,7 @@ def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
                                     " ON CREATE SET cm.methodName = $called_method_name,"
                                     " cm.returnType = $called_return_type, cm.signature = $called_signature,"
                                     " cm.modifiers = $called_modifiers, cm.classFqn = $called_class_fqn,"
-                                    " cm.dbOperationCount = 0, cm.procedureCallCount = 0, cm.shellExecutionCount = 0",
+                                    " cm.procedureCallCount = 0, cm.shellExecutionCount = 0",
                                     {
                                         "called_method_fqn": called_method_fqn,
                                         "called_method_name": call.method_name,
@@ -1509,13 +1509,10 @@ class InformationGraphBuilder:
             modifiers_str = ",".join(method_def.modifiers)
             
             # Extract counts from attached analysis results
-            db_operation_count = len(method_def.db_operations) if hasattr(method_def, 'db_operations') else 0
             procedure_call_count = len(method_def.procedure_calls) if hasattr(method_def, 'procedure_calls') else 0
             shell_execution_count = len(method_def.shell_executions) if hasattr(method_def, 'shell_executions') else 0
             
             # Extract operation details as arrays (if available)
-            db_operations = [f"{op.operation_type}:{op.table_name or 'UNKNOWN'}:{op.confidence}" 
-                           for op in method_def.db_operations] if hasattr(method_def, 'db_operations') else []
             procedure_calls = [f"{pc.procedure_name}:{pc.database_type}" 
                              for pc in method_def.procedure_calls] if hasattr(method_def, 'procedure_calls') else []
             shell_executions = [f"{se.script_type}:{se.command}" 
@@ -1549,10 +1546,8 @@ class InformationGraphBuilder:
                 m.returnType = $return_type,
                 m.signature = $signature,
                 m.modifiers = $modifiers,
-                m.dbOperationCount = $db_operation_count,
                 m.procedureCallCount = $procedure_call_count,
                 m.shellExecutionCount = $shell_execution_count,
-                m.dbOperations = $db_operations,
                 m.procedureCalls = $procedure_calls,
                 m.shellExecutions = $shell_executions,
                 m.sourceCode = $source_code,
@@ -1568,10 +1563,8 @@ class InformationGraphBuilder:
                        return_type=method_def.return_type,
                        signature=method_def.signature,
                        modifiers=modifiers_str,
-                       db_operation_count=db_operation_count,
                        procedure_call_count=procedure_call_count,
                        shell_execution_count=shell_execution_count,
-                       db_operations=db_operations,
                        procedure_calls=procedure_calls,
                        shell_executions=shell_executions,
                        source_code=method_source,

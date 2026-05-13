@@ -60,8 +60,9 @@ Config File Format (manual_mappings.yaml):
       # Use when enricher flagged a method as a grey-area DB operation but human review
       # confirms it is NOT a real DB operation (e.g. the grey area was actually a
       # procedure call that was separately resolved under procedure_calls).
-      # This removes the UNKNOWN/DYNAMIC entries from dbOperations WITHOUT linking any
-      # Resource.  Resolved (non-grey) entries are NEVER removed.
+    # This clears the DB-operation review flag without linking any Resource.
+    # Final JavaMethod dbOperations/dbOperationCount are rebuilt only from
+    # DB_OPERATION relationships at the end of the manual associator flow.
       - method_fqn: "com.companyname.dao.SomeDAOImpl.executeSomething(String)"
         # operation_type is OPTIONAL. When provided, only grey-area entries of that
         # specific type (e.g. INSERT:UNKNOWN:HIGH) are removed. When omitted, ALL
@@ -346,29 +347,19 @@ class ManualResourceAssociator:
                         """
                         MATCH (m:JavaMethod {fqn: $fqn})
                         SET m.genericMethod    = true,
-                            m.dbOperations     = [],
-                            m.dbOperationCount = 0,
                             m.furtherAnalysisRequired = false
                         """,
                         fqn=method_fqn)
-                    logger.info(f"     Method updated: genericMethod=true, dbOperations reset, furtherAnalysisRequired=false")
+                    logger.info(f"     Method updated: genericMethod=true, furtherAnalysisRequired=false")
                 else:
-                    # Original behavior: Update JavaMethod
+                    # DB_OPERATION relationships are the source-of-truth. The method
+                    # properties are rebuilt after all manual resolution completes.
                     update_method_query = """
                     MATCH (m:JavaMethod {fqn: $fqn})  
-                    SET m.dbOperations = [op IN m.dbOperations | 
-                        CASE 
-                            WHEN op STARTS WITH $opType AND (op CONTAINS 'DYNAMIC' OR op CONTAINS 'UNKNOWN')
-                            THEN $opValue
-                            ELSE op
-                        END
-                    ],
-                    m.furtherAnalysisRequired = false
+                    SET m.furtherAnalysisRequired = false
                     """
                     session.run(update_method_query,
-                        fqn=method_fqn,
-                        opType=f"{operation_type}:",
-                        opValue=db_op_value)
+                        fqn=method_fqn)
                     logger.info(f"     Method updated: furtherAnalysisRequired=false")
                 self.stats['db_operations_processed'] += 1
                 return True
@@ -1173,13 +1164,13 @@ class ManualResourceAssociator:
 
     def dismiss_db_operation(self, method_fqn: str, operation_type: str = None) -> bool:
         """
-        Remove grey-area (UNKNOWN/DYNAMIC/PARAMETERIZED) entries from a JavaMethod's
-        dbOperations WITHOUT linking any Resource.  Use this when human review confirms
-        the method does NOT perform a real DB operation for the flagged type — e.g. the
-        enricher was misled by a procedure call that happens to contain SQL keywords.
+        Clear the DB-operation review flag for a JavaMethod when human review confirms
+        the method does not perform a real DB operation.
 
-        Only grey-area entries are removed.  Any already-resolved entries (entries that
-        contain no UNKNOWN/DYNAMIC/PARAMETERIZED keyword) are left untouched.
+        DB operations are sourced from DB_OPERATION relationships only. The final
+        JavaMethod dbOperations/dbOperationCount values are rebuilt at the end of the
+        manual associator flow, so dismissal only marks the method as no longer
+        requiring further DB analysis.
 
         Args:
             method_fqn:      Fully-qualified method name.
@@ -1197,9 +1188,12 @@ class ManualResourceAssociator:
                 return False
 
             with self.driver.session(database=self.database) as session:
-                # Fetch current dbOperations so we can log what is being removed
                 result = session.run(
-                    "MATCH (m:JavaMethod {fqn: $fqn}) RETURN coalesce(m.dbOperations, []) AS ops",
+                    """
+                    MATCH (m:JavaMethod {fqn: $fqn})
+                    SET m.furtherAnalysisRequired = false
+                    RETURN m.fqn AS fqn
+                    """,
                     fqn=resolved_fqn)
                 record = result.single()
                 if not record:
@@ -1207,41 +1201,16 @@ class ManualResourceAssociator:
                     self.stats['errors'] += 1
                     return False
 
-                current_ops = record['ops']
-                grey_keywords = CORE_KEYWORDS  # e.g. ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED']
-
-                def is_grey(op):
-                    return any(kw in op for kw in grey_keywords)
-
-                def matches_type(op):
-                    if not operation_type:
-                        return True
-                    return op.upper().startswith(operation_type.upper() + ":")
-
-                removed = [op for op in current_ops if is_grey(op) and matches_type(op)]
-                kept    = [op for op in current_ops if not (is_grey(op) and matches_type(op))]
-
-                if not removed:
-                    logger.warning(f"     No grey-area entries found to dismiss"
-                                   + (f" for operation type '{operation_type}'" if operation_type else "")
-                                   + f" on method: {resolved_fqn}")
-                    # Not an error — idempotent
-                    self.stats['db_operation_dismissals_processed'] += 1
-                    return True
-
-                for op in removed:
-                    logger.info(f"     Dismissing: {op}")
-
-                session.run(
-                    """
-                    MATCH (m:JavaMethod {fqn: $fqn})
-                    SET m.dbOperations = $kept,
-                        m.dbOperationCount = size($kept),
-                        m.furtherAnalysisRequired = false
-                    """,
-                    fqn=resolved_fqn, kept=kept)
-
-                logger.info(f"     Removed {len(removed)} grey-area entry(ies), kept {len(kept)} resolved entry(ies)")
+                if operation_type:
+                    logger.info(
+                        f"     Cleared DB review flag for operation type '{operation_type}' on {resolved_fqn}; "
+                        "final DB-operation properties will be rebuilt from relationships only"
+                    )
+                else:
+                    logger.info(
+                        f"     Cleared DB review flag on {resolved_fqn}; final DB-operation properties "
+                        "will be rebuilt from relationships only"
+                    )
                 self.stats['db_operation_dismissals_processed'] += 1
                 return True
 
@@ -1481,10 +1450,12 @@ class ManualResourceAssociator:
                 // Check direct methods first (closest in hierarchy)
                 MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
+                  OPTIONAL MATCH (m)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                  WITH m, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                 RETURN elementId(m) as methodId,
                        m.methodName as methodName,
                        m.fqn as methodFqn,
-                       m.dbOperations      as dbOps,
+                      dbOps as dbOps,
                        m.procedureCalls    as procCalls,
                        m.shellExecutions   as shellExecs,
                        m.sqlFileInvocations as sqlInvocations,
@@ -1496,10 +1467,12 @@ class ManualResourceAssociator:
                 MATCH path = (jc)-[:EXTENDS*1..10]->(parent:JavaClass)
                 MATCH (parent)-[:HAS_METHOD]->(m:JavaMethod)
                 WHERE m.methodName IN $methodNames
+                  OPTIONAL MATCH (m)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                  WITH m, path, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                 RETURN elementId(m) as methodId,
                        m.methodName as methodName,
                        m.fqn as methodFqn,
-                       m.dbOperations      as dbOps,
+                      dbOps as dbOps,
                        m.procedureCalls    as procCalls,
                        m.shellExecutions   as shellExecs,
                        m.sqlFileInvocations as sqlInvocations,
@@ -1559,9 +1532,11 @@ class ManualResourceAssociator:
                     query_calls = """
                     MATCH (m:JavaMethod)-[:CALLS]->(called:JavaMethod)
                     WHERE elementId(m) = $methodId
+                          OPTIONAL MATCH (called)-[dbRel:DB_OPERATION]->(dbRes:Resource {type: 'TABLE'})
+                          WITH called, collect(DISTINCT dbRel.operationType + ':' + dbRes.name + ':' + coalesce(dbRel.confidence, 'MEDIUM')) as dbOps
                     RETURN elementId(called) as calledId,
                            called.fqn          as calledFqn,
-                           called.dbOperations      as dbOps,
+                              dbOps as dbOps,
                            called.procedureCalls    as procCalls,
                            called.shellExecutions   as shellExecs,
                            called.sqlFileInvocations as sqlInvocations
@@ -1943,35 +1918,28 @@ def main():
         associator.process_config_file(manual_mappings_file_path)
 
         # ─────────────────────────────────────────────────────────────────────────
-        # AFTER manual association completes, fix DB operation consistency issues
+        # AFTER manual association completes, rebuild JavaMethod DB-operation cache
+        # from DB_OPERATION relationships so the method properties stay derived.
         # ─────────────────────────────────────────────────────────────────────────
         logger.info("\n" + "=" * 80)
-        logger.info("PHASE 2: DB Operation Consistency Validation & Repair")
+        logger.info("PHASE 2: JavaMethod DB Operation Consolidation")
         logger.info("=" * 80)
-        logger.info("Checking for orphaned DB_OPERATION relationships...")
-        logger.info("(This happens when enricher re-runs on already-enriched methods)")
+        logger.info("Rebuilding JavaMethod dbOperations/dbOperationCount from DB_OPERATION relationships...")
         logger.info("=" * 80 + "\n")
         
-        # Run validator to detect and repair orphaned relationships
+        # Run validator to log orphan counts and then rebuild every JavaMethod cache.
         stats = validate_and_repair_db_operations(
             config_path=config_file_path,
-            repair=True,
             logger_instance=logger
         )
         
         logger.info("\n" + "=" * 80)
-        logger.info("PHASE 2 COMPLETE: DB Operation Consistency")
+        logger.info("PHASE 2 COMPLETE: JavaMethod DB Operation Consolidation")
         logger.info("=" * 80)
-        logger.info(f"  Orphaned methods found:        {stats['orphaned_methods']}")
-        logger.info(f"  Orphaned relationships:        {stats['orphaned_relationships']}")
-        logger.info(f"  Consistency violations:        {stats['consistency_violations']}")
-        logger.info(f"  Methods rebuilt:               {stats['rebuilt_methods']}")
+        logger.info(f"  Methods consolidated:          {stats['rebuilt_methods']}")
+        logger.info(f"  Methods with DB relationships: {stats['methods_with_relationships']}")
         logger.info("=" * 80 + "\n")
-        
-        if stats['orphaned_methods'] > 0:
-            logger.warning(f"⚠️  Fixed {stats['orphaned_methods']} methods with orphaned relationships")
-        else:
-            logger.info("✓ No orphaned relationships found - Information Graph is consistent")
+        logger.info("✓ JavaMethod DB-operation properties rebuilt from relationships")
         
     finally:
         associator.close()

@@ -7,7 +7,6 @@ Covers:
 """
 
 import logging
-from collections import deque
 from typing import Any
 
 from neo4j import AsyncDriver
@@ -104,32 +103,80 @@ RETURN
 """
 
 # ---------------------------------------------------------------------------
-# Cypher — job group execution flow
+# Cypher — job group execution flow (ENTRY-based traversal)
 # ---------------------------------------------------------------------------
 
-_Q_JG_NODES = """
-MATCH (jg:JobGroup {id: $job_group_id})
-MATCH (ctx:ScheduleInstanceContext)-[:FOR_GROUP]->(jg)
-MATCH (ctx)-[:FOR_JOB]->(j:Job)
-RETURN
-    jg.id   AS jobGroupId,
-    jg.name AS jobGroupName,
-    ctx.id  AS ctxId,
-    j.id    AS jobId,
-    j.name  AS jobName
-"""
+_Q_JG_EXECUTION_FLOW = """
+MATCH (jg:JobGroup {id: $job_group_id})-[:ENTRY]->(entry:ScheduleInstanceContext)
+MATCH p = (entry)-[:PRECEDES*0..30]->(sic:ScheduleInstanceContext)
 
-_Q_JG_EDGES = """
-MATCH (jg:JobGroup {id: $job_group_id})
-MATCH (ownerCtx:ScheduleInstanceContext)-[:FOR_GROUP]->(jg)
-MATCH (ownerCtx)-[:PRECEDES]->(depCtx:ScheduleInstanceContext)
-WHERE (depCtx)-[:FOR_GROUP]->(jg)
-MATCH (depCtx)-[:FOR_JOB]->(j:Job)
+// Compute minimum distance (shortest path length from ENTRY) per reachable SIC
+WITH jg, sic, min(length(p)) AS distance, collect(p) AS sicPaths
+ORDER BY distance
+
+// Re-collect in ascending-distance order so list index == orderIndex
+WITH jg,
+     collect(sic)      AS orderedSics,
+     collect(distance) AS orderedDistances,
+     collect(sicPaths) AS allPathSets
+
+// Flatten all paths into raw node / relationship sets
+WITH jg, orderedSics, orderedDistances,
+     reduce(combined = [], pths IN allPathSets | combined + pths) AS allPaths
+
+WITH jg, orderedSics, orderedDistances,
+     reduce(ns = [], pth IN allPaths | ns + nodes(pth))         AS rawNodes,
+     reduce(rs = [], pth IN allPaths | rs + relationships(pth)) AS rawRels
+
+UNWIND rawNodes AS nd
+WITH jg, orderedSics, orderedDistances, rawRels, collect(DISTINCT nd) AS allNodes
+
+UNWIND rawRels AS rel
+WITH jg, orderedSics, orderedDistances, allNodes,
+     collect(DISTINCT rel) AS allRels
+
+// Resolve job name for each node via FOR_JOB edge
+UNWIND allNodes AS sn
+OPTIONAL MATCH (sn)-[:FOR_JOB]->(j:Job)
+WITH jg, orderedSics, orderedDistances, allRels,
+     collect({ sic: sn, jobName: coalesce(j.name, '') }) AS nodeJobMap
+
 RETURN
-    depCtx.id   AS upstreamCtxId,
-    ownerCtx.id AS downstreamCtxId,
-    j.id        AS jobId,
-    j.name      AS jobName
+  {
+    nodes: [nd IN nodeJobMap | {
+      id        : elementId(nd.sic),
+      labels    : labels(nd.sic),
+      name      : coalesce(nd.sic.name, ''),
+      jobName   : nd.jobName,
+      enabled   : coalesce(nd.sic.enabled, true),
+      distance  : [i IN range(0, size(orderedSics)-1)
+                   WHERE elementId(orderedSics[i]) = elementId(nd.sic)
+                   | orderedDistances[i]][0],
+      orderIndex: [i IN range(0, size(orderedSics)-1)
+                   WHERE elementId(orderedSics[i]) = elementId(nd.sic)
+                   | i][0]
+    }],
+    links: [r IN allRels | {
+      source: elementId(startNode(r)),
+      target: elementId(endNode(r)),
+      on    : coalesce(r.on, 'DEFAULT')
+    }]
+  } AS graphlet,
+  {
+    jobGroupId     : jg.id,
+    jobGroupName   : jg.name,
+    nodeCount      : size(nodeJobMap),
+    contextJobMap  : [nd IN nodeJobMap | {
+      context    : coalesce(nd.sic.name, ''),
+      job        : nd.jobName,
+      distance   : [i IN range(0, size(orderedSics)-1)
+                    WHERE elementId(orderedSics[i]) = elementId(nd.sic)
+                    | orderedDistances[i]][0],
+      orderIndex : [i IN range(0, size(orderedSics)-1)
+                    WHERE elementId(orderedSics[i]) = elementId(nd.sic)
+                    | i][0]
+    }]
+  } AS flowSummary
 """
 
 
@@ -185,87 +232,36 @@ async def get_jobgroup_execution_flow(
     driver: AsyncDriver,
     job_group_id: str,
 ) -> dict[str, Any]:
-    """Compute topological execution order for all JobGroup contexts.
+    """Return the execution-flow graphlet for a JobGroup.
 
-    Uses Kahn's algorithm (BFS-based topological sort) on the
-    PRECEDES-relationship DAG to determine the longest-path distance
-    (i.e., the execution wave) for each ``ScheduleInstanceContext``.
+    Traverses the PRECEDES chain from the JobGroup's ENTRY
+    ScheduleInstanceContext (up to depth 30), computing the minimum
+    path distance from ENTRY for each node and assigning an orderIndex
+    based on ascending distance (topological wave order).
 
     Args:
         driver: Shared Neo4j async driver.
         job_group_id: The ``id`` property of the target ``JobGroup`` node.
 
     Returns:
-        ``{"jobGroupId": ..., "jobGroupName": ..., "nodeCount": N, "nodes": [...]}``
-        where each node has ``{jobContextId, jobId, jobName, distance, orderIndex}``.
+        ``{"graphlet": {"nodes": [...], "links": [...]},
+        "flowSummary": {"jobGroupId": ..., "jobGroupName": ..., "nodeCount": N}}``
+        Each graphlet node has ``id``, ``labels``, ``name``, ``jobName``,
+        ``enabled``, ``distance``, ``orderIndex``.
     """
     logger.info("get_jobgroup_execution_flow job_group_id=%s", job_group_id)
 
     async with kg_session(driver) as session:
-        res_nodes = await session.run(_Q_JG_NODES, job_group_id=job_group_id)
-        rows_nodes = await res_nodes.data()
+        result = await session.run(_Q_JG_EXECUTION_FLOW, job_group_id=job_group_id)
+        row = await result.single()
 
-        res_edges = await session.run(_Q_JG_EDGES, job_group_id=job_group_id)
-        rows_edges = await res_edges.data()
-
-    if not rows_nodes:
-        return {"jobGroupId": job_group_id, "error": "JobGroup not found or has no contexts"}
-
-    job_group_name: str | None = rows_nodes[0].get("jobGroupName") if rows_nodes else None
-
-    # Build node map
-    ctx_map: dict[str, dict[str, Any]] = {
-        row["ctxId"]: {"jobContextId": row["ctxId"], "jobId": row["jobId"], "jobName": row["jobName"]}
-        for row in rows_nodes
-    }
-    ctx_ids = list(ctx_map.keys())
-
-    # Adjacency (up -> down) and in-degree
-    adjacency: dict[str, set] = {cid: set() for cid in ctx_ids}
-    indegree: dict[str, int] = {cid: 0 for cid in ctx_ids}
-
-    for edge in rows_edges:
-        up, dn = edge["upstreamCtxId"], edge["downstreamCtxId"]
-        if up not in ctx_map or dn not in ctx_map:
-            continue
-        if dn not in adjacency[up]:
-            adjacency[up].add(dn)
-            indegree[dn] += 1
-
-    # Kahn's topological sort + longest-path distance
-    distance: dict[str, int] = {cid: 0 for cid in ctx_ids}
-    queue: deque[str] = deque(cid for cid, deg in indegree.items() if deg == 0)
-    topo_order: list[str] = []
-
-    while queue:
-        current = queue.popleft()
-        topo_order.append(current)
-        for nxt in adjacency.get(current, []):
-            new_dist = distance[current] + 1
-            if new_dist > distance[nxt]:
-                distance[nxt] = new_dist
-            indegree[nxt] -= 1
-            if indegree[nxt] == 0:
-                queue.append(nxt)
-
-    has_cycle = len(topo_order) < len(ctx_ids)
-
-    nodes = [
-        {
-            **ctx_map[ctx_id],
-            "distance": distance.get(ctx_id, 0),
-            "orderIndex": idx,
-        }
-        for idx, ctx_id in enumerate(topo_order)
-    ]
+    if row is None:
+        logger.warning("No ENTRY context found for job_group_id=%s", job_group_id)
+        return {"jobGroupId": job_group_id, "error": "JobGroup not found or has no ENTRY context"}
 
     return {
-        "jobGroupId": job_group_id,
-        "jobGroupName": job_group_name,
-        "nodeCount": len(ctx_ids),
-        "orderedNodeCount": len(nodes),
-        "hasCycle": has_cycle,
-        "nodes": nodes,
+        "graphlet": dict(row["graphlet"]),
+        "flowSummary": dict(row["flowSummary"]),
     }
 
 

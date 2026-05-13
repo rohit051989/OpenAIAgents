@@ -30,6 +30,7 @@ configure_logging()
 # intentionally side-effectful.
 # ------------------------------------------------------------------
 import app.mcp.resources.schema  # noqa: F401, E402
+import app.mcp.tools.anomalies  # noqa: F401, E402
 import app.mcp.tools.dependencies  # noqa: F401, E402
 import app.mcp.tools.execution  # noqa: F401, E402
 import app.mcp.tools.graph  # noqa: F401, E402

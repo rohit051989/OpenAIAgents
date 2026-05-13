@@ -438,7 +438,9 @@ RETURN
       labels          : labels(n),
       name            : coalesce(n.className, n.methodName, ''),
       fqn             : coalesce(n.fqn, ''),
-      dbOperationCount: coalesce(n.dbOperationCount, 0),
+      dbOperationCount: CASE WHEN 'JavaMethod' IN labels(n)
+                             THEN size([(n)-[:DB_OPERATION]->(:Resource {type:'TABLE'}) | 1])
+                             ELSE 0 END,
       isDAOClass      : coalesce(n.isDAOClass, false)
     }],
     links: [r IN allRels | {
@@ -454,7 +456,7 @@ RETURN
     isDAOClass   : c.isDAOClass,
     methodCount  : size([n IN allNodes WHERE 'JavaMethod' IN labels(n)]),
     dbMethodCount: size([n IN allNodes WHERE 'JavaMethod' IN labels(n)
-                                        AND coalesce(n.dbOperationCount, 0) > 0])
+                                        AND size([(n)-[:DB_OPERATION]->(:Resource {type:'TABLE'}) | 1]) > 0])
   } AS codeSummary;
 
 

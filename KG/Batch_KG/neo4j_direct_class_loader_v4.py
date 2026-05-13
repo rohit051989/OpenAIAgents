@@ -813,13 +813,14 @@ class Neo4jLoader:
         MATCH (jc:JavaClass)
         WHERE (s)-[:IMPLEMENTED_BY]->(jc)
            OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
-        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)
-        WHERE m.dbOperations IS NOT NULL AND m.dbOperationCount > 0
+        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)-[rel:DB_OPERATION]->(r:Resource {type: 'TABLE'})
+        WITH s, m,
+             collect(DISTINCT rel.operationType + ':' + r.name + ':' + coalesce(rel.confidence, 'MEDIUM')) as dbOperations
         RETURN s.name as stepName,
                collect(DISTINCT {
                    methodName: m.methodName,
                    methodFqn: m.fqn,
-                   dbOperations: m.dbOperations
+                   dbOperations: dbOperations
                }) as methodsWithOps
 
         UNION
@@ -829,13 +830,14 @@ class Neo4jLoader:
         WHERE (s)-[:IMPLEMENTED_BY]->(jc)
            OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
         MATCH (jc)-[:HAS_METHOD]->(entry:JavaMethod)
-        MATCH (entry)-[:CALLS*]->(called:JavaMethod)
-        WHERE called.dbOperations IS NOT NULL AND called.dbOperationCount > 0
+        MATCH (entry)-[:CALLS*]->(called:JavaMethod)-[rel:DB_OPERATION]->(r:Resource {type: 'TABLE'})
+        WITH s, called,
+             collect(DISTINCT rel.operationType + ':' + r.name + ':' + coalesce(rel.confidence, 'MEDIUM')) as dbOperations
         RETURN s.name as stepName,
                collect(DISTINCT {
                    methodName: called.methodName,
                    methodFqn: called.fqn,
-                   dbOperations: called.dbOperations
+                   dbOperations: dbOperations
                }) as methodsWithOps
         """
         

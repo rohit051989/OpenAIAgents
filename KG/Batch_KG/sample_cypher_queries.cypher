@@ -12,7 +12,7 @@ MATCH (j:Job)-[:CONTAINS]->(s:Step)-[:IMPLEMENTED_BY]->(c:JavaClass)-[:HAS_METHO
 MATCH path = (m1)-[:CALLS*1..4]->(mn:JavaMethod)
 WHERE j.name = 'YourJobName'
   AND c.isTestClass = FALSE
-  AND any(m IN nodes(path) WHERE m.dbOperationCount > 0)
+  AND any(m IN nodes(path) WHERE size([(m)-[:DB_OPERATION]->(:Resource) | 1]) > 0)
 WITH j, s, c, m1, nodes(path) AS methodChain, path
 RETURN j.name AS Job,
        s.name AS Step,
@@ -20,8 +20,9 @@ RETURN j.name AS Job,
        m1.methodName AS EntryMethod,
        [m IN methodChain | {
          method: m.methodName, 
-         dbOps: m.dbOperationCount,
-         dbDetails: m.dbOperations
+         dbOps: size([(m)-[:DB_OPERATION]->(:Resource) | 1]),
+         dbDetails: [(m)-[rel:DB_OPERATION]->(r:Resource) |
+           rel.operationType + ':' + coalesce(r.name, r.resourceName, r.id) + ':' + coalesce(rel.confidence, 'MEDIUM')]
        }] AS CallChainWithDB;
 
 // Query 3: For one Job, show the sequence of all “steps” in the job
@@ -35,7 +36,7 @@ MATCH (j:Job)-[:CONTAINS]->(s:Step)-[:IMPLEMENTED_BY]->(c:JavaClass)-[:HAS_METHO
 MATCH path = (m1)-[:CALLS*1..4]->(mn:JavaMethod)
 WHERE c.isTestClass = FALSE 
   AND j.name = "customerProcessingJob"
-  AND any(m IN nodes(path) WHERE coalesce(m.dbOperationCount, 0) > 0)
+  AND any(m IN nodes(path) WHERE size([(m)-[:DB_OPERATION]->(:Resource) | 1]) > 0)
 
 WITH j, s, c, m1, nodes(path) AS methodChain
 
@@ -46,8 +47,9 @@ RETURN
   m1.methodName AS EntryMethod,
   [m IN methodChain | {
       method: m.methodName,
-      dbOps: coalesce(m.dbOperationCount, 0),
-      dbDetails: m.dbOperations,
+      dbOps: size([(m)-[:DB_OPERATION]->(:Resource) | 1]),
+      dbDetails: [(m)-[rel:DB_OPERATION]->(r:Resource) |
+        rel.operationType + ':' + coalesce(r.name, r.resourceName, r.id) + ':' + coalesce(rel.confidence, 'MEDIUM')],
       resources: [(m)-[:DB_OPERATION]->(r:Resource) | coalesce(r.name, r.name, r.schemaName)]
   }] AS CallChainWithDBAndResources;
 
@@ -56,7 +58,7 @@ MATCH (j:Job)-[:CONTAINS]->(s:Step)-[:IMPLEMENTED_BY]->(c:JavaClass)-[:HAS_METHO
 MATCH path = (m1)-[:CALLS*1..4]->(mn:JavaMethod)
 WHERE j.name = 'customerProcessingJob'
 AND c.isTestClass = FALSE
-WITH j, s, c, m1, [m IN nodes(path) WHERE coalesce(m.dbOperationCount, 0) > 0] AS dbMethods
+WITH j, s, c, m1, [m IN nodes(path) WHERE size([(m)-[:DB_OPERATION]->(:Resource) | 1]) > 0] AS dbMethods
 WHERE size(dbMethods) > 0
 
 RETURN
@@ -66,8 +68,9 @@ RETURN
   m1.methodName AS EntryMethod,
   [m IN dbMethods | {
       method: m.methodName,
-      dbOps: m.dbOperationCount,
-      dbDetails: m.dbOperations,
+      dbOps: size([(m)-[:DB_OPERATION]->(:Resource) | 1]),
+      dbDetails: [(m)-[rel:DB_OPERATION]->(r:Resource) |
+        rel.operationType + ':' + coalesce(r.name, r.resourceName, r.id) + ':' + coalesce(rel.confidence, 'MEDIUM')],
       resources: [(m)-[:DB_OPERATION]->(r:Resource) | r]
   }] AS DBMethodsWithResources;
 
@@ -77,7 +80,7 @@ MATCH path = (m1)-[:CALLS*1..4]->(:JavaMethod)
 WHERE j.name = 'customerProcessingJob'
 
 WITH j, s, c, m1, nodes(path) AS chain
-WITH j, s, c, m1, [m IN chain WHERE coalesce(m.dbOperationCount, 0) > 0] AS dbMethods
+WITH j, s, c, m1, [m IN chain WHERE size([(m)-[:DB_OPERATION]->(:Resource) | 1]) > 0] AS dbMethods
 WHERE size(dbMethods) > 0
 
 // Expand dbMethods to check resource relation presence
@@ -97,8 +100,9 @@ WITH
     DISTINCT CASE
       WHEN size(rs) = 0 THEN {
         method: m.methodName,
-        dbOps: coalesce(m.dbOperationCount, 0),
-        dbDetails: m.dbOperations
+        dbOps: size([(m)-[:DB_OPERATION]->(:Resource) | 1]),
+        dbDetails: [(m)-[rel:DB_OPERATION]->(r:Resource) |
+          rel.operationType + ':' + coalesce(r.name, r.resourceName, r.id) + ':' + coalesce(rel.confidence, 'MEDIUM')]
       }
       ELSE null
     END
@@ -119,7 +123,7 @@ RETURN
   // 1) Final resources being used (distinct)
   [r IN allResources WHERE r IS NOT NULL | coalesce(r.name, r.resourceName, r.id)] AS FinalResourcesUsed,
 
-  // 2) DB methods with dbOperationCount > 0 but no DB_OPERATION->Resource relation
+  // 2) DB methods inferred from DB_OPERATION relationships but missing usable resources
   missingResourceMethods AS DbMethodsMissingResource;
 
 
