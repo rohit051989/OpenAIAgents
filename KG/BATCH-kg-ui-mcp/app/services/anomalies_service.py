@@ -53,7 +53,7 @@ RETURN
 
 # Q2a -- JobGroup-level ALLOWS / DENIES rules
 _Q_JG_RULES = """
-MATCH (jg:JobGroup)-[rel:ALLOWS|DENIES]->(jr:JobRule)-[:USES_PATTERN]->(cp:CalendarPattern)
+MATCH (jg:JobGroup)-[rel:ALLOWS|DENIES]->(jr:BusinessCalendar)-[:USES_PATTERN]->(cp:CalendarPattern)
 OPTIONAL MATCH (cp)-[hr:IS_HOLIDAY_ON]->(h:Day)
 WITH jg, rel, jr, cp,
      collect(DISTINCT CASE WHEN h IS NOT NULL THEN {
@@ -72,7 +72,7 @@ RETURN
 
 # Q2b -- SIC-level ALLOWS / DENIES rules
 _Q_SIC_RULES = """
-MATCH (sic:ScheduleInstanceContext)-[rel:ALLOWS|DENIES]->(jr:JobRule)-[:USES_PATTERN]->(cp:CalendarPattern)
+MATCH (sic:ScheduleInstanceContext)-[rel:ALLOWS|DENIES]->(jr:BusinessCalendar)-[:USES_PATTERN]->(cp:CalendarPattern)
 OPTIONAL MATCH (cp)-[hr:IS_HOLIDAY_ON]->(h:Day)
 WITH sic, rel, jr, cp,
      collect(DISTINCT CASE WHEN h IS NOT NULL THEN {

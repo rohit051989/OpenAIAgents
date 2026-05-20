@@ -196,8 +196,8 @@ class Neo4jLoader:
         self._load_calendar_layer1()
         self._load_calendar_patterns(excel_file)
         self._load_holidays(excel_file)
-        self._load_job_rules(excel_file)
-        self._load_job_rules_association(excel_file)
+        self._load_business_calendars(excel_file)
+        self._load_business_calendars_association(excel_file)
         logger.info(" Class-level data loaded successfully")
     
     def _load_job_groups(self, excel_file):
@@ -1559,9 +1559,40 @@ class Neo4jLoader:
     @staticmethod
     def _create_sla(tx, data: Dict):
         """Transaction function to create SLA"""
+        valid_for_entity_types = {'JobGroup', 'ScheduleInstanceContext', 'Resource', 'Job'}
+        for_entity_type = str(data.get('forEntityType', '') or '').strip()
+        if for_entity_type not in valid_for_entity_types:
+            raise ValueError(
+                f"Invalid forEntityType={for_entity_type!r}. "
+                f"Allowed: {sorted(valid_for_entity_types)}"
+            )
+
+        # Backward-compatibility: legacy sheets may still use Job; convert to SIC.
+        # SLA ownership is now modeled at JobGroup / ScheduleInstanceContext / Resource.
+        if for_entity_type == 'Job':
+            logger.warning(
+                "SLA row uses forEntityType='Job'. Converting to ScheduleInstanceContext"
+            )
+
+        relative_entity_id = data.get('relativeEntityId')
+        relative_entity_type = str(data.get('relativeEntityType', '') or '').strip()
+        has_relative = relative_entity_id not in (None, '')
+        if has_relative:
+            # Relative SLA must point to a Resource and belong to SIC or JobGroup.
+            if relative_entity_type != 'Resource':
+                raise ValueError(
+                    f"relativeEntityType must be 'Resource' when relativeEntityId is set; "
+                    f"got {relative_entity_type!r}"
+                )
+            if for_entity_type not in {'JobGroup', 'ScheduleInstanceContext', 'Job'}:
+                raise ValueError(
+                    "Relative SLA is supported only for JobGroup/ScheduleInstanceContext ownership"
+                )
+
         node = SLANodeDef(
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
+            policy=str(data.get('policy', '')),
             severity=str(data.get('severity', '')),
             enabled=bool(data.get('enabled', True)),
             type=str(data.get('type', '')),
@@ -1572,6 +1603,7 @@ class Neo4jLoader:
         query = """
         MERGE (sla:SLA {id: $id})
         SET sla.name = $name,
+            sla.policy = $policy,
             sla.severity = $severity,
             sla.enabled = $enabled,
             sla.type = $type
@@ -1582,25 +1614,35 @@ class Neo4jLoader:
             query += ", sla.durationMs = $durationMs"
         if node.tz:
             query += ", sla.tz = $tz"
-        if 'relativeEntityId' in data:
-            relative_entity_type = data['relativeEntityType']
+        if has_relative:
             query += f"""
                 WITH sla
                 MATCH (relativeEntity:{relative_entity_type} {{id: $relativeEntityId}})
-                MERGE (sla)-[:RELATIVE_TO]->(relativeEntity)
+                MERGE (sla)-[:RELATIVE_TO_RESOURCE]->(relativeEntity)
             """
-        entity_type = data['forEntityType']
-        query += f"""
+        if for_entity_type == 'Job':
+            # Legacy sheet compatibility: resolve all SICs representing this Job.
+            query += """
         WITH sla
-        MATCH (entity:{entity_type} {{id: $forEntityId}})
+        MATCH (j:Job)
+        WHERE j.id = $forEntityId OR j.name = $forEntityId OR elementId(j) = $forEntityId
+        MATCH (entity:ScheduleInstanceContext)-[:FOR_JOB]->(j)
+        MERGE (entity)-[:HAS_SLA]->(sla)
+        RETURN sla
+        """
+        else:
+            query += f"""
+        WITH sla
+        MATCH (entity:{for_entity_type} {{id: $forEntityId}})
         MERGE (entity)-[:HAS_SLA]->(sla)
         RETURN sla
         """
         tx.run(query, id=node.id, name=node.name,
+               policy=node.policy,
                severity=node.severity, enabled=node.enabled, type=node.type,
                time=node.time, durationMs=node.durationMs, tz=node.tz,
-               relativeEntityId=data.get('relativeEntityId'),
-               relativeEntityType=data.get('relativeEntityType'),
+               relativeEntityId=relative_entity_id,
+               relativeEntityType=relative_entity_type,
                forEntityId=data.get('forEntityId'))
 
     def _load_associate_calendar(self, excel_file):
@@ -1703,14 +1745,14 @@ class Neo4jLoader:
           runtimeParams    - Comma-separated params the CALLING AGENT must supply
                              from the user's question/context at evaluation time.
                              e.g. "date,region"
-                             These are NEVER stored on JobRule.params.  The agentic
+                             These are NEVER stored on BusinessCalendar.params.  The agentic
                              backend extracts them from the incoming request (target
                              date, region scope) and passes them directly to the
                              evaluator function.
           configParams     - Comma-separated params that must be present in
-                             JobRule.params (the static, rule-authored values).
+                             BusinessCalendar.params (the static, rule-authored values).
                              e.g. "dayOfWeek,occurrences"
-                             The agentic backend reads these from JobRule.params
+                             The agentic backend reads these from BusinessCalendar.params
                              (a JSON string) and passes them to the evaluator.
           evaluatorFn      - Python evaluator function name in the registry
           description      - Human-readable description
@@ -1748,7 +1790,7 @@ class Neo4jLoader:
                 'matchExpression': str(data.get('matchExpression', '')).strip(),
                 'name':            str(data.get('name', '')).strip(),
                 'runtimeParams':   _split_csv('runtimeParams'),   # agent supplies at call time
-                'configParams':    _split_csv('configParams'),    # baked into JobRule.params
+                'configParams':    _split_csv('configParams'),    # baked into BusinessCalendar.params
                 'evaluatorFn':     str(data.get('evaluatorFn', '')).strip(),
                 'description':     str(data.get('description', '')).strip(),
                 'isActive':        is_active,
@@ -1848,9 +1890,9 @@ class Neo4jLoader:
 
         logger.info(f" Loaded {loaded} IS_HOLIDAY_ON edge(s) onto HOLIDAY CalendarPattern")
 
-    def _load_job_rules(self, excel_file):
+    def _load_business_calendars(self, excel_file):
         """
-        Load JobRule nodes from the 'JobRules' Excel tab and link each to its
+        Load BusinessCalendar nodes from the 'BusinessCalendars' Excel tab and link each to its
         CalendarPattern via USES_PATTERN.
         Requires _load_calendar_patterns to have run first.
 
@@ -1869,8 +1911,8 @@ class Neo4jLoader:
           NTH_FIRST_BIZ_MONTH  : {"occurrences": [1,2,3,4,5,6,7,8,9,10,11,12]}
                     HOLIDAY              : {} (region drives the holiday lookup at query time)
         """
-        df = pd.read_excel(excel_file, 'JobRules')
-        logger.info(f"Loading {len(df)} job rule(s) from Excel...")
+        df = pd.read_excel(excel_file, 'BusinessCalendars')
+        logger.info(f"Loading {len(df)} business calendar(s) from Excel...")
 
         rows = []
         for _, row in df.iterrows():
@@ -1918,7 +1960,7 @@ class Neo4jLoader:
             result = session.run(
                 """
                 UNWIND $rows AS row
-                MERGE (r:JobRule {ruleId: row.ruleId})
+                MERGE (r:BusinessCalendar {ruleId: row.ruleId})
                 ON CREATE SET
                     r.name        = row.name,
                     r.region      = row.region,
@@ -1941,17 +1983,17 @@ class Neo4jLoader:
             record = result.single()
             loaded = record['loaded'] if record else 0
 
-        logger.info(f" Loaded/updated {loaded} JobRule node(s)")
+        logger.info(f" Loaded/updated {loaded} BusinessCalendar node(s)")
 
-    def _load_job_rules_association(self, excel_file):
+    def _load_business_calendars_association(self, excel_file):
         """
-        Load JobRule associations from the 'JobRulesAssociation' Excel tab.
+        Load BusinessCalendar associations from the 'BusinessCalendarsAssociation' Excel tab.
         Creates ALLOWS or DENIES relationships between JobGroup /
-        ScheduleInstanceContext nodes and JobRule nodes.
-        Requires _load_job_rules to have run first.
+        ScheduleInstanceContext nodes and BusinessCalendar nodes.
+        Requires _load_business_calendars to have run first.
 
         Expected columns:
-          id                - ruleId from the JobRules tab
+          id                - ruleId from the BusinessCalendars tab
           name              - Human-readable label (informational only)
           contextType       - 'JobGroup' or 'ScheduleInstanceContext'
                     requiresContextId - id of the JobGroup or ScheduleInstanceContext node;
@@ -1971,8 +2013,8 @@ class Neo4jLoader:
         # Only these two labels are valid to prevent Cypher label injection
         VALID_CONTEXT_TYPES = {'JobGroup', 'ScheduleInstanceContext'}
 
-        df = pd.read_excel(excel_file, 'JobRulesAssociation')
-        logger.info(f"Loading {len(df)} job rule association(s) from Excel...")
+        df = pd.read_excel(excel_file, 'BusinessCalendarsAssociation')
+        logger.info(f"Loading {len(df)} business calendar association(s) from Excel...")
 
         allows_rows = []
         denies_rows = []
@@ -2035,7 +2077,7 @@ class Neo4jLoader:
 
         with self.driver.session(database=self.database) as session:
 
-            # ALLOWS: JobGroup/SIC -[:ALLOWS]-> JobRule
+            # ALLOWS: JobGroup/SIC -[:ALLOWS]-> BusinessCalendar
             # Group by contextType to keep dynamic label in Python, not Cypher
             for ctx_type in VALID_CONTEXT_TYPES:
                 batch = [r for r in allows_rows if r['contextType'] == ctx_type]
@@ -2045,7 +2087,7 @@ class Neo4jLoader:
                     f"""
                     UNWIND $rows AS row
                     MATCH (ctx:{ctx_type} {{id: row.contextId}})
-                    MATCH (r:JobRule {{ruleId: row.ruleId}})
+                    MATCH (r:BusinessCalendar {{ruleId: row.ruleId}})
                     MERGE (ctx)-[rel:ALLOWS {{ruleId: row.ruleId}}]->(r)
                     RETURN count(rel) AS created
                     """,
@@ -2054,7 +2096,7 @@ class Neo4jLoader:
                 record = result.single()
                 allows_created += record['created'] if record else 0
 
-            # DENIES: JobGroup/SIC -[:DENIES {action}]-> JobRule
+            # DENIES: JobGroup/SIC -[:DENIES {action}]-> BusinessCalendar
             # DENIES always takes precedence over ALLOWS — no priority needed.
             for ctx_type in VALID_CONTEXT_TYPES:
                 batch = [r for r in denies_rows if r['contextType'] == ctx_type]
@@ -2064,7 +2106,7 @@ class Neo4jLoader:
                     f"""
                     UNWIND $rows AS row
                     MATCH (ctx:{ctx_type} {{id: row.contextId}})
-                    MATCH (r:JobRule {{ruleId: row.ruleId}})
+                    MATCH (r:BusinessCalendar {{ruleId: row.ruleId}})
                     MERGE (ctx)-[rel:DENIES {{ruleId: row.ruleId}}]->(r)
                     SET rel.action = row.action
                     RETURN count(rel) AS created
@@ -2076,7 +2118,7 @@ class Neo4jLoader:
 
         logger.info(
             f" Created/updated {allows_created} ALLOWS and {denies_created} DENIES "
-            f"relationship(s) between JobGroups/Contexts and JobRules"
+            f"relationship(s) between JobGroups/Contexts and BusinessCalendars"
         )
 
     # ========================================================================

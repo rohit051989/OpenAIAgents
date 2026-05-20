@@ -31,6 +31,27 @@ from classes.KGNodeDefs import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _compute_business_date(start_dt: pd.Timestamp, cutoff_hour: int) -> str:
+    """Return the effective business date for an execution as YYYY-MM-DD.
+
+    Nightly jobs that start at or after *cutoff_hour* (24-hour, e.g. 18 = 6 PM)
+    are booked against the *next* calendar day.  All earlier starts use the
+    calendar date of the startTime itself.
+
+    Args:
+        start_dt:    Parsed startTime of the execution.
+        cutoff_hour: Hour threshold (inclusive) read from
+                     instance_data.nightly_job_cutoff_hour in the YAML config.
+    """
+    if start_dt.hour >= cutoff_hour:
+        return (start_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    return start_dt.strftime('%Y-%m-%d')
+
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +81,9 @@ class Neo4jInstanceLoaderV2:
             password = neo4j_config['password']
             database = neo4j_config['database_kg']
             self.instance_excel_path = config.get('instance_data', {}).get('excel_file', '')
+            self.nightly_job_cutoff_hour = int(
+                config.get('instance_data', {}).get('nightly_job_cutoff_hour', 18)
+            )
             logger.info(f"Loaded configuration from {config_path}")
         
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -189,8 +213,9 @@ class Neo4jInstanceLoaderV2:
         # Parse the datetime value that pandas delivers from Excel
         start_dt = pd.Timestamp(start_time_raw)
         start_time_str = start_dt.strftime('%H:%M:%S')
-        # business_date default: derived from startTime; overridden if jge_id carries it
-        business_date = start_dt.strftime('%Y-%m-%d')
+        # business_date: jobs starting at or after nightly_job_cutoff_hour are
+        # booked to the next calendar day (nightly-job convention).
+        business_date = _compute_business_date(start_dt, self.nightly_job_cutoff_hour)
 
         # ── Derive job_group_id and jge_id — three strategies ────────────────────────
         if 'jobGroupId' in data:

@@ -114,13 +114,14 @@ RETURN {
 
 // Q05 [JSON] — Job Full Detail
 // Parameter : $jobName
-// Returns complete job info: steps summary, SLA, resources, listeners, tags, git.
+// Returns complete job info: steps summary, SIC-level SLAs, resources, listeners, tags, git.
 // MCP use : "tell me everything about job X"
 // ─────────────────────────────────────────────────────────────────────────────
 MATCH (j:Job {name: $jobName})
 OPTIONAL MATCH (jg:JobGroup)-[:HAS_JOB]->(j)
 OPTIONAL MATCH (j)-[:CONTAINS]->(s:Step)
-OPTIONAL MATCH (j)-[:HAS_SLA]->(sla:SLA)
+OPTIONAL MATCH (sic:ScheduleInstanceContext)-[:FOR_JOB]->(j)
+OPTIONAL MATCH (sic)-[:HAS_SLA]->(sla:SLA)
 OPTIONAL MATCH (j)-[:Require_Resource]->(r:Resource)
 OPTIONAL MATCH (j)-[:HAS_LISTENER]->(l:Listener)
 OPTIONAL MATCH (j)-[:HAS_TAG]->(t:Tag)
@@ -136,9 +137,12 @@ WITH j, jg,
        procedureCallCount : coalesce(s.stepProcedureCallCount, 0),
        shellExecutionCount: coalesce(s.stepShellExecutionCount,0)
      }) AS steps,
-     collect(DISTINCT { id: sla.id, name: sla.name, type: sla.type,
-                        policy: sla.policy, severity: sla.severity,
-                        durationMs: sla.durationMs }) AS slas,
+     collect(DISTINCT {
+       sicId: sic.id,
+       id: sla.id, name: sla.name, type: sla.type,
+       policy: sla.policy, severity: sla.severity,
+       durationMs: sla.durationMs, time: sla.time, tz: sla.tz
+     }) AS slas,
      collect(DISTINCT { id: r.id,   name: r.name,   type: r.type,
                         schemaName: r.schemaName }) AS resources,
      collect(DISTINCT { name: l.name, scope: l.scope,
@@ -688,14 +692,15 @@ RETURN {
 
 // Q15 [JSON] — SLA Configuration for a Job Group
 // Parameter : $jobGroupName
-// Returns group-level and job-level SLA definitions with resource linkages.
+// Returns group-level and SIC-level SLA definitions with resource linkages.
 // MCP use : "what are the SLA requirements for job group X?"
 // ─────────────────────────────────────────────────────────────────────────────
 MATCH (jg:JobGroup {name: $jobGroupName})
 OPTIONAL MATCH (jg)-[:HAS_SLA]->(groupSla:SLA)
-OPTIONAL MATCH (groupSla)-[:RELATIVE_TO_RESOURCE]->(r1:Resource)
-OPTIONAL MATCH (jg)-[:HAS_JOB]->(j:Job)-[:HAS_SLA]->(jobSla:SLA)
-OPTIONAL MATCH (jobSla)-[:RELATIVE_TO_RESOURCE]->(r2:Resource)
+OPTIONAL MATCH (groupSla)-[:RELATIVE_TO_RESOURCE|RELATIVE_TO]->(r1:Resource)
+OPTIONAL MATCH (sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg)
+OPTIONAL MATCH (sic)-[:HAS_SLA]->(sicSla:SLA)
+OPTIONAL MATCH (sicSla)-[:RELATIVE_TO_RESOURCE|RELATIVE_TO]->(r2:Resource)
 WITH jg,
      collect(DISTINCT {
        id              : groupSla.id,
@@ -709,22 +714,23 @@ WITH jg,
        relativeResource: r1.name
      }) AS groupSlas,
      collect(DISTINCT {
-       jobName         : j.name,
-       id              : jobSla.id,
-       name            : jobSla.name,
-       type            : jobSla.type,
-       policy          : jobSla.policy,
-       severity        : jobSla.severity,
-       durationMs      : jobSla.durationMs,
-       time            : jobSla.time,
-       tz              : jobSla.tz,
+       sicId           : sic.id,
+       sicName         : sic.name,
+       id              : sicSla.id,
+       name            : sicSla.name,
+       type            : sicSla.type,
+       policy          : sicSla.policy,
+       severity        : sicSla.severity,
+       durationMs      : sicSla.durationMs,
+       time            : sicSla.time,
+       tz              : sicSla.tz,
        relativeResource: r2.name
-     }) AS jobSlas
+     }) AS sicSlas
 RETURN {
   jobGroupName: jg.name,
   groupSlas   : groupSlas,
-  jobSlas     : jobSlas,
-  totalSlas   : size(groupSlas) + size(jobSlas)
+  sicSlas     : sicSlas,
+  totalSlas   : size(groupSlas) + size(sicSlas)
 } AS slaConfig;
 
 

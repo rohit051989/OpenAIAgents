@@ -5,9 +5,8 @@ Registers the following MCP tools:
   - get_slow_jobs
   - get_step_failure_analysis
   - compare_jobs
-
-This module is intentionally thin: only MCP registration lives here.
-All logic is in ``performance_service``.
+  - get_sla_execution_breach
+  - predict_sla_impact
 """
 
 import logging
@@ -97,3 +96,73 @@ async def tool_compare_jobs(job_ids: list[str], days: int = 30) -> dict:
     logger.info("MCP tool compare_jobs job_ids=%s days=%s", job_ids, days)
     driver = await get_driver()
     return await performance_service.compare_jobs(driver, job_ids=job_ids, days=days)
+
+
+@mcp.tool(name="get_sla_execution_breach")
+async def tool_get_sla_execution_breach(
+    business_date: str,
+    region: str = "ALL",
+) -> dict:
+    """Return SLA breach status for a day from execution history only.
+
+    Args:
+        business_date: ISO date (YYYY-MM-DD) to evaluate.
+        region: Region used for eligibility evaluation.
+
+    Returns:
+        Execution-only SLA status for eligible SICs on the given date.
+    """
+    logger.info(
+        "MCP tool get_sla_execution_breach business_date=%s region=%s",
+        business_date,
+        region,
+    )
+    driver = await get_driver()
+    return await performance_service.get_sla_execution_breach(
+        driver,
+        business_date=business_date,
+        region=region,
+    )
+
+
+@mcp.tool(name="predict_sla_impact")
+async def tool_predict_sla_impact(
+    source_type: str,
+    source_id: str,
+    delay_minutes: int,
+    days: int = 30,
+    business_date: str | None = None,
+    region: str = "ALL",
+) -> dict:
+    """Predict SLA impact for delay scenarios.
+
+    Args:
+        source_type: Dependency type: ``resource``, ``job``, ``sic``, ``job_group``.
+        source_id: Source identifier (id/name/elementId).
+        delay_minutes: Simulated delay to inject.
+        days: Historical window used for average duration computation.
+        business_date: Optional date for today/future eligible-graph prediction.
+        region: Region used for eligibility evaluation when business_date is set.
+
+    Returns:
+        Predicted SLA impact payload with critical-path and buffer-aware fields.
+    """
+    logger.info(
+        "MCP tool predict_sla_impact source_type=%s source_id=%s delay_minutes=%s days=%s business_date=%s region=%s",
+        source_type,
+        source_id,
+        delay_minutes,
+        days,
+        business_date,
+        region,
+    )
+    driver = await get_driver()
+    return await performance_service.predict_sla_impact(
+        driver,
+        source_type=source_type,
+        source_id=source_id,
+        delay_minutes=delay_minutes,
+        days=days,
+        business_date=business_date,
+        region=region,
+    )

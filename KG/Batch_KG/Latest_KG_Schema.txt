@@ -332,11 +332,11 @@
         "ENTRY": "Links JobGroup/Job/Block to its entry point (ScheduleInstanceContext or Step)",
         "CONTAINS": "Links Job to its Steps or Blocks; also links Block to its contained Steps",
         "HAS_TAG": "Links entity (Job, Step, Resource, JobGroupExecution, etc.) to its Tag",
-        "Require_Resource": "Links JobGroup or Job to required Resource",
-        "HAS_SLA": "Links entity (JobGroup, Job, Resource) to its SLA",
+        "Require_Resource": "Links JobGroup or ScheduleInstanceContext to required Resource",
+        "HAS_SLA": "Links entity (JobGroup, ScheduleInstanceContext, Resource) to its SLA",
         "RELATIVE_TO_RESOURCE": "Links SLA to Resource it's relative to (for relative SLAs)",
-        "CAN_EXECUTE_ON": "Links JobGroup or Job to Calendar allowing execution",
-        "CANNOT_EXECUTE_ON": "Links JobGroup or Job to Calendar blocking execution",
+        "CAN_EXECUTE_ON": "Links JobGroup or ScheduleInstanceContext to Calendar allowing execution",
+        "CANNOT_EXECUTE_ON": "Links JobGroup or ScheduleInstanceContext to Calendar blocking execution",
         "BLOCKS_ON": "Links Calendar to Holidays that block execution",
         "FOR_RESOURCE": "Links DataAsset or ResourceAvailabilityEvent to its parent Resource",
         "EXECUTES_JOB_GROUP": "Links JobGroupExecution to JobGroup being executed",
@@ -399,10 +399,10 @@
             "pattern": "(Job)-[:ENTRY]->(Step)"
         },
         {
-            "source": "Job",
+            "source": "ScheduleInstanceContext",
             "relationship": "HAS_SLA",
             "target": "SLA",
-            "pattern": "(Job)-[:HAS_SLA]->(SLA)"
+            "pattern": "(ScheduleInstanceContext)-[:HAS_SLA]->(SLA)"
         },
         {
             "source": "JobContextExecution",

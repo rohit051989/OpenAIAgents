@@ -154,13 +154,11 @@ def evaluate_nth_multi_dow_month(
         return False
     if d.isoweekday() not in daysOfWeek:
         return False
-    # Count qualifying weekdays from the 1st up to and including d
-    count = sum(
-        1
-        for day in range(1, d.day + 1)
-        if _date(d.year, d.month, day).isoweekday() in daysOfWeek
-    )
-    return count in weekOccurrences
+    # Which occurrence of THIS specific weekday within the month?
+    # e.g. if d is the 3rd Tuesday, occurrence = 3.
+    # Formula is the same as nth_dow_month: (day - 1) // 7 + 1
+    occurrence = (d.day - 1) // 7 + 1
+    return occurrence in weekOccurrences
 
 
 def evaluate_nth_dom(
@@ -456,13 +454,15 @@ def evaluate_graph_property(
 
     # ── Week (ISO week containing d) ─────────────────────────────────────────
     if nodeName == 'Week':
-        iso_year, iso_week, _ = d.isocalendar()
+        _, iso_week, _ = d.isocalendar()
         # Days in this ISO week: Mon=d - (d.weekday()) to Sun
-        week_start = d - __import__('datetime').timedelta(days=d.weekday())
-        week_end   = week_start + __import__('datetime').timedelta(days=6)
+        week_start = d - _td(days=d.weekday())
+        week_end = week_start + _td(days=6)
+        first_dom_date = _date(d.year, d.month, 1)
+        last_dom_date = _date(d.year, d.month, last_dom)
         mapping = {
-            'isFirstWeekOfMonth': week_start.month == d.month and week_start.day <= 7,
-            'isLastWeekOfMonth':  week_end.month == d.month and week_end.day >= last_dom - 6,
+            'isFirstWeekOfMonth': week_start <= first_dom_date <= week_end,
+            'isLastWeekOfMonth': week_start <= last_dom_date <= week_end,
             'isFirstWeekOfYear':  iso_week == 1,
             'isLastWeekOfYear':   iso_week >= 52,
         }
@@ -508,7 +508,7 @@ def evaluate_named_holiday(
     Args:
         date:          Candidate date.
         holidayDates:  List of exact holiday dates as stored in IS_HOLIDAY_ON.date.
-                       Stored in JobRule.params as:
+                       Stored in BusinessCalendar.params as:
                          {"holidayDates": ["2026-12-25", "2027-01-01"]}
 
     Returns True if the date matches ANY entry in holidayDates.
@@ -538,7 +538,7 @@ def evaluate_specific_date(
     Args:
         date:        Candidate date.
         targetDates: List of ISO date strings to match (YYYY-MM-DD).
-                     Stored in JobRule.params as:
+                     Stored in BusinessCalendar.params as:
                        {"targetDates": ["2026-03-15", "2026-09-20"]}
 
     Returns True if the date matches ANY entry in targetDates.

@@ -174,6 +174,11 @@ class_data:
 # Instance data configuration
 instance_data:
   excel_file: "sample_data/instance_level_data_v4.xlsx"
+  # Jobs that start at or after this hour (24-hour clock) are considered
+  # nightly jobs and their effective business date is shifted to the next
+  # calendar day.  e.g. 18 = 6 PM means a job starting at 18:05 on 2026-05-20
+  # gets businessDate = 2026-05-21.
+  nightly_job_cutoff_hour: 18
 
 # DB Operation Analysis Configuration
 db_operation_analysis:
