@@ -28,15 +28,16 @@ WHERE j.name = $job_id
   AND e.businessDate >= date($start_date)
   AND e.durationMs IS NOT NULL
 WITH j.name AS job_name,
-     e.durationMs / 1000.0 AS duration_seconds
+     e.durationMs / 1000.0 AS duration_seconds,
+     e.status AS status
 RETURN
     job_name,
     avg(duration_seconds)   AS avg_duration_seconds,
     min(duration_seconds)   AS min_duration_seconds,
     max(duration_seconds)   AS max_duration_seconds,
     count(*)                AS execution_count,
-    sum(CASE WHEN e.status = 'COMPLETED' THEN 1 ELSE 0 END) AS success_count,
-    sum(CASE WHEN e.status = 'FAILED'    THEN 1 ELSE 0 END) AS failure_count
+    sum(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS success_count,
+    sum(CASE WHEN status = 'FAILED'    THEN 1 ELSE 0 END) AS failure_count
 """
 
 _Q_SLOW_JOBS = """
@@ -182,7 +183,7 @@ UNWIND $sic_eids AS sic_eid
 MATCH (sic:ScheduleInstanceContext)
 WHERE elementId(sic) = sic_eid
 OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
-WHERE jce.startTime >= datetime($start_date)
+WHERE jce.businessDate >= date($start_date)
   AND jce.durationMs IS NOT NULL
 RETURN
     sic_eid,
@@ -262,7 +263,7 @@ WITH DISTINCT sic
 MATCH (sic)-[:FOR_GROUP]->(jg:JobGroup)
 OPTIONAL MATCH (sic)-[:FOR_JOB]->(job:Job)
 OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
-WHERE jce.startTime >= datetime($start_date)
+WHERE jce.businessDate >= date($start_date)
     AND jce.durationMs IS NOT NULL
 WITH sic, jg, job,
          avg(jce.durationMs) AS avg_duration_ms
@@ -293,7 +294,7 @@ WITH DISTINCT sic
 MATCH (sic)-[:FOR_GROUP]->(jg:JobGroup)
 OPTIONAL MATCH (sic)-[:FOR_JOB]->(job:Job)
 OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
-WHERE jce.startTime >= datetime($start_date)
+WHERE jce.businessDate >= date($start_date)
         AND jce.durationMs IS NOT NULL
 WITH sic, jg, job,
          avg(jce.durationMs) AS avg_duration_ms
@@ -385,7 +386,7 @@ RETURN DISTINCT
 # ---------------------------------------------------------------------------
 
 def _start_date(days: int) -> str:
-    return (datetime.now() - timedelta(days=days)).isoformat()
+    return (date.today() - timedelta(days=days)).strftime('%Y-%m-%d')
 
 
 def _today_business_date() -> str:
