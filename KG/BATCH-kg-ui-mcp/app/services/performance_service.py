@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 _Q_JOB_PERFORMANCE = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE j.id = $job_id
-  AND e.startTime >= datetime($start_date)
+WHERE j.name = $job_id
+  AND e.businessDate >= date($start_date)
   AND e.durationMs IS NOT NULL
 WITH j.name AS job_name,
      e.durationMs / 1000.0 AS duration_seconds
@@ -41,14 +41,14 @@ RETURN
 
 _Q_SLOW_JOBS = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE e.startTime >= datetime($start_date)
+WHERE e.businessDate >= date($start_date)
   AND e.durationMs IS NOT NULL
   AND e.durationMs > $threshold_ms
 RETURN
     j.name                      AS job_name,
     e.id                        AS execution_id,
-    toString(e.startTime)       AS start_time,
-    toString(e.endTime)         AS end_time,
+    toString(e.businessDate) + 'T' + toString(e.startTime)  AS start_time,
+    toString(e.businessDate) + 'T' + toString(e.endTime)    AS end_time,
     e.status                    AS status,
     e.durationMs / 1000         AS duration_seconds,
     round(e.durationMs / 60000.0, 2) AS duration_minutes
@@ -56,30 +56,10 @@ ORDER BY e.durationMs DESC
 LIMIT $limit
 """
 
-_Q_STEP_FAILURE_ANALYSIS = """
-MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE j.id = $job_id
-  AND e.startTime >= datetime($start_date)
-MATCH (se:StepExecution)-[:FOR_RUN]->(e)
-WITH
-    se.stepId                                                           AS step_id,
-    count(se)                                                           AS total_executions,
-    sum(CASE WHEN se.status = 'FAILED'    THEN 1 ELSE 0 END)           AS failures,
-    avg(se.durationMs)                                                  AS avg_duration_ms
-WHERE total_executions > 0
-RETURN
-    step_id,
-    total_executions,
-    failures,
-    round(100.0 * failures / total_executions, 2) AS failure_rate_pct,
-    round(avg_duration_ms / 1000.0, 2)            AS avg_duration_seconds
-ORDER BY failure_rate_pct DESC, failures DESC
-"""
-
 _Q_COMPARE_JOBS = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE j.id IN $job_ids
-  AND e.startTime >= datetime($start_date)
+WHERE j.name IN $job_ids
+  AND e.businessDate >= date($start_date)
   AND e.durationMs IS NOT NULL
 WITH j.name AS job_name,
      avg(e.durationMs / 1000.0) AS avg_duration_seconds,
@@ -296,7 +276,6 @@ RETURN DISTINCT
     elementId(job)            AS job_eid,
     job.id                    AS job_id,
     job.name                  AS job_name,
-    sic.estimatedDurationMs   AS estimated_duration_ms,
     avg_duration_ms
 """
 
@@ -328,7 +307,6 @@ RETURN DISTINCT
         elementId(job)            AS job_eid,
         job.id                    AS job_id,
         job.name                  AS job_name,
-        sic.estimatedDurationMs   AS estimated_duration_ms,
         avg_duration_ms
 """
 
@@ -1298,35 +1276,6 @@ async def get_slow_jobs(
         "slow_jobs": records,
         "count": len(records),
         "threshold_minutes": threshold_minutes,
-        "time_range_days": days,
-    }
-
-
-async def get_step_failure_analysis(
-    driver: AsyncDriver,
-    job_id: str,
-    days: int = 30,
-) -> dict[str, Any]:
-    """Return step-level failure rates for a specific job.
-
-    Args:
-        driver: Shared Neo4j async driver.
-        job_id: The ``id`` property of the target ``Job`` node.
-        days: How many days back to include.
-
-    Returns:
-        ``{"job_id": job_id, "step_analysis": [...], "count": N, "time_range_days": days}``
-    """
-    logger.info("get_step_failure_analysis job_id=%s days=%s", job_id, days)
-    async with kg_session(driver) as session:
-        result = await session.run(
-            _Q_STEP_FAILURE_ANALYSIS, job_id=job_id, start_date=_start_date(days)
-        )
-        records = await result.data()
-    return {
-        "job_id": job_id,
-        "step_analysis": records,
-        "count": len(records),
         "time_range_days": days,
     }
 

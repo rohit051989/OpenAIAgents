@@ -83,7 +83,6 @@ MATCH (jg:JobGroup {name: $jobGroupName})
 OPTIONAL MATCH (jg)-[:HAS_JOB]->(j:Job)
 OPTIONAL MATCH (jg)-[:HAS_SLA]->(sla:SLA)
 OPTIONAL MATCH (jg)-[:Require_Resource]->(r:Resource)
-OPTIONAL MATCH (jg)-[:CAN_EXECUTE_ON]->(cal:Calendar)
 OPTIONAL MATCH (jg)-[:HAS_TAG]->(t:Tag)
 WITH jg,
      collect(DISTINCT { id: j.id,   name: j.name,   enabled: j.enabled,

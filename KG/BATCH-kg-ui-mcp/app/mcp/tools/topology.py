@@ -21,15 +21,17 @@ logger = logging.getLogger(__name__)
 async def tool_get_job_topology(job_id: str) -> dict:
     """Retrieve the topology of a specific job.
 
-    Returns the job structure including steps, blocks, entry point, SLAs,
-    allowed/blocked calendars, required resources, listeners, tags, and
-    associated schedule contexts.
+    Returns the job structure including job type (spring_xml_config_job or
+    dynamic_job), steps, blocks, entry point, SLAs, business calendar
+    allow/deny rules, required resources, listeners, tags, and associated
+    schedule contexts.
 
     Args:
-        job_id: The unique ``id`` property value of the target Job node.
+        job_id: The unique ``name`` property value of the target Job node.
 
     Returns:
-        Dictionary with ``job_topology`` (full structural data) and ``job_id``.
+        Dictionary with ``job_topology`` (full structural data including
+        ``job_type``, ``allow_rules``, ``deny_rules``) and ``job_id``.
     """
     logger.info("MCP tool get_job_topology job_id=%s", job_id)
     driver = await get_driver()

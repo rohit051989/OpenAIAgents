@@ -68,7 +68,6 @@ _PROPERTY_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "enabled": "Whether the context is enabled (boolean)",
         "contextForEntityId": "ID of the entity (Job) this context is for",
         "description": "Description of the context",
-        "estimatedDurationMs": "Estimated duration in milliseconds",
         "cpm_computed_at": "Timestamp when CPM was computed",
         "cpm_dur_ms": "CPM computed duration in milliseconds",
         "cpm_ef_ms": "CPM earliest finish time in milliseconds",

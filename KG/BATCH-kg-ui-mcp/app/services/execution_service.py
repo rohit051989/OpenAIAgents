@@ -25,18 +25,15 @@ logger = logging.getLogger(__name__)
 _Q_FAILED_JOBS = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
 WHERE e.status = 'FAILED'
-  AND e.startTime >= datetime($start_date)
-OPTIONAL MATCH (se:StepExecution)-[:FOR_RUN]->(e)
-WHERE se.status = 'FAILED'
-WITH j, e, collect(DISTINCT se.stepId) AS failed_steps
+  AND e.businessDate >= date($start_date)
+WITH j, e
 RETURN
-    j.name              AS job_name,
-    e.id                AS execution_id,
-    toString(e.startTime) AS start_time,
-    toString(e.endTime)   AS end_time,
-    e.exitMessage         AS error_message,
-    failed_steps
-ORDER BY e.startTime DESC
+    j.name                                                  AS job_name,
+    e.id                                                    AS execution_id,
+    toString(e.businessDate) + 'T' + toString(e.startTime)  AS start_time,
+    toString(e.businessDate) + 'T' + toString(e.endTime)    AS end_time,
+    e.exitMessage                                           AS error_message
+ORDER BY e.businessDate DESC, e.startTime DESC
 LIMIT $limit
 """
 
@@ -44,7 +41,7 @@ _Q_COMMON_ERRORS = """
 MATCH (e:JobContextExecution)
 WHERE e.status = 'FAILED'
   AND e.exitMessage IS NOT NULL
-  AND e.startTime >= datetime($start_date)
+  AND e.businessDate >= date($start_date)
 WITH e.exitMessage AS error, count(*) AS occurrences
 ORDER BY occurrences DESC
 LIMIT $limit
@@ -53,11 +50,11 @@ RETURN error, occurrences
 
 _Q_EXECUTION_TIMELINE = """
 MATCH (e:JobContextExecution)
-WHERE e.startTime >= datetime($start_date)
-WITH date(e.startTime) AS execution_date,
-     count(e)                                                           AS total_executions,
-     sum(CASE WHEN e.status = 'COMPLETED' THEN 1 ELSE 0 END)           AS completed,
-     sum(CASE WHEN e.status = 'FAILED'    THEN 1 ELSE 0 END)           AS failed
+WHERE e.businessDate >= date($start_date)
+WITH e.businessDate                                                         AS execution_date,
+     count(e)                                                               AS total_executions,
+     sum(CASE WHEN e.status = 'COMPLETED' THEN 1 ELSE 0 END)               AS completed,
+     sum(CASE WHEN e.status = 'FAILED'    THEN 1 ELSE 0 END)               AS failed
 RETURN
     toString(execution_date) AS execution_date,
     total_executions,
@@ -69,31 +66,31 @@ ORDER BY execution_date DESC
 
 _Q_JOB_EXECUTION_HISTORY = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE j.id = $job_id
-  AND e.startTime >= datetime($start_date)
+WHERE j.name = $job_id
+  AND e.businessDate >= date($start_date)
 RETURN
-    e.id                  AS execution_id,
-    toString(e.startTime) AS start_time,
-    toString(e.endTime)   AS end_time,
+    e.id                                                    AS execution_id,
+    toString(e.businessDate) + 'T' + toString(e.startTime)  AS start_time,
+    toString(e.businessDate) + 'T' + toString(e.endTime)    AS end_time,
     e.status              AS status,
     e.durationMs          AS duration_ms,
     e.exitMessage         AS error_message
-ORDER BY e.startTime DESC
+ORDER BY e.businessDate DESC, e.startTime DESC
 LIMIT $limit
 """
 
 _Q_ALL_ACTIVE_JOBS = """
 MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
-WHERE e.startTime >= datetime($start_date)
+WHERE e.businessDate >= date($start_date)
 WITH j.id AS job_id, j.name AS job_name,
      count(e) AS execution_count,
-     max(e.startTime) AS last_execution
+     max(e.businessDate) AS last_business_date
 RETURN
     job_id,
     job_name,
     execution_count,
-    toString(last_execution) AS last_execution
-ORDER BY last_execution DESC
+    toString(last_business_date) AS last_execution
+ORDER BY last_business_date DESC
 """
 
 
@@ -102,7 +99,7 @@ ORDER BY last_execution DESC
 # ---------------------------------------------------------------------------
 
 def _start_date(days: int) -> str:
-    return (datetime.now() - timedelta(days=days)).isoformat()
+    return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
 
 
 async def get_failed_jobs(
@@ -179,7 +176,7 @@ async def get_job_execution_history(
 
     Args:
         driver: Shared Neo4j async driver.
-        job_id: The ``id`` property of the target ``Job`` node.
+        job_id: The ``name`` property of the target ``Job`` node.
         days: How many days back to include.
         limit: Maximum number of records to return.
 

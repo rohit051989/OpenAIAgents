@@ -3,7 +3,6 @@
 Registers the following MCP tools:
   - get_job_performance
   - get_slow_jobs
-  - get_step_failure_analysis
   - compare_jobs
   - get_sla_execution_breach
   - predict_sla_impact
@@ -36,7 +35,7 @@ async def tool_get_job_performance(job_id: str, days: int = 30) -> dict:
     return await performance_service.get_job_performance(driver, job_id=job_id, days=days)
 
 
-@mcp.tool(name="get_slow_jobs")
+#@mcp.tool(name="get_slow_jobs")
 async def tool_get_slow_jobs(
     threshold_minutes: int = 10,
     days: int = 7,
@@ -62,25 +61,7 @@ async def tool_get_slow_jobs(
     )
 
 
-@mcp.tool(name="get_step_failure_analysis")
-async def tool_get_step_failure_analysis(job_id: str, days: int = 30) -> dict:
-    """Retrieve step-level failure analysis for a specific job.
-
-    Args:
-        job_id: The unique ``id`` property of the target Job node.
-        days: Number of past days to include (default 30).
-
-    Returns:
-        ``{"job_id": ..., "step_analysis": [...], "count": N, "time_range_days": days}``
-        Each entry has ``step_id``, ``total_executions``, ``failures``,
-        ``failure_rate_pct``, ``avg_duration_seconds``.
-    """
-    logger.info("MCP tool get_step_failure_analysis job_id=%s days=%s", job_id, days)
-    driver = await get_driver()
-    return await performance_service.get_step_failure_analysis(driver, job_id=job_id, days=days)
-
-
-@mcp.tool(name="compare_jobs")
+#@mcp.tool(name="compare_jobs")
 async def tool_compare_jobs(job_ids: list[str], days: int = 30) -> dict:
     """Compare performance metrics across multiple jobs side by side.
 

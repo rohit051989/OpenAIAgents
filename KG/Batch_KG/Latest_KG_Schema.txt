@@ -4,7 +4,8 @@
         "ScheduleInstanceContext": "Scheduling context for a Job, linking it to execution flow and dependencies",
         "Step": "Individual step within a Job representing a unit of work",
         "SLA": "Service Level Agreement defining performance expectations",
-        "Calendar": "Scheduling calendar defining when Jobs can or cannot execute",
+        "BusinessCalendar": "Business rule node that allows or denies a JobGroup or ScheduleInstanceContext from executing on specific dates, evaluated via a linked CalendarPattern",
+        "CalendarPattern": "Pattern definition used by BusinessCalendar rules, specifying the evaluator function and parameter contracts for date matching",
         "Holiday": "Holiday date that affects Job execution schedules",
         "DataAsset": "Specific data operation (read/write/delete/aggregate) on a Resource",
         "JobGroupExecution": "Execution instance of a JobGroup",
@@ -46,8 +47,7 @@
             "name": "Name of the context",
             "description": "Description of the context",
             "enabled": "Whether the context is enabled (boolean)",
-            "contextForEntityId": "ID of the entity (Job) this context is for",
-            "estimatedDurationMs": "Estimated duration in milliseconds"
+            "contextForEntityId": "ID of the entity (Job) this context is for"
         },
         "Step": {
             "name": "Name of the Step",
@@ -90,16 +90,24 @@
             "time": "Absolute time for completion (e.g., 04:00:00)",
             "tz": "Time zone for the SLA"
         },
-        "Calendar": {
-            "id": "Unique identifier for the Calendar",
-            "name": "Name of the Calendar",
-            "description": "Description of the Calendar",
-            "enabled": "Whether the Calendar is enabled (boolean)",
-            "type": "Calendar type: DAY_OF_WEEK, TIME_WINDOW, DAY_OF_MONTH, HOLIDAY",
-            "blockedDays": "List of blocked days (for DAY_OF_WEEK or DAY_OF_MONTH)",
-            "startTime": "Start time for TIME_WINDOW type",
-            "endTime": "End time for TIME_WINDOW type",
-            "tz": "Time zone for the Calendar"
+        "BusinessCalendar": {
+            "ruleId": "Unique identifier for the BusinessCalendar rule (e.g. RULE_1ST_SUNDAY)",
+            "name": "Human-readable name of the rule",
+            "region": "Region code (US, CA, UK, IN, etc.) or null for all regions",
+            "params": "JSON string of pattern-specific parameters (e.g. {\"dayOfWeek\": 7, \"occurrences\": [1]})",
+            "isActive": "Whether this rule is active (boolean)",
+            "description": "Human-readable description of the rule"
+        },
+        "CalendarPattern": {
+            "patternId": "Unique identifier for the CalendarPattern (e.g. PAT_HOLIDAY)",
+            "matchExpression": "Runtime evaluator key used to look up the evaluator function (e.g. HOLIDAY, NTH_DOW_MONTH)",
+            "name": "Human-readable name of the pattern",
+            "runtimeParams": "List of params the calling agent supplies at evaluation time (e.g. [date, region])",
+            "configParams": "List of params read from BusinessCalendar.params at evaluation time (e.g. [dayOfWeek, occurrences])",
+            "evaluatorFn": "Python evaluator function name in the calendar evaluator registry",
+            "description": "Human-readable description of the pattern",
+            "isActive": "Whether this pattern is active (boolean)",
+            "version": "Version number of the pattern definition"
         },
         "Holiday": {
             "id": "Unique identifier for the Holiday",
@@ -335,9 +343,10 @@
         "Require_Resource": "Links JobGroup or ScheduleInstanceContext to required Resource",
         "HAS_SLA": "Links entity (JobGroup, ScheduleInstanceContext, Resource) to its SLA",
         "RELATIVE_TO_RESOURCE": "Links SLA to Resource it's relative to (for relative SLAs)",
-        "CAN_EXECUTE_ON": "Links JobGroup or ScheduleInstanceContext to Calendar allowing execution",
-        "CANNOT_EXECUTE_ON": "Links JobGroup or ScheduleInstanceContext to Calendar blocking execution",
-        "BLOCKS_ON": "Links Calendar to Holidays that block execution",
+        "ALLOWS": "Links JobGroup or ScheduleInstanceContext to a BusinessCalendar that permits execution on matching dates; carries ruleId property",
+        "DENIES": "Links JobGroup or ScheduleInstanceContext to a BusinessCalendar that blocks execution on matching dates; carries ruleId and action properties (SKIP, RUN_PREVIOUS_BUSINESS_DAY, RUN_NEXT_BUSINESS_DAY)",
+        "USES_PATTERN": "Links BusinessCalendar to its CalendarPattern evaluator definition",
+        "IS_HOLIDAY_ON": "Links CalendarPattern (type HOLIDAY) to Day nodes that are holidays in the given region; carries region property",
         "FOR_RESOURCE": "Links DataAsset or ResourceAvailabilityEvent to its parent Resource",
         "EXECUTES_JOB_GROUP": "Links JobGroupExecution to JobGroup being executed",
         "EXECUTES_CONTEXT": "Links JobContextExecution to ScheduleInstanceContext being executed",
@@ -357,10 +366,40 @@
     },
     "relationship_patterns": [
         {
-            "source": "Calendar",
-            "relationship": "BLOCKS_ON",
-            "target": "Holiday",
-            "pattern": "(Calendar)-[:BLOCKS_ON]->(Holiday)"
+            "source": "JobGroup",
+            "relationship": "ALLOWS",
+            "target": "BusinessCalendar",
+            "pattern": "(JobGroup)-[:ALLOWS {ruleId}]->(BusinessCalendar)"
+        },
+        {
+            "source": "JobGroup",
+            "relationship": "DENIES",
+            "target": "BusinessCalendar",
+            "pattern": "(JobGroup)-[:DENIES {ruleId, action}]->(BusinessCalendar)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "ALLOWS",
+            "target": "BusinessCalendar",
+            "pattern": "(ScheduleInstanceContext)-[:ALLOWS {ruleId}]->(BusinessCalendar)"
+        },
+        {
+            "source": "ScheduleInstanceContext",
+            "relationship": "DENIES",
+            "target": "BusinessCalendar",
+            "pattern": "(ScheduleInstanceContext)-[:DENIES {ruleId, action}]->(BusinessCalendar)"
+        },
+        {
+            "source": "BusinessCalendar",
+            "relationship": "USES_PATTERN",
+            "target": "CalendarPattern",
+            "pattern": "(BusinessCalendar)-[:USES_PATTERN]->(CalendarPattern)"
+        },
+        {
+            "source": "CalendarPattern",
+            "relationship": "IS_HOLIDAY_ON",
+            "target": "Day",
+            "pattern": "(CalendarPattern)-[:IS_HOLIDAY_ON {region}]->(Day)"
         },
         {
             "source": "CriticalPathCalculated",
@@ -415,18 +454,6 @@
             "relationship": "EXECUTES_JOB",
             "target": "Job",
             "pattern": "(JobContextExecution)-[:EXECUTES_JOB]->(Job)"
-        },
-        {
-            "source": "JobGroup",
-            "relationship": "CANNOT_EXECUTE_ON",
-            "target": "Calendar",
-            "pattern": "(JobGroup)-[:CANNOT_EXECUTE_ON]->(Calendar)"
-        },
-        {
-            "source": "JobGroup",
-            "relationship": "CAN_EXECUTE_ON",
-            "target": "Calendar",
-            "pattern": "(JobGroup)-[:CAN_EXECUTE_ON]->(Calendar)"
         },
         {
             "source": "JobGroup",

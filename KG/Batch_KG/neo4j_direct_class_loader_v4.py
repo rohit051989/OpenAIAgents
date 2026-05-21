@@ -26,7 +26,6 @@ import logging
 import yaml
 import os
 from dotenv import load_dotenv
-from cpm_analyzer_v1 import CPMAnalyzer
 from classes.DataClasses import JobDef
 from classes.KGNodeDefs import (
     JobGroupNodeDef, TagNodeDef, ScheduleInstanceContextNodeDef,
@@ -150,16 +149,7 @@ class Neo4jLoader:
                 except Exception as e:
                     logger.warning(f"Index may already exist: {str(e)[:100]}")
         
-        logger.info(" Constraints and indexes created")
-    
-    def compute_cpm_for_jobgroup(self, jobgroup_id: str, analyzer: CPMAnalyzer):
-        res = analyzer.compute_for_jobgroup(jobgroup_id, persist=True)
-        logger.info(f"\n=== CPM Summary for {jobgroup_id} ===")
-        logger.info("SLA(ms):", res.group_sla_ms)
-        logger.info("Completion(ms):", res.completion_ms)
-        logger.info("Total Buffer(ms):", res.total_buffer_ms)
-        logger.info("Longest Path:", " -> ".join(res.longest_path))
-            
+        logger.info(" Constraints and indexes created")        
 
 
     # ========================================================================
@@ -191,8 +181,6 @@ class Neo4jLoader:
         self._copy_sql_resource_invokes_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
-        #self._load_calendar(excel_file)
-        #self._load_associate_calendar(excel_file)
         self._load_calendar_layer1()
         self._load_calendar_patterns(excel_file)
         self._load_holidays(excel_file)
@@ -1516,8 +1504,7 @@ class Neo4jLoader:
             name=f'Context_{context_for_entity_id}',
             description=f'Context for {context_for_entity_id}',
             enabled=True,
-            contextForEntityId=str(context_for_entity_id),
-            estimatedDurationMs=int(data.get('estimatedDurationMs', 0))
+            contextForEntityId=str(context_for_entity_id)
         )
         job_group_id = data.get('jobGroupId', None)
         query = """
@@ -1525,8 +1512,7 @@ class Neo4jLoader:
             SET ctx.name = $name,
                 ctx.description = $description,
                 ctx.enabled = $enabled,
-                ctx.contextForEntityId = $contextForEntityId,
-                ctx.estimatedDurationMs = $estimatedDurationMs
+                ctx.contextForEntityId = $contextForEntityId
                 WITH ctx
                     MATCH (entity:Job {name: $contextForEntityId})
                     MERGE (ctx)-[:FOR_JOB]->(entity)
@@ -1540,7 +1526,6 @@ class Neo4jLoader:
         query += " RETURN ctx"
         tx.run(query, id=node.id, name=node.name, description=node.description,
                enabled=node.enabled, contextForEntityId=node.contextForEntityId,
-               estimatedDurationMs=node.estimatedDurationMs,
                jobGroupId=job_group_id)
 
     def _load_slas(self, excel_file):
@@ -1645,94 +1630,6 @@ class Neo4jLoader:
                relativeEntityType=relative_entity_type,
                forEntityId=data.get('forEntityId'))
 
-    def _load_associate_calendar(self, excel_file):
-        """Load Associate Calendar"""
-        df = pd.read_excel(excel_file, 'AssociateCalendar')
-        logger.info(f"Loading {len(df)} AssociateCalendar...")
-        with self.driver.session(database=self.database) as session:
-            for _, row in df.iterrows():
-                data = row.to_dict()
-                data = {k: v for k, v in data.items() if pd.notna(v)}
-                session.execute_write(self._associate_calendar, data)
-        
-        logger.info(f" Loaded {len(df)} AssociateCalendar")
-    
-    @staticmethod
-    def _associate_calendar(tx, data: Dict):
-        """Transaction function to create Calendar associations.
-        requiresContextId may be blank (skip) or comma-separated (multiple entities).
-        """
-        allowed = data.get('Allowed')
-        contextType = data.get('contextType')
-
-        if allowed not in ('Y', 'N') or not contextType:
-            return
-
-        rel_type = 'CAN_EXECUTE_ON' if allowed == 'Y' else 'CANNOT_EXECUTE_ON'
-
-        # requiresContextId may be absent (blank cell filtered out) or comma-separated
-        raw_context_id = data.get('requiresContextId', '')
-        if not str(raw_context_id).strip():
-            return  # No entity to associate — skip
-
-        context_ids = [cid.strip() for cid in str(raw_context_id).split(',') if cid.strip()]
-
-        for context_id in context_ids:
-            query = f"""
-            MATCH (c:Calendar {{id: $calId}})
-            MATCH (entity:{contextType} {{id: $entityId}})
-            MERGE (entity)-[:{rel_type}]->(c)
-            """
-            tx.run(query, calId=data.get('id'), entityId=context_id)
-
-    def _load_calendar(self, excel_file):
-        """Load Calendar"""
-        df = pd.read_excel(excel_file, 'Calendar')
-        logger.info(f"Loading {len(df)} Calendar...")
-        
-        with self.driver.session(database=self.database) as session:
-            for _, row in df.iterrows():
-                data = row.to_dict()
-                data = {k: v for k, v in data.items() if pd.notna(v)}
-                session.execute_write(self._create_calendar, data)
-
-        logger.info(f" Loaded {len(df)} Calendar")
-
-    @staticmethod
-    def _create_calendar(tx, data: Dict):
-        """Transaction function to create Calendar"""
-        node = CalendarNodeDef(
-            id=str(data.get('id', '')),
-            name=str(data.get('name', '')),
-            type=str(data.get('type', '')),
-            description=str(data.get('description', '')),
-            enabled=bool(data.get('enabled', True)),
-            startTime=str(data.get('startTime', '')),
-            endTime=str(data.get('endTime', '')),
-            tz=str(data.get('tz', ''))
-        )
-        if 'blockedDays' in data:
-            node.blockedDays = [d.strip() for d in str(data['blockedDays']).split(',') if d.strip()]
-        query = """
-        MERGE (c:Calendar {id: $id})
-        SET c.name = $name,
-            c.type = $type,
-            c.description = $description,
-            c.enabled = $enabled
-        """
-        if node.blockedDays:
-            query += ", c.blockedDays = $blockedDays"
-        if node.startTime:
-            query += ", c.startTime = $startTime"
-        if node.endTime:
-            query += ", c.endTime = $endTime"
-        if node.tz:
-            query += ", c.tz = $tz"
-        query += " RETURN c"
-        tx.run(query, id=node.id, name=node.name, type=node.type,
-               description=node.description, enabled=node.enabled,
-               blockedDays=node.blockedDays, startTime=node.startTime,
-               endTime=node.endTime, tz=node.tz)
     
     def _load_calendar_patterns(self, excel_file):
         """

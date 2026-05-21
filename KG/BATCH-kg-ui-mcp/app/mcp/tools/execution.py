@@ -36,7 +36,7 @@ async def tool_get_failed_jobs(days: int = 7, limit: int = 10) -> dict:
     return await execution_service.get_failed_jobs(driver, days=days, limit=limit)
 
 
-@mcp.tool(name="get_common_errors")
+#@mcp.tool(name="get_common_errors")
 async def tool_get_common_errors(days: int = 30, limit: int = 10) -> dict:
     """Retrieve the most common error messages from failed job executions.
 
@@ -52,7 +52,7 @@ async def tool_get_common_errors(days: int = 30, limit: int = 10) -> dict:
     return await execution_service.get_common_errors(driver, days=days, limit=limit)
 
 
-@mcp.tool(name="get_execution_timeline")
+#@mcp.tool(name="get_execution_timeline")
 async def tool_get_execution_timeline(days: int = 30) -> dict:
     """Retrieve daily execution statistics for all jobs.
 
@@ -78,7 +78,7 @@ async def tool_get_job_execution_history(
     """Retrieve the complete execution history for a specific job.
 
     Args:
-        job_id: The unique ``id`` property of the target Job node.
+        job_id: The unique ``name`` property of the target Job node.
         days: Number of past days to include (default 30).
         limit: Maximum number of records to return (default 50).
 
@@ -90,7 +90,7 @@ async def tool_get_job_execution_history(
     return await execution_service.get_job_execution_history(driver, job_id=job_id, days=days, limit=limit)
 
 
-@mcp.tool(name="get_all_active_jobs")
+#@mcp.tool(name="get_all_active_jobs")
 async def tool_get_all_active_jobs(days: int = 30) -> dict:
     """Retrieve all jobs that have had at least one execution recently.
 
