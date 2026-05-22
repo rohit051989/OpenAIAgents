@@ -31,14 +31,9 @@ from classes.KGNodeDefs import (
     JobGroupNodeDef, TagNodeDef, ScheduleInstanceContextNodeDef,
     SLANodeDef, CalendarNodeDef, ResourceNodeDef
 )
+from classes.log_utils import setup_logging
 
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging(__file__)
 
 
 class Neo4jLoader:
@@ -1555,7 +1550,7 @@ class Neo4jLoader:
         removed from the schema.  Resource SLAs are no longer modelled directly; resource
         dependency is derived from existing (SIC/JobGroup)-[:Require_Resource]->(Resource).
         """
-        valid_for_entity_types = {'JobGroup', 'ScheduleInstanceContext'}
+        valid_for_entity_types = {'JobGroup', 'ScheduleInstanceContext','Resource'}
         for_entity_type = str(data.get('forEntityType', '') or '').strip()
         if for_entity_type not in valid_for_entity_types:
             raise ValueError(

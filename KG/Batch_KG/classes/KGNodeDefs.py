@@ -247,7 +247,6 @@ class JobContextExecutionNodeDef:
     exitCode: str = ""
     exitMessage: str = ""
     retryCount: int = 0
-    expectedStartTime: str = ""
 
 
 @dataclass

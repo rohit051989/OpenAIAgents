@@ -39,13 +39,9 @@ from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
 from db_repo_scanner import DBRepoScanner
 import time
+from classes.log_utils import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging(__file__)
 
 def generate_cypher_for_hierarchy(job: JobDef) -> List[Tuple[str, dict]]:
     """

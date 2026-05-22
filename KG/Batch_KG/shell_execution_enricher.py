@@ -42,13 +42,9 @@ from classes.path_utils import param_types_from_method_fqn as _param_types_from_
 from classes.path_utils import to_absolute_path as _path_to_absolute
 
 import logging
+from classes.log_utils import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging(__file__)
 
 # Load grey area keywords from config
 load_dotenv()

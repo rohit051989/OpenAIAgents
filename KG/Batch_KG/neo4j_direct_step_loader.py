@@ -5,11 +5,6 @@ import xml.etree.ElementTree as ET
 import logging
 from pathlib import Path
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 from classes.DataClasses import (
@@ -662,15 +657,6 @@ def generate_cypher(job: JobDef) -> str:
 
     return "\n".join(lines)
 
-
-if __name__ == "__main__":
-    # Point this to your directory containing Spring Batch XML files
-    # Can use single file or directory
-    #xml_directory = "sample_data"  # Change this to your directory path
-    xml_directory = "SpringProjects"  # Change this to your directory path
-    uri = "bolt://localhost:7687"
-    user = "neo4j"
-    password = "Rohit@123"  # Change this to your Neo4j password
 
 
 def parse_directory(global_bean_map: Dict[str, Tuple[str, str, str]], xml_files: List[str]) -> List[JobDef]:

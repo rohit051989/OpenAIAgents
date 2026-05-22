@@ -4,11 +4,6 @@ from classes.DataClasses import BeanDef
 from typing import Dict, List, Set, Optional
 import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 

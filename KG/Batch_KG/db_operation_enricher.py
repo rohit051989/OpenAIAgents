@@ -37,13 +37,9 @@ from classes.DataClasses import ClassInfo
 from classes.path_utils import to_absolute_path as _path_to_absolute, param_types_from_method_fqn as _param_types_from_fqn
 
 import logging
+from classes.log_utils import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging(__file__)
 
 # Load grey area keywords from config
 script_dir = Path(__file__).parent

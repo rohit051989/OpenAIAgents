@@ -16,11 +16,6 @@ import yaml
 
 import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

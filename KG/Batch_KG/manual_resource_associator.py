@@ -103,16 +103,12 @@ from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
 import logging
+from classes.log_utils import setup_logging
 
 # Import DB Operation Consistency Validator
 from db_operation_consistency_validator import validate_and_repair_db_operations
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging(__file__)
 
 # Load environment variables
 load_dotenv()

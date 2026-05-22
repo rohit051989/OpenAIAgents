@@ -7,11 +7,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 

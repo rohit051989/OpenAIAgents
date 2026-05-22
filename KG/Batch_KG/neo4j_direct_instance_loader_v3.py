@@ -29,6 +29,9 @@ from execution_cpm_analyzer_v3 import ExecutionCPMAnalyzer
 from classes.KGNodeDefs import (
     JobGroupExecutionNodeDef, JobContextExecutionNodeDef, ResourceAvailabilityEventNodeDef
 )
+from classes.log_utils import setup_logging
+
+logger = setup_logging(__file__)
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +53,6 @@ def _compute_business_date(start_dt: pd.Timestamp, cutoff_hour: int) -> str:
     if start_dt.hour >= cutoff_hour:
         return (start_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
     return start_dt.strftime('%Y-%m-%d')
-
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
-logger = logging.getLogger(__name__)
 
 
 class Neo4jInstanceLoaderV2:
@@ -401,7 +396,6 @@ class Neo4jInstanceLoaderV2:
             except Exception:
                 return ''
 
-        # expectedStartTime: may arrive without seconds ("6:00 AM" or "6:00:00 AM").
         # Normalise to HH:MM:SS so Neo4j time() never chokes on a missing seconds part.
         def _extract_time_with_seconds_fallback(raw) -> str:
             raw_str = str(raw).strip()
@@ -412,7 +406,6 @@ class Neo4jInstanceLoaderV2:
 
         start_time_str = _extract_time(data.get('startTime', ''))
         end_time_str   = _extract_time(data.get('endTime', ''))
-        expected_start = _extract_time_with_seconds_fallback(data.get('expectedStartTime', ''))
 
         # durationMs: compute from the full startTime/endTime datetimes so we are not
         # dependent on the Excel 'duration' column whose format changed to m.ss notation.
@@ -440,8 +433,7 @@ class Neo4jInstanceLoaderV2:
             businessDate=business_date,
             durationMs=duration_ms,
             exitCode=str(data.get('exitCode', '')),
-            exitMessage=str(data.get('exitMessage', '')),
-            expectedStartTime=expected_start
+            exitMessage=str(data.get('exitMessage', ''))
         )
         logger.info(f"Creating JobContextExecution with node='{node}'")
         query = """
@@ -455,8 +447,6 @@ class Neo4jInstanceLoaderV2:
             jce.exitMessage = $exitMessage,
             jce.executionDate = date($executionDate)
         """
-        if expected_start:
-            query += ",\n            jce.expectedStartTime = time($expectedStartTime)"
         query += """
         WITH jce
         MATCH (jc:ScheduleInstanceContext {id: $jobContextId})
@@ -473,7 +463,6 @@ class Neo4jInstanceLoaderV2:
                id=node.id, businessDate=node.businessDate, startTime=node.startTime,
                endTime=node.endTime, durationMs=node.durationMs,
                status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
-               expectedStartTime=node.expectedStartTime,
                jobContextId=job_context_id, jobGroupExecId=jge_id,
                executionDate=execution_date)
         logger.info(f"JobContextExecution '{node.id}' created and linked to ScheduleInstanceContext '{job_context_id}' and JobGroupExecution '{jge_id}'")
@@ -553,9 +542,6 @@ class Neo4jInstanceLoaderV2:
         MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
         WHERE date(jce.businessDate) =  date(rae.businessDate)
         MERGE (rae)-[:FOR_RUN]->(jce)
-        WITH rae,jce
-        WHERE time(jce.expectedStartTime) < time(rae.availabilityTime)
-        MERGE (rae)-[:IMPACTED]->(jce)
         RETURN rae, jce
         """
         tx.run(query, **data)

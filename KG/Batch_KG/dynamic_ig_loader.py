@@ -94,6 +94,7 @@ from classes.DataClasses import (
     ShellScriptExecution, ProcedureCall,
 )
 from classes.KGNodeDefs import ResourceNodeDef
+from classes.log_utils import setup_logging
 
 load_dotenv()
 
@@ -867,10 +868,7 @@ class DynamicIGLoader:
 # ── standalone entry point ─────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s",
-    )
+    setup_logging(__file__)
     _config = os.getenv("KG_CONFIG_FILE", "config/information_graph_config.yaml")
     loader  = DynamicIGLoader(_config)
     try:

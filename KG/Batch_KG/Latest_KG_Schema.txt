@@ -83,12 +83,10 @@
             "id": "Unique identifier for the SLA",
             "name": "Name of the SLA",
             "enabled": "Whether the SLA is enabled (boolean)",
-            "type": "SLA type: ABSOLUTE, RELATIVE",
-            "policy": "SLA policy: finish_by_time, duration_less_than, etc.",
-            "severity": "Severity level: CRITICAL, HIGH, MEDIUM, LOW",
-            "durationMs": "Maximum duration in milliseconds",
-            "time": "Absolute time for completion (e.g., 04:00:00)",
-            "tz": "Time zone for the SLA"
+            "type": "SLA type: ABSOLUTE (finish by wall-clock time on business date) or RELATIVE (finish within durationMs of starting)",
+            "durationMs": "Maximum allowed duration in milliseconds — used by RELATIVE SLAs",
+            "time": "Wall-clock deadline in HH:MM:SS 24-hour format — used by ABSOLUTE SLAs (e.g. 07:00:00)",
+            "policy": "Human-readable policy tag (e.g. finish_by_time, duration_less_than)"
         },
         "BusinessCalendar": {
             "ruleId": "Unique identifier for the BusinessCalendar rule (e.g. RULE_1ST_SUNDAY)",
@@ -133,20 +131,21 @@
         "JobGroupExecution": {
             "id": "Unique execution identifier for JobGroupExecution",
             "startTime": "Start time of the execution",
-            "businessDate": "Business date for the execution"
+            "businessDate": "Business date for the execution (logical date; for nightly jobs starting after the cutoff hour this is startDate + 1 day)",
+            "executionDate": "Calendar date the execution actually ran (always the startTime date; differs from businessDate for nightly jobs)"
         },
         "JobContextExecution": {
             "id": "Unique execution identifier for JobContextExecution",
             "status": "Execution status: COMPLETED, FAILED, RUNNING, etc.",
             "startTime": "Start time of the execution",
             "endTime": "End time of the execution",
-            "businessDate": "Business date for the execution",
+            "businessDate": "Business date for the execution (logical date; for nightly jobs starting after the cutoff hour this is startDate + 1 day)",
+            "executionDate": "Calendar date the execution actually ran (always the startTime date; differs from businessDate for nightly jobs)",
             "durationMs": "Duration in milliseconds",
             "volume": "Data volume processed",
             "exitCode": "Exit code from execution",
             "exitMessage": "Exit message or error message",
-            "retryCount": "Number of retries attempted",
-            "expectedStartTime": "Expected start time based on schedule"
+            "retryCount": "Number of retries attempted"
         },
         "ResourceAvailabilityEvent": {
             "id": "Unique identifier for the event",
@@ -341,8 +340,7 @@
         "CONTAINS": "Links Job to its Steps or Blocks; also links Block to its contained Steps",
         "HAS_TAG": "Links entity (Job, Step, Resource, JobGroupExecution, etc.) to its Tag",
         "Require_Resource": "Links JobGroup or ScheduleInstanceContext to required Resource",
-        "HAS_SLA": "Links entity (JobGroup, ScheduleInstanceContext, Resource) to its SLA",
-        "RELATIVE_TO_RESOURCE": "Links SLA to Resource it's relative to (for relative SLAs)",
+        "HAS_SLA": "Links JobGroup or ScheduleInstanceContext to its SLA node",
         "ALLOWS": "Links JobGroup or ScheduleInstanceContext to a BusinessCalendar that permits execution on matching dates; carries ruleId property",
         "DENIES": "Links JobGroup or ScheduleInstanceContext to a BusinessCalendar that blocks execution on matching dates; carries ruleId and action properties (SKIP, RUN_PREVIOUS_BUSINESS_DAY, RUN_NEXT_BUSINESS_DAY)",
         "USES_PATTERN": "Links BusinessCalendar to its CalendarPattern evaluator definition",
@@ -517,12 +515,6 @@
         },
         {
             "source": "Resource",
-            "relationship": "HAS_SLA",
-            "target": "SLA",
-            "pattern": "(Resource)-[:HAS_SLA]->(SLA)"
-        },
-        {
-            "source": "Resource",
             "relationship": "HAS_TAG",
             "target": "Tag",
             "pattern": "(Resource)-[:HAS_TAG]->(Tag)"
@@ -556,12 +548,6 @@
             "relationship": "IMPACTED",
             "target": "JobGroupExecution",
             "pattern": "(ResourceAvailabilityEvent)-[:IMPACTED]->(JobGroupExecution)"
-        },
-        {
-            "source": "SLA",
-            "relationship": "RELATIVE_TO_RESOURCE",
-            "target": "Resource",
-            "pattern": "(SLA)-[:RELATIVE_TO_RESOURCE]->(Resource)"
         },
         {
             "source": "ScheduleInstanceContext",

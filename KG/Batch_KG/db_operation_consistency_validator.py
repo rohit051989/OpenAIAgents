@@ -5,10 +5,6 @@ from neo4j import GraphDatabase
 from typing import Dict
 import yaml
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(pathname)s:%(lineno)d %(funcName)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 
@@ -115,22 +111,3 @@ def validate_and_repair_db_operations(config_path: str = None, logger_instance=N
         return stats
     finally:
         validator.close()
-
-
-def main():
-    import os
-    from dotenv import load_dotenv
-    
-    load_dotenv()
-    config_path = os.getenv("KG_CONFIG_FILE", "config/information_graph_config.yaml")
-    
-    validator = DBOperationConsistencyValidator(config_path)
-    try:
-        stats = validator.rebuild_all_method_properties()
-        validator.print_statistics()
-    finally:
-        validator.close()
-
-
-if __name__ == '__main__':
-    main()
