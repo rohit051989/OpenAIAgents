@@ -154,6 +154,7 @@ RETURN DISTINCT
         job.name                    AS job_name,
         latest.id                   AS execution_id,
         latest.status               AS execution_status,
+        coalesce(toString(latest.executionDate), toString(latest.businessDate)) AS execution_date,
         toString(latest.startTime)  AS start_time,
         toString(latest.endTime)    AS end_time,
         latest.durationMs           AS duration_ms
@@ -341,28 +342,19 @@ UNWIND $sic_eids AS sic_eid
 MATCH (sic:ScheduleInstanceContext)
 WHERE elementId(sic) = sic_eid
 MATCH (sic)-[:FOR_GROUP]->(jg:JobGroup)
-CALL {
-        WITH sic, jg
+CALL (sic, jg) {
         OPTIONAL MATCH (sic)-[:HAS_SLA]->(sic_sla:SLA)
         WHERE coalesce(sic_sla.enabled, true) = true
         OPTIONAL MATCH (jg)-[:HAS_SLA]->(jg_sla:SLA)
         WHERE coalesce(jg_sla.enabled, true) = true
-        OPTIONAL MATCH (sic)-[:Require_Resource]->(sr:Resource)-[:HAS_SLA]->(sr_sla:SLA)
-        WHERE coalesce(sr_sla.enabled, true) = true
-        OPTIONAL MATCH (jg)-[:Require_Resource]->(gr:Resource)-[:HAS_SLA]->(gr_sla:SLA)
-        WHERE coalesce(gr_sla.enabled, true) = true
-        WITH sic, jg,
-                 collect(DISTINCT {sla: sic_sla, owner_type: 'SIC', owner_id: sic.id, owner_name: sic.name}) +
-                 collect(DISTINCT {sla: jg_sla, owner_type: 'JOB_GROUP', owner_id: jg.id, owner_name: jg.name}) +
-                 collect(DISTINCT {sla: sr_sla, owner_type: 'RESOURCE', owner_id: sr.id, owner_name: sr.name}) +
-                 collect(DISTINCT {sla: gr_sla, owner_type: 'RESOURCE', owner_id: gr.id, owner_name: gr.name})
-                 AS rows
-        UNWIND rows AS row
+        WITH collect(DISTINCT {sla: sic_sla, owner_type: 'SIC', owner_id: sic.id, owner_name: sic.name}) +
+                 collect(DISTINCT {sla: jg_sla, owner_type: 'JOB_GROUP', owner_id: jg.id, owner_name: jg.name})
+                 AS all_rows
+        UNWIND all_rows AS row
         WITH row
         WHERE row.sla IS NOT NULL
         RETURN DISTINCT row
 }
-OPTIONAL MATCH (row.sla)-[:RELATIVE_TO_RESOURCE|RELATIVE_TO]->(relative_res:Resource)
 RETURN DISTINCT
     sic_eid,
     row.owner_type          AS owner_type,
@@ -372,12 +364,8 @@ RETURN DISTINCT
     row.sla.name            AS sla_name,
     row.sla.type            AS sla_type,
     row.sla.policy          AS sla_policy,
-    row.sla.severity        AS sla_severity,
     row.sla.durationMs      AS sla_duration_ms,
-    row.sla.time            AS sla_time,
-    row.sla.tz              AS sla_tz,
-    relative_res.id         AS relative_resource_id,
-    relative_res.name       AS relative_resource_name
+    row.sla.time            AS sla_time
 """
 
 
@@ -625,19 +613,61 @@ def _build_delay_and_finish_projection(
 def _evaluate_observed_sla(
     sic_row: dict[str, Any],
     sla_row: dict[str, Any],
+    business_date: str,
 ) -> dict[str, Any]:
     actual_duration_ms = int(sic_row.get("duration_ms") or 0)
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
-    duration_breach = has_duration_threshold and actual_duration_ms > threshold_ms
+    sla_type_upper = (sla_row.get("sla_type") or "").upper()
 
-    end_dt = _parse_iso_datetime(sic_row.get("end_time"))
-    sla_clock = _parse_sla_clock(sla_row.get("sla_time"))
-    end_clock = end_dt.timetz().replace(tzinfo=None) if end_dt else None
-    absolute_time_breach = bool(end_clock and sla_clock and end_clock > sla_clock)
+    # RELATIVE SLA: breach when job ran longer than the allowed duration
+    duration_breach = (
+        sla_type_upper == "RELATIVE"
+        and has_duration_threshold
+        and actual_duration_ms > threshold_ms
+    )
+
+    # ABSOLUTE SLA: breach when full end datetime exceeds the SLA deadline on business_date.
+    # For nightly jobs, execution_date (calendar date the job ran) differs from
+    # business_date (the logical date the SLA belongs to).
+    # Example: job starts 22:30 on May 21 → execution_date=May 21, business_date=May 22
+    #          SLA time = 02:00 → deadline = May 22 02:00 → job ends at May 21 23:30 → meets SLA ✓
+    # Comparing wall-clock times alone (22:30 > 02:00) would incorrectly flag a breach.
+    execution_date_str = sic_row.get("execution_date")  # calendar date job started ("YYYY-MM-DD")
+    start_time_str = sic_row.get("start_time")          # "HH:MM:SS"
+    end_datetime: datetime | None = None
+    sla_deadline: datetime | None = None
+
+    if sla_type_upper == "ABSOLUTE":
+        sla_clock_str = sla_row.get("sla_time")
+        if sla_clock_str:
+            sla_t = _parse_sla_clock(sla_clock_str)
+            if sla_t:
+                try:
+                    sla_deadline = datetime.combine(date.fromisoformat(business_date), sla_t)
+                except (ValueError, TypeError):
+                    pass
+        if execution_date_str and start_time_str and actual_duration_ms:
+            start_t = _parse_sla_clock(start_time_str)
+            if start_t:
+                try:
+                    start_dt = datetime.combine(date.fromisoformat(execution_date_str), start_t)
+                    end_datetime = start_dt + timedelta(milliseconds=actual_duration_ms)
+                except (ValueError, TypeError):
+                    pass
+
+    absolute_time_breach = bool(
+        sla_type_upper == "ABSOLUTE"
+        and end_datetime and sla_deadline and end_datetime > sla_deadline
+    )
 
     breached = bool(duration_breach or absolute_time_breach)
-    computable = bool(has_duration_threshold or (end_dt and sla_clock))
+    if sla_type_upper == "RELATIVE":
+        computable = has_duration_threshold
+    elif sla_type_upper == "ABSOLUTE":
+        computable = bool(end_datetime and sla_deadline)
+    else:
+        computable = bool(has_duration_threshold or (end_datetime and sla_deadline))
     if duration_breach and absolute_time_breach:
         breach_reason = "duration_and_absolute_time_breach"
     elif duration_breach:
@@ -661,6 +691,7 @@ def _evaluate_observed_sla(
         "has_actual_execution": sic_row.get("has_actual_execution"),
         "execution_id": sic_row.get("execution_id"),
         "execution_status": sic_row.get("execution_status"),
+        "execution_date": execution_date_str,
         "start_time": sic_row.get("start_time"),
         "end_time": sic_row.get("end_time"),
         "actual_duration_ms": actual_duration_ms,
@@ -671,12 +702,10 @@ def _evaluate_observed_sla(
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
         "sla_policy": sla_row.get("sla_policy"),
-        "sla_severity": sla_row.get("sla_severity"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
-        "sla_tz": sla_row.get("sla_tz"),
-        "relative_resource_id": sla_row.get("relative_resource_id"),
-        "relative_resource_name": sla_row.get("relative_resource_name"),
+        "sla_deadline_datetime": sla_deadline.isoformat() if sla_deadline else None,
+        "sla_coverage": "evaluated",
         "meets_sla": computable and not breached,
         "breached": breached,
         "breach_reason": breach_reason,
@@ -697,8 +726,12 @@ def _evaluate_projected_sla(
     projected_ms = (baseline_ms_int + delay_ms) if baseline_ms_int is not None else None
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
+    sla_type_upper = (sla_row.get("sla_type") or "").upper()
+
+    # RELATIVE: project duration against threshold
     projected_breach = bool(
-        has_duration_threshold and projected_ms is not None and projected_ms > threshold_ms
+        sla_type_upper == "RELATIVE"
+        and has_duration_threshold and projected_ms is not None and projected_ms > threshold_ms
     )
     headroom_ms = (
         threshold_ms - baseline_ms_int
@@ -711,12 +744,13 @@ def _evaluate_projected_sla(
         else 0
     )
 
-    absolute_time_only = (
-        (sla_row.get("sla_type") or "").upper() == "ABSOLUTE"
+    # ABSOLUTE: any delay puts the job at risk when it has a deadline
+    at_risk_due_to_absolute = bool(
+        sla_type_upper == "ABSOLUTE"
         and bool(sla_row.get("sla_time"))
-        and not has_duration_threshold
+        and delay_ms > 0
     )
-    at_risk = bool(projected_breach or (absolute_time_only and delay_ms > 0))
+    at_risk = bool(projected_breach or at_risk_due_to_absolute)
 
     return {
         "sic_eid": sic_row.get("sic_eid"),
@@ -733,12 +767,8 @@ def _evaluate_projected_sla(
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
         "sla_policy": sla_row.get("sla_policy"),
-        "sla_severity": sla_row.get("sla_severity"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
-        "sla_tz": sla_row.get("sla_tz"),
-        "relative_resource_id": sla_row.get("relative_resource_id"),
-        "relative_resource_name": sla_row.get("relative_resource_name"),
         "baseline_duration_ms": baseline_ms_int,
         "projected_duration_ms": projected_ms,
         "injected_delay_ms": delay_ms,
@@ -748,7 +778,7 @@ def _evaluate_projected_sla(
         "at_risk": at_risk,
         "risk_reason": (
             "duration_threshold_breach" if projected_breach
-            else "absolute_time_with_delay" if absolute_time_only and delay_ms > 0
+            else "absolute_time_at_risk_with_delay" if at_risk_due_to_absolute
             else "within_duration_threshold" if has_duration_threshold
             else "no_computable_threshold"
         ),
@@ -767,19 +797,30 @@ def _evaluate_date_projection_sla(
     downstream_after_ms: int | None,
 ) -> dict[str, Any]:
     owner_type = (sla_row.get("owner_type") or "").upper()
-    base_deadline_ms = _clock_to_ms(sla_row.get("sla_time"))
+    sla_type_upper = (sla_row.get("sla_type") or "").upper()
+
+    # ABSOLUTE SLA: derive deadline from sla_time (wall-clock on business date)
+    if sla_type_upper == "ABSOLUTE":
+        base_deadline_ms = _clock_to_ms(sla_row.get("sla_time"))
+    else:
+        base_deadline_ms = None  # RELATIVE uses durationMs only
     effective_deadline_ms = base_deadline_ms
     if base_deadline_ms is not None and owner_type == "JOB_GROUP" and downstream_after_ms is not None:
         effective_deadline_ms = max(0, base_deadline_ms - downstream_after_ms)
 
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
+
+    # RELATIVE SLA: breach when effective duration exceeds threshold
     duration_breach = bool(
-        has_duration_threshold and duration_ms is not None and duration_ms > threshold_ms
+        sla_type_upper == "RELATIVE"
+        and has_duration_threshold and duration_ms is not None and duration_ms > threshold_ms
     )
 
+    # ABSOLUTE SLA: breach when projected finish exceeds the effective deadline
     absolute_breach = bool(
-        effective_deadline_ms is not None
+        sla_type_upper == "ABSOLUTE"
+        and effective_deadline_ms is not None
         and projected_finish_ms is not None
         and projected_finish_ms > effective_deadline_ms
     )
@@ -825,12 +866,8 @@ def _evaluate_date_projection_sla(
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
         "sla_policy": sla_row.get("sla_policy"),
-        "sla_severity": sla_row.get("sla_severity"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
-        "sla_tz": sla_row.get("sla_tz"),
-        "relative_resource_id": sla_row.get("relative_resource_id"),
-        "relative_resource_name": sla_row.get("relative_resource_name"),
         "duration_source": duration_source,
         "effective_duration_ms": duration_ms,
         "propagated_delay_ms": propagated_delay_ms,
@@ -865,6 +902,14 @@ async def _run_execution_status(
             business_date=business_date,
         )).data()
 
+        eligible_eids_list = list(eligible_eids)
+        precedes_rows: list[dict[str, Any]] = []
+        if eligible_eids_list:
+            precedes_rows = await (await session.run(
+                _Q_PRECEDES_BETWEEN_CONTEXTS,
+                sic_eids=eligible_eids_list,
+            )).data()
+
         actual_by_eid = {
             row["sic_eid"]: {
                 **row,
@@ -890,34 +935,121 @@ async def _run_execution_status(
         if scope_sic_eids:
             sla_rows = await (await session.run(_Q_SLA_ROWS_FOR_SICS, sic_eids=scope_sic_eids)).data()
 
-    covered_sic_eids = {row["sic_eid"] for row in sla_rows if row.get("sic_eid")}
-    missing_sla_coverage = _build_missing_sla_rows(scope_rows_by_eid, covered_sic_eids)
+    # ── Build PRECEDES relationships between eligible SICs ───────────────────
+    relationships = [
+        {
+            "id": row["relationship_id"],
+            "type": "PRECEDES",
+            "startNodeId": row["start_sic_eid"],
+            "endNodeId": row["end_sic_eid"],
+        }
+        for row in precedes_rows
+        if row.get("relationship_id") and row.get("start_sic_eid") and row.get("end_sic_eid")
+    ]
 
-    observed_results: list[dict[str, Any]] = []
+    # ── Evaluate SLA for every eligible SIC ──────────────────────────────────
+    # Group SLA rows by SIC element ID
+    sla_by_sic: dict[str, list[dict[str, Any]]] = {}
     for sla_row in sla_rows:
         sic_eid = sla_row.get("sic_eid")
-        sic_row = actual_by_eid.get(sic_eid)
-        if not sic_row:
-            continue
-        observed_results.append(_evaluate_observed_sla(sic_row, sla_row))
+        if sic_eid:
+            sla_by_sic.setdefault(sic_eid, []).append(sla_row)
 
-    breach_count = sum(1 for row in observed_results if row.get("breached"))
-    met_count = sum(1 for row in observed_results if row.get("meets_sla"))
+    all_sla_results: list[dict[str, Any]] = []
+    breach_count = 0
+    met_count = 0
+
+    for sic_eid, sic_row in scope_rows_by_eid.items():
+        actual = actual_by_eid.get(sic_eid)
+        sic_sla_rows = sla_by_sic.get(sic_eid, [])
+
+        if not sic_sla_rows:
+            # No SLA defined — one informational row per SIC
+            all_sla_results.append({
+                "sic_eid": sic_eid,
+                "sic_id": sic_row.get("sic_id"),
+                "sic_name": sic_row.get("sic_name"),
+                "job_id": sic_row.get("job_id"),
+                "job_name": sic_row.get("job_name"),
+                "job_group_id": sic_row.get("jg_id"),
+                "job_group_name": sic_row.get("jg_name"),
+                "planned_for_date": sic_row.get("planned_for_date"),
+                "has_actual_execution": bool(actual),
+                "execution_id": actual.get("execution_id") if actual else None,
+                "execution_status": actual.get("execution_status") if actual else None,
+                "execution_date": actual.get("execution_date") if actual else None,
+                "start_time": actual.get("start_time") if actual else None,
+                "end_time": actual.get("end_time") if actual else None,
+                "actual_duration_ms": int(actual.get("duration_ms") or 0) if actual else None,
+                "sla_coverage": "no_sla_defined",
+                "meets_sla": None,
+                "breached": None,
+                "breach_reason": "no_sla_defined",
+                "breach_by_ms": 0,
+            })
+        else:
+            # One row per SLA definition
+            for sla_row in sic_sla_rows:
+                threshold_ms_val = int(sla_row.get("sla_duration_ms") or 0)
+                if not actual:
+                    # SLA defined but job did not execute on this business date
+                    all_sla_results.append({
+                        "sic_eid": sic_eid,
+                        "sic_id": sic_row.get("sic_id"),
+                        "sic_name": sic_row.get("sic_name"),
+                        "job_id": sic_row.get("job_id"),
+                        "job_name": sic_row.get("job_name"),
+                        "job_group_id": sic_row.get("jg_id"),
+                        "job_group_name": sic_row.get("jg_name"),
+                        "planned_for_date": sic_row.get("planned_for_date"),
+                        "has_actual_execution": False,
+                        "execution_id": None,
+                        "execution_status": None,
+                        "execution_date": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "actual_duration_ms": None,
+                        "owner_type": sla_row.get("owner_type"),
+                        "owner_id": sla_row.get("owner_id"),
+                        "owner_name": sla_row.get("owner_name"),
+                        "sla_id": sla_row.get("sla_id"),
+                        "sla_name": sla_row.get("sla_name"),
+                        "sla_type": sla_row.get("sla_type"),
+                        "sla_policy": sla_row.get("sla_policy"),
+                        "sla_duration_ms": threshold_ms_val if threshold_ms_val > 0 else None,
+                        "sla_time": sla_row.get("sla_time"),
+                        "sla_deadline_datetime": None,
+                        "sla_coverage": "sla_defined_no_execution",
+                        "meets_sla": None,
+                        "breached": None,
+                        "breach_reason": "no_execution_data",
+                        "breach_by_ms": 0,
+                    })
+                else:
+                    # Both execution and SLA exist — full evaluation
+                    result = _evaluate_observed_sla(sic_row, sla_row, business_date)
+                    all_sla_results.append(result)
+                    if result.get("breached"):
+                        breach_count += 1
+                    elif result.get("meets_sla"):
+                        met_count += 1
 
     return {
-        "mode": "execution_status",
         "business_date": business_date,
         "region": region,
-        "eligible_sic_count": len(eligible_eids),
-        "actual_sic_count": len(actual_by_eid),
-        "eligible_without_execution_count": len(eligible_eids - set(actual_by_eid)),
-        "missing_sla_coverage_count": len(missing_sla_coverage),
-        "sla_evaluated_count": len(observed_results),
-        "breach_count": breach_count,
-        "met_count": met_count,
-        "scope_sics": list(scope_rows_by_eid.values()),
-        "missing_sla_coverage": missing_sla_coverage,
-        "sla_results": observed_results,
+        "relationships": relationships,
+        "sla_results": all_sla_results,
+        "summary": {
+            "eligible_sic_count": len(eligible_eids),
+            "executed_sic_count": len(actual_by_eid),
+            "not_executed_count": len(eligible_eids - set(actual_by_eid)),
+            "sla_evaluated_count": sum(1 for r in all_sla_results if r.get("breached") is not None),
+            "breach_count": breach_count,
+            "met_count": met_count,
+            "no_sla_defined_count": sum(1 for r in all_sla_results if r.get("breach_reason") == "no_sla_defined"),
+            "no_execution_count": sum(1 for r in all_sla_results if r.get("breach_reason") == "no_execution_data"),
+            "relationship_count": len(relationships),
+        },
     }
 
 

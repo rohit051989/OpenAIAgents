@@ -127,7 +127,6 @@ class ScheduleInstanceContextNodeDef:
     description: str = ""
     enabled: bool = True
     contextForEntityId: str = ""    # ID of the Job this context is for
-    estimatedDurationMs: int = 0
 
 
 @dataclass
@@ -138,10 +137,8 @@ class SLANodeDef:
     enabled: bool = True
     type: str = ""                  # ABSOLUTE, RELATIVE
     policy: str = ""                # finish_by_time, duration_less_than, etc.
-    severity: str = ""              # CRITICAL, HIGH, MEDIUM, LOW
     durationMs: int = 0
-    time: str = ""                  # e.g. "04:00:00" for ABSOLUTE type
-    tz: str = ""
+    time: str = ""                  # "HH:MM:SS" 24-hour for ABSOLUTE type
 
 
 @dataclass

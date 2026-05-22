@@ -1543,8 +1543,19 @@ class Neo4jLoader:
     
     @staticmethod
     def _create_sla(tx, data: Dict):
-        """Transaction function to create SLA"""
-        valid_for_entity_types = {'JobGroup', 'ScheduleInstanceContext', 'Resource', 'Job'}
+        """Create SLA node and attach to a ScheduleInstanceContext or JobGroup.
+
+        SLA type determines which field carries the threshold:
+          - ABSOLUTE : ``time`` column (e.g. "07:00 AM", "05:30 AM") — job must finish
+                       by this wall-clock time on the business date.
+          - RELATIVE : ``durationMs`` column — job must complete within this many
+                       milliseconds of starting.
+
+        ``severity``, ``tz``, ``relativeEntityId``, and ``relativeEntityType`` have been
+        removed from the schema.  Resource SLAs are no longer modelled directly; resource
+        dependency is derived from existing (SIC/JobGroup)-[:Require_Resource]->(Resource).
+        """
+        valid_for_entity_types = {'JobGroup', 'ScheduleInstanceContext'}
         for_entity_type = str(data.get('forEntityType', '') or '').strip()
         if for_entity_type not in valid_for_entity_types:
             raise ValueError(
@@ -1552,44 +1563,29 @@ class Neo4jLoader:
                 f"Allowed: {sorted(valid_for_entity_types)}"
             )
 
-        # Backward-compatibility: legacy sheets may still use Job; convert to SIC.
-        # SLA ownership is now modeled at JobGroup / ScheduleInstanceContext / Resource.
-        if for_entity_type == 'Job':
-            logger.warning(
-                "SLA row uses forEntityType='Job'. Converting to ScheduleInstanceContext"
-            )
-
-        relative_entity_id = data.get('relativeEntityId')
-        relative_entity_type = str(data.get('relativeEntityType', '') or '').strip()
-        has_relative = relative_entity_id not in (None, '')
-        if has_relative:
-            # Relative SLA must point to a Resource and belong to SIC or JobGroup.
-            if relative_entity_type != 'Resource':
-                raise ValueError(
-                    f"relativeEntityType must be 'Resource' when relativeEntityId is set; "
-                    f"got {relative_entity_type!r}"
-                )
-            if for_entity_type not in {'JobGroup', 'ScheduleInstanceContext', 'Job'}:
-                raise ValueError(
-                    "Relative SLA is supported only for JobGroup/ScheduleInstanceContext ownership"
-                )
+        # Normalise time string to HH:MM:SS (24-hour).
+        # Excel may supply "07:00 AM", "5:30 AM", "02:20 AM", or already "07:00:00".
+        raw_time = str(data.get('time', '') or '').strip()
+        normalized_time = ''
+        if raw_time:
+            try:
+                normalized_time = pd.Timestamp(f"2000-01-01 {raw_time}").strftime('%H:%M:%S')
+            except Exception:
+                normalized_time = raw_time  # use as-is if parsing fails
 
         node = SLANodeDef(
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
             policy=str(data.get('policy', '')),
-            severity=str(data.get('severity', '')),
             enabled=bool(data.get('enabled', True)),
             type=str(data.get('type', '')),
             durationMs=int(data.get('durationMs', 0)),
-            time=str(data.get('time', '')),
-            tz=str(data.get('tz', ''))
+            time=normalized_time,
         )
         query = """
         MERGE (sla:SLA {id: $id})
         SET sla.name = $name,
             sla.policy = $policy,
-            sla.severity = $severity,
             sla.enabled = $enabled,
             sla.type = $type
         """
@@ -1597,37 +1593,15 @@ class Neo4jLoader:
             query += ", sla.time = $time"
         if node.durationMs:
             query += ", sla.durationMs = $durationMs"
-        if node.tz:
-            query += ", sla.tz = $tz"
-        if has_relative:
-            query += f"""
-                WITH sla
-                MATCH (relativeEntity:{relative_entity_type} {{id: $relativeEntityId}})
-                MERGE (sla)-[:RELATIVE_TO_RESOURCE]->(relativeEntity)
-            """
-        if for_entity_type == 'Job':
-            # Legacy sheet compatibility: resolve all SICs representing this Job.
-            query += """
-        WITH sla
-        MATCH (j:Job)
-        WHERE j.id = $forEntityId OR j.name = $forEntityId OR elementId(j) = $forEntityId
-        MATCH (entity:ScheduleInstanceContext)-[:FOR_JOB]->(j)
-        MERGE (entity)-[:HAS_SLA]->(sla)
-        RETURN sla
-        """
-        else:
-            query += f"""
+        query += f"""
         WITH sla
         MATCH (entity:{for_entity_type} {{id: $forEntityId}})
         MERGE (entity)-[:HAS_SLA]->(sla)
         RETURN sla
         """
         tx.run(query, id=node.id, name=node.name,
-               policy=node.policy,
-               severity=node.severity, enabled=node.enabled, type=node.type,
-               time=node.time, durationMs=node.durationMs, tz=node.tz,
-               relativeEntityId=relative_entity_id,
-               relativeEntityType=relative_entity_type,
+               policy=node.policy, enabled=node.enabled, type=node.type,
+               time=node.time, durationMs=node.durationMs,
                forEntityId=data.get('forEntityId'))
 
     

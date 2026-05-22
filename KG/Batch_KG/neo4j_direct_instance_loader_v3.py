@@ -216,6 +216,9 @@ class Neo4jInstanceLoaderV2:
         # business_date: jobs starting at or after nightly_job_cutoff_hour are
         # booked to the next calendar day (nightly-job convention).
         business_date = _compute_business_date(start_dt, self.nightly_job_cutoff_hour)
+        # execution_date: the actual calendar date the job ran (always the startTime's date).
+        # Differs from business_date for nightly jobs.
+        execution_date = start_dt.strftime('%Y-%m-%d')
 
         # ── Derive job_group_id and jge_id — three strategies ────────────────────────
         if 'jobGroupId' in data:
@@ -301,14 +304,16 @@ class Neo4jInstanceLoaderV2:
         query = """
         MERGE (jge:JobGroupExecution {id: $id})
         SET jge.businessDate = date($businessDate),
-            jge.startTime = time($startTime)
+            jge.startTime = time($startTime),
+            jge.executionDate = date($executionDate)
         WITH jge
         MATCH (jg:JobGroup {id: $jobGroupId})
         MERGE (jge)-[:EXECUTES_JOB_GROUP]->(jg)
         RETURN jge, jg
         """
         tx.run(query, id=node.id, businessDate=node.businessDate,
-               startTime=node.startTime, jobGroupId=job_group_id)
+               startTime=node.startTime, jobGroupId=job_group_id,
+               executionDate=execution_date)
 
         # tagId is not yet present in JobContextExecutions but preserved for when it appears
         if 'tagId' in data:
@@ -420,6 +425,13 @@ class Neo4jInstanceLoaderV2:
         except Exception:
             duration_ms = 0
 
+        # execution_date: calendar date the job actually started (= startTime's date).
+        # For nightly jobs this is the day before business_date.
+        try:
+            execution_date = pd.Timestamp(str(data.get('startTime', ''))).strftime('%Y-%m-%d')
+        except Exception:
+            execution_date = business_date  # fallback: use business_date if startTime unparseable
+
         node = JobContextExecutionNodeDef(
             id=str(data.get('id', '')),
             status=str(data.get('status', '')),
@@ -440,7 +452,8 @@ class Neo4jInstanceLoaderV2:
             jce.durationMs = $durationMs,
             jce.status = $status,
             jce.exitCode = $exitCode,
-            jce.exitMessage = $exitMessage
+            jce.exitMessage = $exitMessage,
+            jce.executionDate = date($executionDate)
         """
         if expected_start:
             query += ",\n            jce.expectedStartTime = time($expectedStartTime)"
@@ -461,7 +474,8 @@ class Neo4jInstanceLoaderV2:
                endTime=node.endTime, durationMs=node.durationMs,
                status=node.status, exitCode=node.exitCode, exitMessage=node.exitMessage,
                expectedStartTime=node.expectedStartTime,
-               jobContextId=job_context_id, jobGroupExecId=jge_id)
+               jobContextId=job_context_id, jobGroupExecId=jge_id,
+               executionDate=execution_date)
         logger.info(f"JobContextExecution '{node.id}' created and linked to ScheduleInstanceContext '{job_context_id}' and JobGroupExecution '{jge_id}'")
     
     def _load_resource_events(self, excel_file):
