@@ -15,6 +15,7 @@ from neo4j import AsyncDriver
 
 from app.core.database import kg_session
 from app.services.anomalies_service import _build_sic_map, _evaluate_sic
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +369,45 @@ RETURN DISTINCT
     row.sla.time            AS sla_time
 """
 
+_Q_SIC_ANOMALY_HIST = """
+UNWIND $sic_eids AS sic_eid
+MATCH (sic:ScheduleInstanceContext)
+WHERE elementId(sic) = sic_eid
+OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
+WHERE jce.businessDate >= date($hist_start_date)
+  AND jce.businessDate < date($business_date)
+  AND jce.durationMs IS NOT NULL
+WITH sic_eid,
+     avg(jce.durationMs)   AS hist_avg_ms,
+     stdev(jce.durationMs) AS hist_std_ms,
+     count(jce)            AS hist_sample_count
+RETURN sic_eid, hist_avg_ms, hist_std_ms, hist_sample_count
+"""
+
+_Q_JOB_DURATION_TIMESERIES = """
+MATCH (e:JobContextExecution)-[:EXECUTES_JOB]->(j:Job)
+WHERE j.name = $job_id
+  AND e.businessDate >= date($start_date)
+  AND e.durationMs IS NOT NULL
+WITH toString(e.businessDate) AS business_date,
+     avg(e.durationMs)        AS avg_duration_ms,
+     count(e)                 AS execution_count
+ORDER BY business_date ASC
+RETURN business_date, avg_duration_ms, execution_count
+"""
+
+
+# ---------------------------------------------------------------------------
+# Anomaly / trend configuration — loaded once from config/config.yaml
+# ---------------------------------------------------------------------------
+_cfg = get_settings().config
+_ANOMALY_HIST_DAYS: int = _cfg.anomaly_hist_days
+_ANOMALY_K_FACTOR: float = _cfg.anomaly_k_factor
+_ANOMALY_MIN_SAMPLES: int = _cfg.anomaly_min_samples
+_TREND_MIN_POINTS: int = _cfg.trend_min_points
+_TREND_DETERIORATING_MS: int = _cfg.trend_deteriorating_ms
+_TREND_IMPROVING_MS: int = _cfg.trend_improving_ms
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -497,6 +537,21 @@ def _clock_to_ms(value: str | None) -> int | None:
         + clock.second * 1000
         + int(clock.microsecond / 1000)
     )
+
+
+def _compute_linear_slope(points: list[tuple[int, float]]) -> float | None:
+    """Ordinary least squares slope (units: y-units per x-unit, i.e. ms per day index)."""
+    n = len(points)
+    if n < 2:
+        return None
+    sum_x = sum(x for x, _ in points)
+    sum_y = sum(y for _, y in points)
+    sum_xy = sum(x * y for x, y in points)
+    sum_xx = sum(x * x for x, _ in points)
+    denom = n * sum_xx - sum_x * sum_x
+    if denom == 0:
+        return None
+    return (n * sum_xy - sum_x * sum_y) / denom
 
 
 def _topological_order(nodes: set[str], edges: list[tuple[str, str]]) -> list[str]:
@@ -644,14 +699,22 @@ def _evaluate_observed_sla(
             sla_t = _parse_sla_clock(sla_clock_str)
             if sla_t:
                 try:
-                    sla_deadline = datetime.combine(date.fromisoformat(business_date), sla_t)
+                    # Strip tzinfo so the deadline is always a naive datetime.
+                    # SLA policy times ("HH:MM:SS") carry no zone; keeping one side
+                    # tz-aware and the other naive raises TypeError on Python 3.11+
+                    # when Neo4j returns time strings with an offset (e.g. "02:00:00+05:30").
+                    sla_deadline = datetime.combine(
+                        date.fromisoformat(business_date), sla_t.replace(tzinfo=None)
+                    )
                 except (ValueError, TypeError):
                     pass
         if execution_date_str and start_time_str and actual_duration_ms:
             start_t = _parse_sla_clock(start_time_str)
             if start_t:
                 try:
-                    start_dt = datetime.combine(date.fromisoformat(execution_date_str), start_t)
+                    start_dt = datetime.combine(
+                        date.fromisoformat(execution_date_str), start_t.replace(tzinfo=None)
+                    )
                     end_datetime = start_dt + timedelta(milliseconds=actual_duration_ms)
                 except (ValueError, TypeError):
                     pass
@@ -935,6 +998,16 @@ async def _run_execution_status(
         if scope_sic_eids:
             sla_rows = await (await session.run(_Q_SLA_ROWS_FOR_SICS, sic_eids=scope_sic_eids)).data()
 
+        anomaly_rows: list[dict[str, Any]] = []
+        executed_sic_eids = list(actual_by_eid.keys())
+        if executed_sic_eids:
+            anomaly_rows = await (await session.run(
+                _Q_SIC_ANOMALY_HIST,
+                sic_eids=executed_sic_eids,
+                hist_start_date=_start_date(_ANOMALY_HIST_DAYS),
+                business_date=business_date,
+            )).data()
+
     # ── Build PRECEDES relationships between eligible SICs ───────────────────
     relationships = [
         {
@@ -1034,6 +1107,30 @@ async def _run_execution_status(
                     elif result.get("meets_sla"):
                         met_count += 1
 
+    # ── Merge anomaly data into every SLA result row ──────────────────────────
+    anomaly_by_eid = {row["sic_eid"]: row for row in anomaly_rows if row.get("sic_eid")}
+    anomaly_count = 0
+    for row in all_sla_results:
+        sic_eid = row.get("sic_eid")
+        anom = anomaly_by_eid.get(sic_eid)
+        hist_avg = float(anom["hist_avg_ms"]) if anom and anom.get("hist_avg_ms") is not None else None
+        hist_std = float(anom["hist_std_ms"]) if anom and anom.get("hist_std_ms") is not None else 0.0
+        sample_count = int(anom["hist_sample_count"]) if anom and anom.get("hist_sample_count") else 0
+        actual_dur = row.get("actual_duration_ms")
+        if actual_dur is not None and hist_avg is not None and sample_count >= _ANOMALY_MIN_SAMPLES:
+            is_anomaly = actual_dur > hist_avg + _ANOMALY_K_FACTOR * hist_std
+            deviation_factor = round(actual_dur / hist_avg, 3) if hist_avg > 0 else None
+        else:
+            is_anomaly = None
+            deviation_factor = None
+        if is_anomaly:
+            anomaly_count += 1
+        row["hist_avg_ms"] = int(hist_avg) if hist_avg is not None else None
+        row["hist_std_ms"] = int(hist_std) if hist_std else None
+        row["hist_sample_count"] = sample_count
+        row["is_duration_anomaly"] = is_anomaly
+        row["anomaly_deviation_factor"] = deviation_factor
+
     return {
         "business_date": business_date,
         "region": region,
@@ -1048,6 +1145,7 @@ async def _run_execution_status(
             "met_count": met_count,
             "no_sla_defined_count": sum(1 for r in all_sla_results if r.get("breach_reason") == "no_sla_defined"),
             "no_execution_count": sum(1 for r in all_sla_results if r.get("breach_reason") == "no_execution_data"),
+            "anomaly_count": anomaly_count,
             "relationship_count": len(relationships),
         },
     }
@@ -1367,12 +1465,34 @@ async def get_job_performance(
         ``execution_count``, ``success_count``, ``failure_count``.
     """
     logger.info("get_job_performance job_id=%s days=%s", job_id, days)
+    start = _start_date(days)
     async with kg_session(driver) as session:
-        result = await session.run(
-            _Q_JOB_PERFORMANCE, job_id=job_id, start_date=_start_date(days)
-        )
+        result = await session.run(_Q_JOB_PERFORMANCE, job_id=job_id, start_date=start)
         record = await result.single()
-    return dict(record) if record else {}
+        ts_result = await session.run(_Q_JOB_DURATION_TIMESERIES, job_id=job_id, start_date=start)
+        ts_rows = await ts_result.data()
+    if not record:
+        return {}
+    data = dict(record)
+    points = [
+        (i, float(row["avg_duration_ms"]))
+        for i, row in enumerate(ts_rows)
+        if row.get("avg_duration_ms") is not None
+    ]
+    slope = _compute_linear_slope(points)
+    if slope is None or len(points) < _TREND_MIN_POINTS:
+        trend = "insufficient_data"
+    elif slope >= _TREND_DETERIORATING_MS:
+        trend = "deteriorating"
+    elif slope <= _TREND_IMPROVING_MS:
+        trend = "improving"
+    else:
+        trend = "stable"
+    data["time_series"] = ts_rows
+    data["data_points_count"] = len(ts_rows)
+    data["slope_ms_per_day"] = round(slope, 2) if slope is not None else None
+    data["trend"] = trend
+    return data
 
 
 async def get_slow_jobs(

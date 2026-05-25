@@ -1,0 +1,33 @@
+# Performance analysis configuration
+# Used by app/services/performance_service.py via config/settings.py
+
+performance:
+
+  # --- Anomaly detection (get_sla_execution_breach) ---
+
+  # Number of days of historical executions used to compute the baseline avg/std
+  # for each SIC. Only executions strictly before the target business_date count.
+  anomaly_hist_days: 30
+
+  # A SIC is flagged as anomalous when:
+  #   actual_duration_ms > hist_avg_ms + anomaly_k_factor * hist_std_ms
+  # Increase for fewer (but more certain) flags; decrease to catch milder outliers.
+  anomaly_k_factor: 2.0
+
+  # Minimum number of historical executions required before a SIC can be flagged.
+  # Prevents false positives on rarely-run or newly-onboarded SICs.
+  anomaly_min_samples: 5
+
+  # --- Deterioration / trend analysis (get_job_performance) ---
+
+  # Minimum number of daily data points required to produce a trend label.
+  # Below this threshold the trend is reported as "insufficient_data".
+  trend_min_points: 7
+
+  # OLS slope threshold (ms per day) above which a job is labelled "deteriorating".
+  # e.g. 500 means the job is taking 500 ms longer per day on average.
+  trend_deteriorating_ms: 500
+
+  # OLS slope threshold (ms per day) below which a job is labelled "improving".
+  # Negative value: job is getting faster over time.
+  trend_improving_ms: -500

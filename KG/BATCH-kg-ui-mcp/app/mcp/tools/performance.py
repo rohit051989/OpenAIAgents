@@ -19,16 +19,23 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(name="get_job_performance")
 async def tool_get_job_performance(job_id: str, days: int = 30) -> dict:
-    """Retrieve aggregate performance metrics for a specific job.
+    """Retrieve aggregate performance metrics and deterioration trend for a specific job.
 
     Args:
         job_id: The unique ``id`` property of the target Job node.
-        days: Number of past days to include (default 30).
+        days: Number of past days to include (default 30). Use 60+ for reliable trends.
 
     Returns:
-        Dictionary with ``job_name``, ``avg_duration_seconds``,
-        ``min_duration_seconds``, ``max_duration_seconds``,
-        ``execution_count``, ``success_count``, ``failure_count``.
+        Dictionary with aggregate stats plus trend analysis:
+        - ``job_name``, ``avg_duration_seconds``, ``min_duration_seconds``,
+          ``max_duration_seconds``, ``execution_count``, ``success_count``, ``failure_count``
+        - ``time_series``: daily list of ``{business_date, avg_duration_ms, execution_count}``
+        - ``slope_ms_per_day``: linear regression slope; positive = getting slower
+        - ``trend``: one of ``deteriorating`` / ``stable`` / ``improving`` / ``insufficient_data``
+        - ``data_points_count``: number of daily buckets available
+
+    Use ``trend == "deteriorating"`` and ``slope_ms_per_day`` to identify jobs that are
+    consistently slowing down over time. Requires at least 7 data points for a trend label.
     """
     logger.info("MCP tool get_job_performance job_id=%s days=%s", job_id, days)
     driver = await get_driver()
@@ -84,14 +91,25 @@ async def tool_get_sla_execution_breach(
     business_date: str,
     region: str = "ALL",
 ) -> dict:
-    """Return SLA breach status for a day from execution history only.
+    """Return SLA breach status and duration anomaly flags for a day from execution history.
 
     Args:
         business_date: ISO date (YYYY-MM-DD) to evaluate.
-        region: Region used for eligibility evaluation.
+        region: Region used for eligibility evaluation (default ALL).
 
     Returns:
-        Execution-only SLA status for eligible SICs on the given date.
+        Execution SLA status for all eligible SICs on the given date.
+        Each entry in ``sla_results`` includes full SLA evaluation fields plus
+        anomaly detection fields (computed against the prior 30-day history):
+        - ``hist_avg_ms``: historical average duration for this SIC
+        - ``hist_std_ms``: historical standard deviation
+        - ``hist_sample_count``: number of historical executions used
+        - ``is_duration_anomaly``: True if today ran > avg + 2*std (requires ≥5 samples)
+        - ``anomaly_deviation_factor``: ratio of today's duration to historical avg
+
+        The ``summary`` block includes ``anomaly_count`` — number of SICs flagged as anomalous.
+        Use this tool to answer questions like: "Which jobs breached SLA today?" and
+        "Which jobs ran unusually long compared to their historical average?"
     """
     logger.info(
         "MCP tool get_sla_execution_breach business_date=%s region=%s",
