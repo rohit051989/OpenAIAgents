@@ -877,16 +877,13 @@ def _evaluate_date_projection_sla(
 
     projected_breach = bool(duration_breach or absolute_breach)
 
-    # Calculate real SLA impact considering buffer absorption
-    # real_sla_impact = actual delay that causes SLA breach after buffer absorption
-    if buffer_ms is not None and buffer_ms >= 0:
-        # Buffer can absorb some/all of the delay
-        real_sla_impact_ms = max(0, propagated_delay_ms - buffer_ms)
-    elif absolute_breach:
-        # No buffer or negative buffer - full breach amount
-        real_sla_impact_ms = max(0, (projected_finish_ms or 0) - (effective_deadline_ms or 0))
-    elif duration_breach and has_duration_threshold:
-        real_sla_impact_ms = max(0, (duration_ms or 0) - threshold_ms)
+    # Calculate real SLA impact = the actual breach amount after considering delay
+    # For ABSOLUTE SLA: how much the projected finish exceeds the deadline
+    # For RELATIVE SLA: how much the duration exceeds the threshold
+    if sla_type_upper == "ABSOLUTE" and effective_deadline_ms is not None and projected_finish_ms is not None:
+        real_sla_impact_ms = max(0, projected_finish_ms - effective_deadline_ms)
+    elif sla_type_upper == "RELATIVE" and has_duration_threshold and duration_ms is not None:
+        real_sla_impact_ms = max(0, duration_ms - threshold_ms)
     else:
         real_sla_impact_ms = 0
 
@@ -997,6 +994,12 @@ def _consolidate_sic_impacts(
         def _to_sec(ms_val):
             return round(ms_val / 1000.0, 2) if ms_val is not None else None
         
+        # Convert baseline and projected finish from absolute times to durations
+        duration_val = base_fields.get("effective_duration_ms")
+        delay_val = base_fields.get("propagated_delay_ms", 0)
+        baseline_duration_sec = _to_sec(duration_val)
+        projected_duration_sec = _to_sec(duration_val + delay_val) if duration_val is not None else None
+        
         # Build minimal response with only requested fields (in seconds)
         consolidated.append({
             "sic_eid": sic_row.get("sic_eid"),
@@ -1008,9 +1011,9 @@ def _consolidate_sic_impacts(
             "job_eid": sic_row.get("job_eid"),
             "job_name": sic_row.get("job_name"),
             "at_risk": at_risk_val,
-            "effective_duration_sec": _to_sec(base_fields.get("effective_duration_ms")),
-            "baseline_finish_sec": _to_sec(base_fields.get("baseline_finish_ms")),
-            "projected_finish_sec": _to_sec(base_fields.get("projected_finish_ms")),
+            "effective_duration_sec": baseline_duration_sec,
+            "baseline_finish_sec": baseline_duration_sec,
+            "projected_finish_sec": projected_duration_sec,
             "real_sla_impact_sec": _to_sec(real_sla_impact_val),
             "sla_id": primary_sla.get("sla_id") if primary_sla else None,
             "sla_name": primary_sla.get("sla_name") if primary_sla else None,
@@ -1433,18 +1436,14 @@ async def _run_projected_impact(
         at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
         sla_evaluated_count = sum(1 for row in sla_impacts if row.get("sla_id"))
 
+        # Keep absolute times internally for correct calculations
         base_fields_by_sic = {
             sic_eid: {
                 "duration_source": duration_source.get(sic_eid, "missing"),
                 "effective_duration_ms": duration_ms.get(sic_eid),
                 "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
-                # Convert to durations for response: baseline = duration, projected = duration + delay
-                "baseline_finish_ms": duration_ms.get(sic_eid),
-                "projected_finish_ms": (
-                    duration_ms.get(sic_eid) + propagated_delay_ms.get(sic_eid, 0)
-                    if duration_ms.get(sic_eid) is not None
-                    else None
-                ),
+                "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
+                "projected_finish_ms": projected_finish_ms.get(sic_eid),
                 "downstream_after_ms": downstream_after_ms.get(sic_eid),
             }
             for sic_eid in impacted_by_sic
@@ -1611,18 +1610,14 @@ async def _run_projected_impact(
     at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
     sla_evaluated_count = sum(1 for row in sla_impacts if row.get("sla_id"))
 
+    # Keep absolute times internally for correct calculations
     base_fields_by_sic = {
         sic_eid: {
             "duration_source": duration_source.get(sic_eid, "missing"),
             "effective_duration_ms": duration_ms.get(sic_eid),
             "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
-            # Convert to durations for response: baseline = duration, projected = duration + delay
-            "baseline_finish_ms": duration_ms.get(sic_eid),
-            "projected_finish_ms": (
-                duration_ms.get(sic_eid) + propagated_delay_ms.get(sic_eid, 0)
-                if duration_ms.get(sic_eid) is not None
-                else None
-            ),
+            "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
+            "projected_finish_ms": projected_finish_ms.get(sic_eid),
             "downstream_after_ms": downstream_after_ms.get(sic_eid),
         }
         for sic_eid in impacted_by_sic
