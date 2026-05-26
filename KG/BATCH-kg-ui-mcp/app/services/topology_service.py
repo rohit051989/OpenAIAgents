@@ -51,7 +51,7 @@ WITH j, steps, blocks, coalesce(entry.name, entry.id) AS entry_point
 OPTIONAL MATCH (j)-[:HAS_SLA]->(sla:SLA)
 WITH j, steps, blocks, entry_point, collect(DISTINCT {
     name: sla.name, id: sla.id, type: sla.type,
-    policy: sla.policy, severity: sla.severity,
+    severity: sla.severity,
     time: sla.time, durationMs: sla.durationMs
 }) AS slas
 

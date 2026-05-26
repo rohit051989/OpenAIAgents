@@ -1571,7 +1571,6 @@ class Neo4jLoader:
         node = SLANodeDef(
             id=str(data.get('id', '')),
             name=str(data.get('name', '')),
-            policy=str(data.get('policy', '')),
             enabled=bool(data.get('enabled', True)),
             type=str(data.get('type', '')),
             durationMs=int(data.get('durationMs', 0)),
@@ -1580,7 +1579,6 @@ class Neo4jLoader:
         query = """
         MERGE (sla:SLA {id: $id})
         SET sla.name = $name,
-            sla.policy = $policy,
             sla.enabled = $enabled,
             sla.type = $type
         """
@@ -1595,7 +1593,7 @@ class Neo4jLoader:
         RETURN sla
         """
         tx.run(query, id=node.id, name=node.name,
-               policy=node.policy, enabled=node.enabled, type=node.type,
+               enabled=node.enabled, type=node.type,
                time=node.time, durationMs=node.durationMs,
                forEntityId=data.get('forEntityId'))
 

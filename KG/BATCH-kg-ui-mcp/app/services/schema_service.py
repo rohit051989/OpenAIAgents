@@ -98,7 +98,6 @@ _PROPERTY_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "SLA": {
         "id": "Unique identifier for the SLA",
         "name": "Name of the SLA",
-        "policy": "SLA policy: finish_by_time, duration_less_than, etc.",
         "severity": "Severity level: CRITICAL, HIGH, MEDIUM, LOW",
         "enabled": "Whether the SLA is enabled (boolean)",
         "type": "SLA type: ABSOLUTE, RELATIVE",

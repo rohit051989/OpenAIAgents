@@ -136,7 +136,6 @@ class SLANodeDef:
     name: str = ""
     enabled: bool = True
     type: str = ""                  # ABSOLUTE, RELATIVE
-    policy: str = ""                # finish_by_time, duration_less_than, etc.
     durationMs: int = 0
     time: str = ""                  # "HH:MM:SS" 24-hour for ABSOLUTE type
 

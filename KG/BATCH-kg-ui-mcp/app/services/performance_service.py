@@ -338,6 +338,61 @@ RETURN DISTINCT
         job.name                  AS job_name
 """
 
+_Q_JG_CASCADE_FROM_SICS = """
+UNWIND $sic_eids AS sic_eid
+MATCH (sic:ScheduleInstanceContext)
+WHERE elementId(sic) = sic_eid
+MATCH (sic)-[:FOR_GROUP]->(root_jg:JobGroup)
+MATCH (root_jg)-[:PRECEDES*1..50]->(downstream_jg:JobGroup)
+WITH collect(DISTINCT downstream_jg) AS all_jgs
+UNWIND all_jgs AS jg
+MATCH (down_sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg)
+OPTIONAL MATCH (down_sic)-[:FOR_JOB]->(job:Job)
+OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(down_sic)
+WHERE jce.businessDate >= date($start_date)
+  AND jce.durationMs IS NOT NULL
+WITH down_sic, jg, job, avg(jce.durationMs) AS avg_duration_ms
+RETURN DISTINCT
+    elementId(down_sic) AS sic_eid,
+    down_sic.id         AS sic_id,
+    down_sic.name       AS sic_name,
+    elementId(jg)       AS jg_eid,
+    jg.id               AS jg_id,
+    jg.name             AS jg_name,
+    elementId(job)      AS job_eid,
+    job.id              AS job_id,
+    job.name            AS job_name,
+    avg_duration_ms
+"""
+
+_Q_JG_CASCADE_FROM_SICS_IN_SCOPE = """
+UNWIND $sic_eids AS sic_eid
+MATCH (sic:ScheduleInstanceContext)
+WHERE elementId(sic) = sic_eid
+MATCH (sic)-[:FOR_GROUP]->(root_jg:JobGroup)
+MATCH (root_jg)-[:PRECEDES*1..50]->(downstream_jg:JobGroup)
+WITH collect(DISTINCT downstream_jg) AS all_jgs
+UNWIND all_jgs AS jg
+MATCH (down_sic:ScheduleInstanceContext)-[:FOR_GROUP]->(jg)
+WHERE elementId(down_sic) IN $scope_sic_eids
+OPTIONAL MATCH (down_sic)-[:FOR_JOB]->(job:Job)
+OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(down_sic)
+WHERE jce.businessDate >= date($start_date)
+  AND jce.durationMs IS NOT NULL
+WITH down_sic, jg, job, avg(jce.durationMs) AS avg_duration_ms
+RETURN DISTINCT
+    elementId(down_sic) AS sic_eid,
+    down_sic.id         AS sic_id,
+    down_sic.name       AS sic_name,
+    elementId(jg)       AS jg_eid,
+    jg.id               AS jg_id,
+    jg.name             AS jg_name,
+    elementId(job)      AS job_eid,
+    job.id              AS job_id,
+    job.name            AS job_name,
+    avg_duration_ms
+"""
+
 _Q_SLA_ROWS_FOR_SICS = """
 UNWIND $sic_eids AS sic_eid
 MATCH (sic:ScheduleInstanceContext)
@@ -364,7 +419,6 @@ RETURN DISTINCT
     row.sla.id              AS sla_id,
     row.sla.name            AS sla_name,
     row.sla.type            AS sla_type,
-    row.sla.policy          AS sla_policy,
     row.sla.durationMs      AS sla_duration_ms,
     row.sla.time            AS sla_time
 """
@@ -700,7 +754,6 @@ def _evaluate_observed_sla(
             if sla_t:
                 try:
                     # Strip tzinfo so the deadline is always a naive datetime.
-                    # SLA policy times ("HH:MM:SS") carry no zone; keeping one side
                     # tz-aware and the other naive raises TypeError on Python 3.11+
                     # when Neo4j returns time strings with an offset (e.g. "02:00:00+05:30").
                     sla_deadline = datetime.combine(
@@ -764,7 +817,6 @@ def _evaluate_observed_sla(
         "sla_id": sla_row.get("sla_id"),
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
-        "sla_policy": sla_row.get("sla_policy"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
         "sla_deadline_datetime": sla_deadline.isoformat() if sla_deadline else None,
@@ -829,7 +881,6 @@ def _evaluate_projected_sla(
         "sla_id": sla_row.get("sla_id"),
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
-        "sla_policy": sla_row.get("sla_policy"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
         "baseline_duration_ms": baseline_ms_int,
@@ -928,7 +979,6 @@ def _evaluate_date_projection_sla(
         "sla_id": sla_row.get("sla_id"),
         "sla_name": sla_row.get("sla_name"),
         "sla_type": sla_row.get("sla_type"),
-        "sla_policy": sla_row.get("sla_policy"),
         "sla_duration_ms": threshold_ms if has_duration_threshold else None,
         "sla_time": sla_row.get("sla_time"),
         "duration_source": duration_source,
@@ -1004,7 +1054,7 @@ async def _run_execution_status(
             anomaly_rows = await (await session.run(
                 _Q_SIC_ANOMALY_HIST,
                 sic_eids=executed_sic_eids,
-                hist_start_date=_start_date(_ANOMALY_HIST_DAYS),
+                hist_start_date=(business_day - timedelta(days=_ANOMALY_HIST_DAYS)).isoformat(),
                 business_date=business_date,
             )).data()
 
@@ -1088,7 +1138,6 @@ async def _run_execution_status(
                         "sla_id": sla_row.get("sla_id"),
                         "sla_name": sla_row.get("sla_name"),
                         "sla_type": sla_row.get("sla_type"),
-                        "sla_policy": sla_row.get("sla_policy"),
                         "sla_duration_ms": threshold_ms_val if threshold_ms_val > 0 else None,
                         "sla_time": sla_row.get("sla_time"),
                         "sla_deadline_datetime": None,
@@ -1223,6 +1272,22 @@ async def _run_projected_impact(
                     scope_sic_eids=list(eligible_eids),
                 )
             ).data()
+
+            # JG-level cascade: SICs in JobGroups downstream via JobGroup PRECEDES chain
+            jg_cascade_rows = await (
+                await session.run(
+                    _Q_JG_CASCADE_FROM_SICS_IN_SCOPE,
+                    sic_eids=root_sic_eids,
+                    scope_sic_eids=list(eligible_eids),
+                    start_date=start_date,
+                )
+            ).data()
+            _existing_eids = {row["sic_eid"] for row in impacted_rows if row.get("sic_eid")}
+            impacted_rows.extend(
+                row for row in jg_cascade_rows
+                if row.get("sic_eid") and row["sic_eid"] not in _existing_eids
+            )
+
             impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
 
             if not impacted_sic_eids:
@@ -1408,6 +1473,19 @@ async def _run_projected_impact(
             impacted_params["scope_sic_eids"] = list(eligible_eids)
 
         impacted_rows = await (await session.run(impacted_query, **impacted_params)).data()
+        impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
+
+        # JG-level cascade: SICs in JobGroups downstream via JobGroup PRECEDES chain
+        jg_cascade_query = _Q_JG_CASCADE_FROM_SICS_IN_SCOPE if eligible_eids else _Q_JG_CASCADE_FROM_SICS
+        jg_cascade_params: dict[str, Any] = {"sic_eids": root_sic_eids, "start_date": start_date}
+        if eligible_eids:
+            jg_cascade_params["scope_sic_eids"] = list(eligible_eids)
+        jg_cascade_rows = await (await session.run(jg_cascade_query, **jg_cascade_params)).data()
+        _existing_eids = {row["sic_eid"] for row in impacted_rows if row.get("sic_eid")}
+        impacted_rows.extend(
+            row for row in jg_cascade_rows
+            if row.get("sic_eid") and row["sic_eid"] not in _existing_eids
+        )
         impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
 
         sla_rows: list[dict[str, Any]] = []

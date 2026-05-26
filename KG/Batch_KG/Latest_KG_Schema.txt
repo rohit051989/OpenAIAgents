@@ -85,8 +85,7 @@
             "enabled": "Whether the SLA is enabled (boolean)",
             "type": "SLA type: ABSOLUTE (finish by wall-clock time on business date) or RELATIVE (finish within durationMs of starting)",
             "durationMs": "Maximum allowed duration in milliseconds — used by RELATIVE SLAs",
-            "time": "Wall-clock deadline in HH:MM:SS 24-hour format — used by ABSOLUTE SLAs (e.g. 07:00:00)",
-            "policy": "Human-readable policy tag (e.g. finish_by_time, duration_less_than)"
+            "time": "Wall-clock deadline in HH:MM:SS 24-hour format — used by ABSOLUTE SLAs (e.g. 07:00:00)"
         },
         "BusinessCalendar": {
             "ruleId": "Unique identifier for the BusinessCalendar rule (e.g. RULE_1ST_SUNDAY)",
