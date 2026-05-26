@@ -854,6 +854,13 @@ def _evaluate_date_projection_sla(
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
 
+    # Calculate buffer: slack time between baseline finish and SLA deadline
+    buffer_ms = (
+        effective_deadline_ms - baseline_finish_ms
+        if effective_deadline_ms is not None and baseline_finish_ms is not None
+        else None
+    )
+
     # RELATIVE SLA: breach when effective duration exceeds threshold
     duration_breach = bool(
         sla_type_upper == "RELATIVE"
@@ -869,11 +876,19 @@ def _evaluate_date_projection_sla(
     )
 
     projected_breach = bool(duration_breach or absolute_breach)
-    buffer_ms = (
-        effective_deadline_ms - baseline_finish_ms
-        if effective_deadline_ms is not None and baseline_finish_ms is not None
-        else None
-    )
+
+    # Calculate real SLA impact considering buffer absorption
+    # real_sla_impact = actual delay that causes SLA breach after buffer absorption
+    if buffer_ms is not None and buffer_ms >= 0:
+        # Buffer can absorb some/all of the delay
+        real_sla_impact_ms = max(0, propagated_delay_ms - buffer_ms)
+    elif absolute_breach:
+        # No buffer or negative buffer - full breach amount
+        real_sla_impact_ms = max(0, (projected_finish_ms or 0) - (effective_deadline_ms or 0))
+    elif duration_breach and has_duration_threshold:
+        real_sla_impact_ms = max(0, (duration_ms or 0) - threshold_ms)
+    else:
+        real_sla_impact_ms = 0
 
     if projected_breach and absolute_breach and duration_breach:
         risk_reason = "absolute_and_duration_breach"
@@ -881,24 +896,12 @@ def _evaluate_date_projection_sla(
         risk_reason = "absolute_time_breach"
     elif projected_breach and duration_breach:
         risk_reason = "duration_threshold_breach"
-    elif buffer_ms is not None:
+    elif buffer_ms is not None and buffer_ms >= 0:
         risk_reason = "within_buffer"
     elif has_duration_threshold:
         risk_reason = "within_duration_threshold"
     else:
         risk_reason = "no_computable_threshold"
-
-    relative_breach_by_ms = (
-        max(0, (duration_ms or 0) - threshold_ms)
-        if duration_breach and has_duration_threshold
-        else 0
-    )
-    absolute_breach_by_ms = (
-        max(0, (projected_finish_ms or 0) - effective_deadline_ms)
-        if absolute_breach and effective_deadline_ms is not None
-        else 0
-    )
-    breach_by_ms = max(relative_breach_by_ms, absolute_breach_by_ms)
 
     return {
         "sic_eid": sic_row.get("sic_eid"),
@@ -925,8 +928,8 @@ def _evaluate_date_projection_sla(
         "effective_deadline_ms": effective_deadline_ms,
         "downstream_after_ms": downstream_after_ms,
         "buffer_ms": buffer_ms,
+        "real_sla_impact_ms": real_sla_impact_ms,
         "projected_breach": projected_breach,
-        "breach_by_ms": breach_by_ms,
         "at_risk": projected_breach,
         "risk_reason": risk_reason,
     }
@@ -947,7 +950,7 @@ def _consolidate_sic_impacts(
             "sla_time": row.get("sla_time"),
             "buffer_ms": row.get("buffer_ms"),
             "projected_breach": row.get("projected_breach"),
-            "breach_by_ms": row.get("breach_by_ms"),
+            "real_sla_impact_ms": row.get("real_sla_impact_ms"),
             "at_risk": row.get("at_risk"),
             "risk_reason": row.get("risk_reason"),
         }
@@ -970,7 +973,7 @@ def _consolidate_sic_impacts(
             primary_sla = max(
                 sic_sla_rows,
                 key=lambda r: (
-                    int(r.get("breach_by_ms") or 0),
+                    int(r.get("real_sla_impact_ms") or 0),
                     1 if r.get("projected_breach") else 0,
                     1 if r.get("at_risk") else 0,
                     1 if r.get("sla_id") else 0,
@@ -983,14 +986,18 @@ def _consolidate_sic_impacts(
         # Compute aggregate values
         at_risk_val = any(bool(r.get("at_risk")) for r in sic_sla_rows) if sic_sla_rows else False
         real_sla_impact_val = max(
-            (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
+            (int(r.get("real_sla_impact_ms") or 0) for r in sic_sla_rows),
             default=0,
         )
         
         # Get base fields
         base_fields = base_fields_by_sic.get(sic_eid, {})
         
-        # Build minimal response with only requested fields
+        # Helper to convert ms to seconds with rounding
+        def _to_sec(ms_val):
+            return round(ms_val / 1000.0, 2) if ms_val is not None else None
+        
+        # Build minimal response with only requested fields (in seconds)
         consolidated.append({
             "sic_eid": sic_row.get("sic_eid"),
             "sic_id": sic_row.get("sic_id"),
@@ -1001,16 +1008,16 @@ def _consolidate_sic_impacts(
             "job_eid": sic_row.get("job_eid"),
             "job_name": sic_row.get("job_name"),
             "at_risk": at_risk_val,
-            "effective_duration_ms": base_fields.get("effective_duration_ms"),
-            "baseline_finish_ms": base_fields.get("baseline_finish_ms"),
-            "projected_finish_ms": base_fields.get("projected_finish_ms"),
-            "real_sla_impact": real_sla_impact_val,
+            "effective_duration_sec": _to_sec(base_fields.get("effective_duration_ms")),
+            "baseline_finish_sec": _to_sec(base_fields.get("baseline_finish_ms")),
+            "projected_finish_sec": _to_sec(base_fields.get("projected_finish_ms")),
+            "real_sla_impact_sec": _to_sec(real_sla_impact_val),
             "sla_id": primary_sla.get("sla_id") if primary_sla else None,
             "sla_name": primary_sla.get("sla_name") if primary_sla else None,
             "sla_type": primary_sla.get("sla_type") if primary_sla else None,
-            "sla_duration_ms": primary_sla.get("sla_duration_ms") if primary_sla else None,
+            "sla_duration_sec": _to_sec(primary_sla.get("sla_duration_ms")) if primary_sla else None,
             "sla_time": primary_sla.get("sla_time") if primary_sla else None,
-            "buffer_ms": primary_sla.get("buffer_ms") if primary_sla else None,
+            "buffer_sec": _to_sec(primary_sla.get("buffer_ms")) if primary_sla else None,
             "risk_reason": primary_sla.get("risk_reason") if primary_sla else None,
         })
     return consolidated
@@ -1431,8 +1438,13 @@ async def _run_projected_impact(
                 "duration_source": duration_source.get(sic_eid, "missing"),
                 "effective_duration_ms": duration_ms.get(sic_eid),
                 "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
-                "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
-                "projected_finish_ms": projected_finish_ms.get(sic_eid),
+                # Convert to durations for response: baseline = duration, projected = duration + delay
+                "baseline_finish_ms": duration_ms.get(sic_eid),
+                "projected_finish_ms": (
+                    duration_ms.get(sic_eid) + propagated_delay_ms.get(sic_eid, 0)
+                    if duration_ms.get(sic_eid) is not None
+                    else None
+                ),
                 "downstream_after_ms": downstream_after_ms.get(sic_eid),
             }
             for sic_eid in impacted_by_sic
@@ -1604,8 +1616,13 @@ async def _run_projected_impact(
             "duration_source": duration_source.get(sic_eid, "missing"),
             "effective_duration_ms": duration_ms.get(sic_eid),
             "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
-            "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
-            "projected_finish_ms": projected_finish_ms.get(sic_eid),
+            # Convert to durations for response: baseline = duration, projected = duration + delay
+            "baseline_finish_ms": duration_ms.get(sic_eid),
+            "projected_finish_ms": (
+                duration_ms.get(sic_eid) + propagated_delay_ms.get(sic_eid, 0)
+                if duration_ms.get(sic_eid) is not None
+                else None
+            ),
             "downstream_after_ms": downstream_after_ms.get(sic_eid),
         }
         for sic_eid in impacted_by_sic
