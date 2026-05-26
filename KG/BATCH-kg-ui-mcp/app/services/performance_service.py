@@ -888,11 +888,17 @@ def _evaluate_date_projection_sla(
     else:
         risk_reason = "no_computable_threshold"
 
-    breach_by_ms = (
+    relative_breach_by_ms = (
+        max(0, (duration_ms or 0) - threshold_ms)
+        if duration_breach and has_duration_threshold
+        else 0
+    )
+    absolute_breach_by_ms = (
         max(0, (projected_finish_ms or 0) - effective_deadline_ms)
         if absolute_breach and effective_deadline_ms is not None
         else 0
     )
+    breach_by_ms = max(relative_breach_by_ms, absolute_breach_by_ms)
 
     return {
         "sic_eid": sic_row.get("sic_eid"),
@@ -932,11 +938,36 @@ def _consolidate_sic_impacts(
     base_fields_by_sic: dict[str, dict[str, Any]],
     sla_impacts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    def _compact_sla_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "owner_type": row.get("owner_type"),
+            "owner_id": row.get("owner_id"),
+            "owner_name": row.get("owner_name"),
+            "sla_id": row.get("sla_id"),
+            "sla_name": row.get("sla_name"),
+            "sla_type": row.get("sla_type"),
+            "sla_duration_ms": row.get("sla_duration_ms"),
+            "sla_time": row.get("sla_time"),
+            "duration_source": row.get("duration_source"),
+            "effective_duration_ms": row.get("effective_duration_ms"),
+            "propagated_delay_ms": row.get("propagated_delay_ms"),
+            "baseline_finish_ms": row.get("baseline_finish_ms"),
+            "projected_finish_ms": row.get("projected_finish_ms"),
+            "base_deadline_ms": row.get("base_deadline_ms"),
+            "effective_deadline_ms": row.get("effective_deadline_ms"),
+            "downstream_after_ms": row.get("downstream_after_ms"),
+            "buffer_ms": row.get("buffer_ms"),
+            "projected_breach": row.get("projected_breach"),
+            "breach_by_ms": row.get("breach_by_ms"),
+            "at_risk": row.get("at_risk"),
+            "risk_reason": row.get("risk_reason"),
+        }
+
     sla_by_sic: dict[str, list[dict[str, Any]]] = {}
     for row in sla_impacts:
         sic_eid = row.get("sic_eid")
         if sic_eid:
-            sla_by_sic.setdefault(sic_eid, []).append(row)
+            sla_by_sic.setdefault(sic_eid, []).append(_compact_sla_row(row))
 
     consolidated: list[dict[str, Any]] = []
     for sic_eid, sic_row in impacted_by_sic.items():
