@@ -847,6 +847,9 @@ def _evaluate_date_projection_sla(
         base_deadline_ms = _clock_to_ms(sla_row.get("sla_time"))
     else:
         base_deadline_ms = None  # RELATIVE uses durationMs only
+    
+    # For JobGroup SLA: all SICs in the same JG use the base deadline for reporting
+    # Effective deadline (with downstream adjustment) is only for breach detection logic
     effective_deadline_ms = base_deadline_ms
     if base_deadline_ms is not None and owner_type == "JOB_GROUP" and downstream_after_ms is not None:
         effective_deadline_ms = max(0, base_deadline_ms - downstream_after_ms)
@@ -854,10 +857,12 @@ def _evaluate_date_projection_sla(
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
 
-    # Calculate buffer: slack time between baseline finish and SLA deadline
+    # Calculate buffer using base deadline (not adjusted) for JobGroup SLAs
+    # This shows the actual slack time for each SIC relative to the JG SLA
+    buffer_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
     buffer_ms = (
-        effective_deadline_ms - baseline_finish_ms
-        if effective_deadline_ms is not None and baseline_finish_ms is not None
+        buffer_deadline - baseline_finish_ms
+        if buffer_deadline is not None and baseline_finish_ms is not None
         else None
     )
 
@@ -877,11 +882,11 @@ def _evaluate_date_projection_sla(
 
     projected_breach = bool(duration_breach or absolute_breach)
 
-    # Calculate real SLA impact = the actual breach amount after considering delay
-    # For ABSOLUTE SLA: how much the projected finish exceeds the deadline
-    # For RELATIVE SLA: how much the duration exceeds the threshold
-    if sla_type_upper == "ABSOLUTE" and effective_deadline_ms is not None and projected_finish_ms is not None:
-        real_sla_impact_ms = max(0, projected_finish_ms - effective_deadline_ms)
+    # Calculate real SLA impact = breach amount relative to base deadline for reporting
+    # For JobGroup SLAs: show how late each SIC finishes relative to the JG SLA (not adjusted)
+    impact_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
+    if sla_type_upper == "ABSOLUTE" and impact_deadline is not None and projected_finish_ms is not None:
+        real_sla_impact_ms = max(0, projected_finish_ms - impact_deadline)
     elif sla_type_upper == "RELATIVE" and has_duration_threshold and duration_ms is not None:
         real_sla_impact_ms = max(0, duration_ms - threshold_ms)
     else:
