@@ -940,22 +940,11 @@ def _consolidate_sic_impacts(
 ) -> list[dict[str, Any]]:
     def _compact_sla_row(row: dict[str, Any]) -> dict[str, Any]:
         return {
-            "owner_type": row.get("owner_type"),
-            "owner_id": row.get("owner_id"),
-            "owner_name": row.get("owner_name"),
             "sla_id": row.get("sla_id"),
             "sla_name": row.get("sla_name"),
             "sla_type": row.get("sla_type"),
             "sla_duration_ms": row.get("sla_duration_ms"),
             "sla_time": row.get("sla_time"),
-            "duration_source": row.get("duration_source"),
-            "effective_duration_ms": row.get("effective_duration_ms"),
-            "propagated_delay_ms": row.get("propagated_delay_ms"),
-            "baseline_finish_ms": row.get("baseline_finish_ms"),
-            "projected_finish_ms": row.get("projected_finish_ms"),
-            "base_deadline_ms": row.get("base_deadline_ms"),
-            "effective_deadline_ms": row.get("effective_deadline_ms"),
-            "downstream_after_ms": row.get("downstream_after_ms"),
             "buffer_ms": row.get("buffer_ms"),
             "projected_breach": row.get("projected_breach"),
             "breach_by_ms": row.get("breach_by_ms"),
@@ -972,39 +961,53 @@ def _consolidate_sic_impacts(
     consolidated: list[dict[str, Any]] = []
     for sic_eid, sic_row in impacted_by_sic.items():
         sic_sla_rows = sla_by_sic.get(sic_eid, [])
-        primary_sla = max(
-            sic_sla_rows,
-            key=lambda r: (
-                int(r.get("breach_by_ms") or 0),
-                1 if r.get("projected_breach") else 0,
-                1 if r.get("at_risk") else 0,
-                1 if r.get("sla_id") else 0,
-            ),
-            default={},
+        
+        # Select primary SLA (worst impact) if any SLAs exist
+        if sic_sla_rows:
+            primary_sla = max(
+                sic_sla_rows,
+                key=lambda r: (
+                    int(r.get("breach_by_ms") or 0),
+                    1 if r.get("projected_breach") else 0,
+                    1 if r.get("at_risk") else 0,
+                    1 if r.get("sla_id") else 0,
+                ),
+            )
+        else:
+            primary_sla = None
+        
+        # Compute aggregate values
+        at_risk_val = any(bool(r.get("at_risk")) for r in sic_sla_rows) if sic_sla_rows else False
+        real_sla_impact_ms_val = max(
+            (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
+            default=0,
         )
+        
+        # Get base fields
+        base_fields = base_fields_by_sic.get(sic_eid, {})
+        
+        # Build minimal response with only requested fields
         consolidated.append({
-            **sic_row,
-            **base_fields_by_sic.get(sic_eid, {}),
-            "sla_defined_count": sum(1 for r in sic_sla_rows if r.get("sla_id")),
-            "projected_breach": any(bool(r.get("projected_breach")) for r in sic_sla_rows),
-            "at_risk": any(bool(r.get("at_risk")) for r in sic_sla_rows),
-            "real_sla_impact_ms": max(
-                (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
-                default=0,
-            ),
-            "owner_type": primary_sla.get("owner_type"),
-            "owner_id": primary_sla.get("owner_id"),
-            "owner_name": primary_sla.get("owner_name"),
-            "sla_id": primary_sla.get("sla_id"),
-            "sla_name": primary_sla.get("sla_name"),
-            "sla_type": primary_sla.get("sla_type"),
-            "sla_duration_ms": primary_sla.get("sla_duration_ms"),
-            "sla_time": primary_sla.get("sla_time"),
-            "base_deadline_ms": primary_sla.get("base_deadline_ms"),
-            "effective_deadline_ms": primary_sla.get("effective_deadline_ms"),
-            "buffer_ms": primary_sla.get("buffer_ms"),
-            "breach_by_ms": primary_sla.get("breach_by_ms"),
-            "risk_reason": primary_sla.get("risk_reason"),
+            "sic_eid": sic_row.get("sic_eid"),
+            "sic_id": sic_row.get("sic_id"),
+            "sic_name": sic_row.get("sic_name"),
+            "jg_eid": sic_row.get("jg_eid"),
+            "jg_id": sic_row.get("jg_id"),
+            "jg_name": sic_row.get("jg_name"),
+            "job_eid": sic_row.get("job_eid"),
+            "job_name": sic_row.get("job_name"),
+            "at_risk": at_risk_val,
+            "effective_duration_ms": base_fields.get("effective_duration_ms"),
+            "baseline_finish_ms": base_fields.get("baseline_finish_ms"),
+            "projected_finish_ms": base_fields.get("projected_finish_ms"),
+            "real_sla_impact_ms": real_sla_impact_ms_val,
+            "sla_id": primary_sla.get("sla_id") if primary_sla else None,
+            "sla_name": primary_sla.get("sla_name") if primary_sla else None,
+            "sla_type": primary_sla.get("sla_type") if primary_sla else None,
+            "sla_duration_ms": primary_sla.get("sla_duration_ms") if primary_sla else None,
+            "sla_time": primary_sla.get("sla_time") if primary_sla else None,
+            "buffer_ms": primary_sla.get("buffer_ms") if primary_sla else None,
+            "risk_reason": primary_sla.get("risk_reason") if primary_sla else None,
         })
     return consolidated
 
