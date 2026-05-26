@@ -828,77 +828,6 @@ def _evaluate_observed_sla(
     }
 
 
-def _evaluate_projected_sla(
-    sic_row: dict[str, Any],
-    sla_row: dict[str, Any],
-    delay_ms: int,
-) -> dict[str, Any]:
-    baseline_ms = sic_row.get("avg_duration_ms")
-    if baseline_ms is None:
-        baseline_ms = None
-
-    baseline_ms_int = int(baseline_ms) if baseline_ms is not None else None
-    projected_ms = (baseline_ms_int + delay_ms) if baseline_ms_int is not None else None
-    threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
-    has_duration_threshold = threshold_ms > 0
-    sla_type_upper = (sla_row.get("sla_type") or "").upper()
-
-    # RELATIVE: project duration against threshold
-    projected_breach = bool(
-        sla_type_upper == "RELATIVE"
-        and has_duration_threshold and projected_ms is not None and projected_ms > threshold_ms
-    )
-    headroom_ms = (
-        threshold_ms - baseline_ms_int
-        if has_duration_threshold and baseline_ms_int is not None
-        else None
-    )
-    breach_by_ms = (
-        projected_ms - threshold_ms
-        if projected_breach and projected_ms is not None
-        else 0
-    )
-
-    # ABSOLUTE: any delay puts the job at risk when it has a deadline
-    at_risk_due_to_absolute = bool(
-        sla_type_upper == "ABSOLUTE"
-        and bool(sla_row.get("sla_time"))
-        and delay_ms > 0
-    )
-    at_risk = bool(projected_breach or at_risk_due_to_absolute)
-
-    return {
-        "sic_eid": sic_row.get("sic_eid"),
-        "sic_id": sic_row.get("sic_id"),
-        "sic_name": sic_row.get("sic_name"),
-        "job_id": sic_row.get("job_id"),
-        "job_name": sic_row.get("job_name"),
-        "job_group_id": sic_row.get("jg_id"),
-        "job_group_name": sic_row.get("jg_name"),
-        "owner_type": sla_row.get("owner_type"),
-        "owner_id": sla_row.get("owner_id"),
-        "owner_name": sla_row.get("owner_name"),
-        "sla_id": sla_row.get("sla_id"),
-        "sla_name": sla_row.get("sla_name"),
-        "sla_type": sla_row.get("sla_type"),
-        "sla_duration_ms": threshold_ms if has_duration_threshold else None,
-        "sla_time": sla_row.get("sla_time"),
-        "baseline_duration_ms": baseline_ms_int,
-        "projected_duration_ms": projected_ms,
-        "injected_delay_ms": delay_ms,
-        "headroom_ms": headroom_ms,
-        "projected_breach": projected_breach,
-        "breach_by_ms": breach_by_ms,
-        "at_risk": at_risk,
-        "risk_reason": (
-            "duration_threshold_breach" if projected_breach
-            else "absolute_time_at_risk_with_delay" if at_risk_due_to_absolute
-            else "within_duration_threshold" if has_duration_threshold
-            else "no_computable_threshold"
-        ),
-    }
-
-
 def _evaluate_date_projection_sla(
     *,
     sic_row: dict[str, Any],
@@ -995,6 +924,36 @@ def _evaluate_date_projection_sla(
         "at_risk": projected_breach,
         "risk_reason": risk_reason,
     }
+
+
+def _consolidate_sic_impacts(
+    *,
+    impacted_by_sic: dict[str, dict[str, Any]],
+    base_fields_by_sic: dict[str, dict[str, Any]],
+    sla_impacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sla_by_sic: dict[str, list[dict[str, Any]]] = {}
+    for row in sla_impacts:
+        sic_eid = row.get("sic_eid")
+        if sic_eid:
+            sla_by_sic.setdefault(sic_eid, []).append(row)
+
+    consolidated: list[dict[str, Any]] = []
+    for sic_eid, sic_row in impacted_by_sic.items():
+        sic_sla_rows = sla_by_sic.get(sic_eid, [])
+        consolidated.append({
+            **sic_row,
+            **base_fields_by_sic.get(sic_eid, {}),
+            "sla_impacts": sic_sla_rows,
+            "sla_defined_count": sum(1 for r in sic_sla_rows if r.get("sla_id")),
+            "projected_breach": any(bool(r.get("projected_breach")) for r in sic_sla_rows),
+            "at_risk": any(bool(r.get("at_risk")) for r in sic_sla_rows),
+            "real_sla_impact_ms": max(
+                (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
+                default=0,
+            ),
+        })
+    return consolidated
 
 
 async def _run_execution_status(
@@ -1262,7 +1221,6 @@ async def _run_projected_impact(
                     "projected_breach_count": 0,
                     "at_risk_count": 0,
                     "impacted_sics": [],
-                    "sla_impacts": [],
                 }
 
             impacted_rows = await (
@@ -1306,7 +1264,6 @@ async def _run_projected_impact(
                     "projected_breach_count": 0,
                     "at_risk_count": 0,
                     "impacted_sics": [],
-                    "sla_impacts": [],
                 }
 
             precedes_rows = await (
@@ -1401,18 +1358,24 @@ async def _run_projected_impact(
 
         projected_breach_count = sum(1 for row in sla_impacts if row.get("projected_breach"))
         at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
+        sla_evaluated_count = sum(1 for row in sla_impacts if row.get("sla_id"))
 
-        impacted_sics_enriched = []
-        for sic_eid, sic_row in impacted_by_sic.items():
-            impacted_sics_enriched.append({
-                **sic_row,
+        base_fields_by_sic = {
+            sic_eid: {
                 "duration_source": duration_source.get(sic_eid, "missing"),
                 "effective_duration_ms": duration_ms.get(sic_eid),
                 "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
                 "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
                 "projected_finish_ms": projected_finish_ms.get(sic_eid),
                 "downstream_after_ms": downstream_after_ms.get(sic_eid),
-            })
+            }
+            for sic_eid in impacted_by_sic
+        }
+        impacted_sics_enriched = _consolidate_sic_impacts(
+            impacted_by_sic=impacted_by_sic,
+            base_fields_by_sic=base_fields_by_sic,
+            sla_impacts=sla_impacts,
+        )
 
         return {
             "mode": resolved_mode,
@@ -1425,12 +1388,11 @@ async def _run_projected_impact(
             "historical_window_days": days,
             "eligible_graph_sic_count": len(eligible_eids),
             "root_sic_count": len(root_sic_eids),
-            "impacted_sic_count": len(impacted_rows),
-            "sla_evaluated_count": len(sla_impacts),
+            "impacted_sic_count": len(impacted_by_sic),
+            "sla_evaluated_count": sla_evaluated_count,
             "projected_breach_count": projected_breach_count,
             "at_risk_count": at_risk_count,
             "impacted_sics": impacted_sics_enriched,
-            "sla_impacts": sla_impacts,
         }
 
     async with kg_session(driver) as session:
@@ -1461,7 +1423,6 @@ async def _run_projected_impact(
                 "projected_breach_count": 0,
                 "at_risk_count": 0,
                 "impacted_sics": [],
-                "sla_impacts": [],
             }
 
         impacted_query = _Q_IMPACTED_SICS_IN_SCOPE if eligible_eids else _Q_IMPACTED_SICS
@@ -1489,18 +1450,99 @@ async def _run_projected_impact(
         impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
 
         sla_rows: list[dict[str, Any]] = []
+        precedes_rows: list[dict[str, Any]] = []
+        avg_rows: list[dict[str, Any]] = []
         if impacted_sic_eids:
             sla_rows = await (await session.run(_Q_SLA_ROWS_FOR_SICS, sic_eids=impacted_sic_eids)).data()
+            precedes_rows = await (
+                await session.run(_Q_PRECEDES_BETWEEN_CONTEXTS, sic_eids=impacted_sic_eids)
+            ).data()
+            avg_rows = await (
+                await session.run(
+                    _Q_AVG_DURATION_FOR_SICS,
+                    sic_eids=impacted_sic_eids,
+                    start_date=start_date,
+                )
+            ).data()
 
     impacted_by_sic = {row["sic_eid"]: row for row in impacted_rows if row.get("sic_eid")}
-    sla_impacts = [
-        _evaluate_projected_sla(impacted_by_sic[sla_row["sic_eid"]], sla_row, delay_ms)
-        for sla_row in sla_rows
-        if sla_row.get("sic_eid") in impacted_by_sic
+    edges = [
+        (row["start_sic_eid"], row["end_sic_eid"])
+        for row in precedes_rows
+        if row.get("start_sic_eid") and row.get("end_sic_eid")
     ]
+    node_set = set(impacted_by_sic)
+
+    avg_by_sic: dict[str, int | None] = {}
+    for row in avg_rows:
+        sic_eid = row.get("sic_eid")
+        if not sic_eid:
+            continue
+        avg_val = row.get("avg_duration_ms")
+        avg_by_sic[sic_eid] = int(avg_val) if avg_val is not None else None
+
+    duration_ms: dict[str, int | None] = {}
+    duration_source: dict[str, str] = {}
+    for sic_eid in node_set:
+        impacted_avg = impacted_by_sic[sic_eid].get("avg_duration_ms")
+        if avg_by_sic.get(sic_eid) is not None:
+            duration_ms[sic_eid] = avg_by_sic[sic_eid]
+            duration_source[sic_eid] = "average"
+        elif impacted_avg is not None:
+            duration_ms[sic_eid] = int(impacted_avg)
+            duration_source[sic_eid] = "average"
+        else:
+            duration_ms[sic_eid] = None
+            duration_source[sic_eid] = "missing"
+
+    downstream_after_ms = _compute_downstream_after_ms(node_set, edges, duration_ms)
+    propagated_delay_ms, baseline_finish_ms, projected_finish_ms = _build_delay_and_finish_projection(
+        node_set,
+        edges,
+        set(root_sic_eids),
+        delay_ms,
+        duration_ms,
+        {},
+        0,
+    )
+
+    sla_impacts = []
+    for sla_row in sla_rows:
+        sic_eid = sla_row.get("sic_eid")
+        if not sic_eid or sic_eid not in impacted_by_sic:
+            continue
+        sic_row = impacted_by_sic[sic_eid]
+        sla_impacts.append(_evaluate_date_projection_sla(
+            sic_row=sic_row,
+            sla_row=sla_row,
+            duration_ms=duration_ms.get(sic_eid),
+            duration_source=duration_source.get(sic_eid, "missing"),
+            propagated_delay_ms=propagated_delay_ms.get(sic_eid, 0),
+            baseline_finish_ms=baseline_finish_ms.get(sic_eid),
+            projected_finish_ms=projected_finish_ms.get(sic_eid),
+            downstream_after_ms=downstream_after_ms.get(sic_eid),
+        ))
 
     projected_breach_count = sum(1 for row in sla_impacts if row.get("projected_breach"))
     at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
+    sla_evaluated_count = sum(1 for row in sla_impacts if row.get("sla_id"))
+
+    base_fields_by_sic = {
+        sic_eid: {
+            "duration_source": duration_source.get(sic_eid, "missing"),
+            "effective_duration_ms": duration_ms.get(sic_eid),
+            "propagated_delay_ms": propagated_delay_ms.get(sic_eid, 0),
+            "baseline_finish_ms": baseline_finish_ms.get(sic_eid),
+            "projected_finish_ms": projected_finish_ms.get(sic_eid),
+            "downstream_after_ms": downstream_after_ms.get(sic_eid),
+        }
+        for sic_eid in impacted_by_sic
+    }
+    impacted_sics_enriched = _consolidate_sic_impacts(
+        impacted_by_sic=impacted_by_sic,
+        base_fields_by_sic=base_fields_by_sic,
+        sla_impacts=sla_impacts,
+    )
 
     return {
         "mode": resolved_mode,
@@ -1513,12 +1555,11 @@ async def _run_projected_impact(
         "historical_window_days": days,
         "eligible_graph_sic_count": len(eligible_eids) if eligible_eids else None,
         "root_sic_count": len(root_sic_eids),
-        "impacted_sic_count": len(impacted_rows),
-        "sla_evaluated_count": len(sla_impacts),
+        "impacted_sic_count": len(impacted_by_sic),
+        "sla_evaluated_count": sla_evaluated_count,
         "projected_breach_count": projected_breach_count,
         "at_risk_count": at_risk_count,
-        "impacted_sics": impacted_rows,
-        "sla_impacts": sla_impacts,
+        "impacted_sics": impacted_sics_enriched,
     }
 
 
