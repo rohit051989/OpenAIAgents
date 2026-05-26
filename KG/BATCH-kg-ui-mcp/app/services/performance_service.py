@@ -972,10 +972,19 @@ def _consolidate_sic_impacts(
     consolidated: list[dict[str, Any]] = []
     for sic_eid, sic_row in impacted_by_sic.items():
         sic_sla_rows = sla_by_sic.get(sic_eid, [])
+        primary_sla = max(
+            sic_sla_rows,
+            key=lambda r: (
+                int(r.get("breach_by_ms") or 0),
+                1 if r.get("projected_breach") else 0,
+                1 if r.get("at_risk") else 0,
+                1 if r.get("sla_id") else 0,
+            ),
+            default={},
+        )
         consolidated.append({
             **sic_row,
             **base_fields_by_sic.get(sic_eid, {}),
-            "sla_impacts": sic_sla_rows,
             "sla_defined_count": sum(1 for r in sic_sla_rows if r.get("sla_id")),
             "projected_breach": any(bool(r.get("projected_breach")) for r in sic_sla_rows),
             "at_risk": any(bool(r.get("at_risk")) for r in sic_sla_rows),
@@ -983,6 +992,19 @@ def _consolidate_sic_impacts(
                 (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
                 default=0,
             ),
+            "owner_type": primary_sla.get("owner_type"),
+            "owner_id": primary_sla.get("owner_id"),
+            "owner_name": primary_sla.get("owner_name"),
+            "sla_id": primary_sla.get("sla_id"),
+            "sla_name": primary_sla.get("sla_name"),
+            "sla_type": primary_sla.get("sla_type"),
+            "sla_duration_ms": primary_sla.get("sla_duration_ms"),
+            "sla_time": primary_sla.get("sla_time"),
+            "base_deadline_ms": primary_sla.get("base_deadline_ms"),
+            "effective_deadline_ms": primary_sla.get("effective_deadline_ms"),
+            "buffer_ms": primary_sla.get("buffer_ms"),
+            "breach_by_ms": primary_sla.get("breach_by_ms"),
+            "risk_reason": primary_sla.get("risk_reason"),
         })
     return consolidated
 
