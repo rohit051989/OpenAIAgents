@@ -958,6 +958,9 @@ def _consolidate_sic_impacts(
         if sic_eid:
             sla_by_sic.setdefault(sic_eid, []).append(_compact_sla_row(row))
 
+    # Debug: log SICs with SLA data
+    logger.debug(f"SLA data found for {len(sla_by_sic)} SICs out of {len(impacted_by_sic)} total impacted SICs")
+    
     consolidated: list[dict[str, Any]] = []
     for sic_eid, sic_row in impacted_by_sic.items():
         sic_sla_rows = sla_by_sic.get(sic_eid, [])
@@ -975,10 +978,11 @@ def _consolidate_sic_impacts(
             )
         else:
             primary_sla = None
+            logger.debug(f"No SLA data for SIC {sic_row.get('sic_id')} ({sic_eid})")
         
         # Compute aggregate values
         at_risk_val = any(bool(r.get("at_risk")) for r in sic_sla_rows) if sic_sla_rows else False
-        real_sla_impact_ms_val = max(
+        real_sla_impact_val = max(
             (int(r.get("breach_by_ms") or 0) for r in sic_sla_rows),
             default=0,
         )
@@ -1000,7 +1004,7 @@ def _consolidate_sic_impacts(
             "effective_duration_ms": base_fields.get("effective_duration_ms"),
             "baseline_finish_ms": base_fields.get("baseline_finish_ms"),
             "projected_finish_ms": base_fields.get("projected_finish_ms"),
-            "real_sla_impact_ms": real_sla_impact_ms_val,
+            "real_sla_impact": real_sla_impact_val,
             "sla_id": primary_sla.get("sla_id") if primary_sla else None,
             "sla_name": primary_sla.get("sla_name") if primary_sla else None,
             "sla_type": primary_sla.get("sla_type") if primary_sla else None,
@@ -1297,10 +1301,12 @@ async def _run_projected_impact(
                 )
             ).data()
             _existing_eids = {row["sic_eid"] for row in impacted_rows if row.get("sic_eid")}
+            jg_cascade_count = sum(1 for row in jg_cascade_rows if row.get("sic_eid") and row["sic_eid"] not in _existing_eids)
             impacted_rows.extend(
                 row for row in jg_cascade_rows
                 if row.get("sic_eid") and row["sic_eid"] not in _existing_eids
             )
+            logger.debug(f"date_projection: Added {jg_cascade_count} dependent JobGroup SICs via cascade (total impacted: {len(impacted_rows)})")
 
             impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
 
@@ -1395,10 +1401,13 @@ async def _run_projected_impact(
             anchor_ms,
         )
 
+        logger.debug(f"date_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
         sla_impacts = []
+        skipped_slas = 0
         for sla_row in sla_rows:
             sic_eid = sla_row.get("sic_eid")
             if not sic_eid or sic_eid not in impacted_by_sic:
+                skipped_slas += 1
                 continue
             sic_row = impacted_by_sic[sic_eid]
             sla_impacts.append(_evaluate_date_projection_sla(
@@ -1411,6 +1420,7 @@ async def _run_projected_impact(
                 projected_finish_ms=projected_finish_ms.get(sic_eid),
                 downstream_after_ms=downstream_after_ms.get(sic_eid),
             ))
+        logger.debug(f"date_projection: Created {len(sla_impacts)} SLA impact evaluations (skipped {skipped_slas} SLA rows)")
 
         projected_breach_count = sum(1 for row in sla_impacts if row.get("projected_breach"))
         at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
@@ -1499,10 +1509,12 @@ async def _run_projected_impact(
             jg_cascade_params["scope_sic_eids"] = list(eligible_eids)
         jg_cascade_rows = await (await session.run(jg_cascade_query, **jg_cascade_params)).data()
         _existing_eids = {row["sic_eid"] for row in impacted_rows if row.get("sic_eid")}
+        jg_cascade_count = sum(1 for row in jg_cascade_rows if row.get("sic_eid") and row["sic_eid"] not in _existing_eids)
         impacted_rows.extend(
             row for row in jg_cascade_rows
             if row.get("sic_eid") and row["sic_eid"] not in _existing_eids
         )
+        logger.debug(f"hypothetical_projection: Added {jg_cascade_count} dependent JobGroup SICs via cascade (total impacted: {len(impacted_rows)})")
         impacted_sic_eids = [row["sic_eid"] for row in impacted_rows if row.get("sic_eid")]
 
         sla_rows: list[dict[str, Any]] = []
@@ -1562,10 +1574,13 @@ async def _run_projected_impact(
         0,
     )
 
+    logger.debug(f"hypothetical_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
     sla_impacts = []
+    skipped_slas = 0
     for sla_row in sla_rows:
         sic_eid = sla_row.get("sic_eid")
         if not sic_eid or sic_eid not in impacted_by_sic:
+            skipped_slas += 1
             continue
         sic_row = impacted_by_sic[sic_eid]
         sla_impacts.append(_evaluate_date_projection_sla(
@@ -1578,6 +1593,7 @@ async def _run_projected_impact(
             projected_finish_ms=projected_finish_ms.get(sic_eid),
             downstream_after_ms=downstream_after_ms.get(sic_eid),
         ))
+    logger.debug(f"hypothetical_projection: Created {len(sla_impacts)} SLA impact evaluations (skipped {skipped_slas} SLA rows)")
 
     projected_breach_count = sum(1 for row in sla_impacts if row.get("projected_breach"))
     at_risk_count = sum(1 for row in sla_impacts if row.get("at_risk"))
