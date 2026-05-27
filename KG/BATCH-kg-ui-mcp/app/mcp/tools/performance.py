@@ -6,6 +6,7 @@ Registers the following MCP tools:
   - compare_jobs
   - get_sla_execution_breach
   - predict_sla_impact
+  - get_job_execution_analysis
 """
 
 import logging
@@ -164,4 +165,74 @@ async def tool_predict_sla_impact(
         days=days,
         business_date=business_date,
         region=region,
+    )
+
+
+@mcp.tool(name="get_job_execution_analysis")
+async def tool_get_job_execution_analysis(
+    business_date: str,
+    region: str = "ALL",
+    job_group: str | None = None,
+) -> dict:
+    """Get comprehensive job execution analysis for a date (past or current).
+
+    Combines job execution hierarchy, execution times, SLA breach status, and 
+    duration anomaly detection in a single unified view. Perfect for analyzing
+    what happened on a specific day.
+
+    Args:
+        business_date: ISO date (YYYY-MM-DD) - must be past or current, not future.
+        region: Region for calendar eligibility evaluation (default ALL).
+        job_group: Optional JobGroup ``id``, ``name``, or element ID filter.
+
+    Returns:
+        Enriched job execution graph with nodes containing:
+        
+        **Graph Structure:**
+        - ``nodes``: ScheduleInstanceContext nodes with all enrichment data
+        - ``relationships``: PRECEDES edges showing job dependencies
+        
+        **Execution Metrics (per node):**
+        - ``execution_time_ms``: actual execution duration in milliseconds
+        - ``execution_status``: COMPLETED, FAILED, etc.
+        - ``execution_delay_ms``: delay compared to expected duration (actual - avg - std)
+          Positive = ran longer than expected, Negative = finished earlier
+        
+        **SLA Breach Data (per node):**
+        - ``sla_breach``: true if SLA was breached
+        - ``sla_delay_ms``: how many milliseconds over SLA (if breached)
+        - ``sla_id``, ``sla_name``, ``sla_type``: SLA definition details
+        - ``meets_sla``: true if job completed within SLA
+        
+        **Anomaly Detection (per node):**
+        - ``is_duration_anomaly``: true if execution time > avg + 2*std_dev
+        - ``anomaly_deviation_factor``: ratio of actual duration to historical avg
+        - ``hist_avg_ms``: historical average duration (30-day window)
+        - ``hist_std_ms``: historical standard deviation
+        - ``hist_sample_count``: number of historical executions used
+        
+        **Summary Statistics:**
+        - ``total_sics``: total number of scheduled jobs
+        - ``executed_count``: how many actually ran
+        - ``breach_count``: how many breached SLA
+        - ``anomaly_count``: how many had anomalous duration
+        - ``meets_sla_count``: how many completed within SLA
+
+    Use this tool to answer questions like:
+    - "Show me the job execution flow for yesterday with delays and anomalies"
+    - "Which jobs breached SLA on May 25th and by how much?"
+    - "What was the execution hierarchy on Monday with duration outliers highlighted?"
+    """
+    logger.info(
+        "MCP tool get_job_execution_analysis business_date=%s region=%s job_group=%s",
+        business_date,
+        region,
+        job_group,
+    )
+    driver = await get_driver()
+    return await performance_service.get_job_execution_analysis(
+        driver,
+        business_date=business_date,
+        region=region,
+        job_group=job_group,
     )

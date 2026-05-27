@@ -15,6 +15,7 @@ from neo4j import AsyncDriver
 
 from app.core.database import kg_session
 from app.services.anomalies_service import _build_sic_map, _evaluate_sic
+from app.services import graph_service
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -2024,3 +2025,129 @@ async def predict_sla_impact(
         business_date=business_date,
         region=region,
     )
+
+
+async def get_job_execution_analysis(
+    driver: AsyncDriver,
+    business_date: str,
+    region: str = "ALL",
+    job_group: str | None = None,
+) -> dict[str, Any]:
+    """Get comprehensive job execution analysis for a date (past or current).
+    
+    Combines:
+    - Job execution hierarchy/graph (nodes + relationships)
+    - Execution times and status
+    - SLA breach status and delay
+    - Duration anomaly detection (deviation from historical average)
+    
+    Args:
+        driver: Neo4j async driver
+        business_date: ISO date (YYYY-MM-DD) - past or current only
+        region: Region for calendar eligibility evaluation
+        job_group: Optional JobGroup filter
+    
+    Returns:
+        Enriched graph with nodes containing:
+        - Graph structure (nodes, relationships, hierarchy)
+        - execution_time_ms: actual execution duration
+        - sla_breach: true if SLA was breached
+        - sla_delay_ms: how much over SLA (if breached)
+        - is_duration_anomaly: true if duration > avg + 2*std
+        - anomaly_deviation_factor: ratio vs historical average
+        - hist_avg_ms, hist_std_ms: historical stats
+    """
+    logger.info(
+        "get_job_execution_analysis business_date=%s region=%s job_group=%s",
+        business_date,
+        region,
+        job_group,
+    )
+    
+    # Validate date is not in future
+    try:
+        business_day = _parse_iso_business_date(business_date)
+        if business_day > date.today():
+            raise ValueError("Job execution analysis is only available for past or current dates")
+    except ValueError as exc:
+        raise ValueError(f"Invalid business_date format: {exc}") from exc
+    
+    # Get the job graph structure for the date
+    graph_result = await graph_service.get_job_graph_for_date(
+        driver,
+        business_date=business_date,
+        region=region,
+        job_group=job_group,
+    )
+    
+    # Get SLA breach and anomaly data
+    sla_result = await get_sla_execution_breach(
+        driver,
+        business_date=business_date,
+        region=region,
+    )
+    
+    # Create a mapping of sic_eid to SLA/anomaly data
+    sla_by_sic: dict[str, dict[str, Any]] = {}
+    for sla_row in sla_result.get("sla_results", []):
+        sic_eid = sla_row.get("sic_eid")
+        if sic_eid:
+            sla_by_sic[sic_eid] = sla_row
+    
+    # Enrich nodes with SLA and anomaly data
+    enriched_nodes = []
+    for node in graph_result.get("nodes", []):
+        node_id = node.get("id")
+        sla_data = sla_by_sic.get(node_id, {})
+        
+        # Calculate execution delay: actual - avg - std
+        # Positive = job ran longer than expected (avg + std)
+        # Negative = job finished earlier than expected
+        execution_delay_ms = None
+        actual_ms = sla_data.get("actual_duration_ms")
+        avg_ms = sla_data.get("hist_avg_ms")
+        std_ms = sla_data.get("hist_std_ms")
+        if actual_ms is not None and avg_ms is not None and std_ms is not None:
+            execution_delay_ms = actual_ms - avg_ms - std_ms
+        
+        # Extract key execution and anomaly metrics
+        enriched_node = {
+            **node,
+            "execution_time_ms": actual_ms,
+            "execution_status": sla_data.get("execution_status"),
+            "execution_delay_ms": execution_delay_ms,
+            "sla_breach": sla_data.get("breached"),
+            "sla_delay_ms": sla_data.get("breach_by_ms", 0) if sla_data.get("breached") else 0,
+            "sla_id": sla_data.get("sla_id"),
+            "sla_name": sla_data.get("sla_name"),
+            "sla_type": sla_data.get("sla_type"),
+            "meets_sla": sla_data.get("meets_sla"),
+            "is_duration_anomaly": sla_data.get("is_duration_anomaly"),
+            "anomaly_deviation_factor": sla_data.get("anomaly_deviation_factor"),
+            "hist_avg_ms": avg_ms,
+            "hist_std_ms": std_ms,
+            "hist_sample_count": sla_data.get("hist_sample_count"),
+        }
+        enriched_nodes.append(enriched_node)
+    
+    # Compute summary statistics
+    breach_count = sum(1 for n in enriched_nodes if n.get("sla_breach"))
+    anomaly_count = sum(1 for n in enriched_nodes if n.get("is_duration_anomaly"))
+    executed_count = sum(1 for n in enriched_nodes if n.get("execution_time_ms") is not None)
+    
+    return {
+        "business_date": business_date,
+        "region": region,
+        "job_group": job_group,
+        "graph_mode": graph_result.get("graph_mode"),
+        "nodes": enriched_nodes,
+        "relationships": graph_result.get("relationships", []),
+        "summary": {
+            "total_sics": len(enriched_nodes),
+            "executed_count": executed_count,
+            "not_executed_count": len(enriched_nodes) - executed_count,
+            "breach_count": breach_count,
+            "anomaly_count": anomaly_count,
+            "meets_sla_count": sum(1 for n in enriched_nodes if n.get("meets_sla")),
+        },
+    }
