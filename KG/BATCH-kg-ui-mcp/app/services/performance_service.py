@@ -788,7 +788,21 @@ def _build_sla_based_projection(
         if jg_eid:
             jg_sics.setdefault(jg_eid, []).append(sic_eid)
 
+    # Get topological order
     order = _topological_order(nodes, edges)
+    
+    # Re-order to ensure JobGroups with root SICs are processed first
+    # This handles cross-JG dependencies where JG5 depends on JG1 but has no SIC-level edges
+    root_jgs = {jg_membership.get(r) for r in root_nodes if jg_membership.get(r)}
+    def sort_key(sic_eid: str) -> tuple[int, int]:
+        jg_eid = jg_membership.get(sic_eid)
+        # Root JG SICs come first (priority 0), others come after (priority 1)
+        priority = 0 if jg_eid in root_jgs else 1
+        # Within priority group, maintain topological order
+        return (priority, order.index(sic_eid))
+    
+    sorted_order = sorted(order, key=sort_key)
+    
     propagated_delay: dict[str, int] = {n: 0 for n in nodes}
     baseline_finish: dict[str, int | None] = {}
     projected_finish: dict[str, int | None] = {}
@@ -796,7 +810,7 @@ def _build_sla_based_projection(
     # Track max projected finish per JobGroup for cross-JG dependencies
     jg_max_projected: dict[str, int | None] = {}
 
-    for node in order:
+    for node in sorted_order:
         node_dur = duration_ms.get(node)
         sla_deadline = sla_deadline_ms.get(node)
         node_jg = jg_membership.get(node)
@@ -822,30 +836,26 @@ def _build_sla_based_projection(
         elif pred_projected:
             # Non-root with direct SIC-level parents: parent's projected + own duration
             projected_finish[node] = max(pred_projected) + node_dur
-        elif node_jg:
-            # No direct SIC parents - check if parent JobGroup has finished SICs
-            # This handles cross-JobGroup dependencies (e.g., JG1 -> JG5)
-            # Find all SICs in current JG and check if any are root or have predecessors outside JG
-            current_jg_sics = set(jg_sics.get(node_jg, []))
-            
-            # Find the latest projected finish from any SIC not in current JG
-            external_projected = [
-                projected_finish.get(sic)
-                for sic in nodes
-                if sic not in current_jg_sics and projected_finish.get(sic) is not None
+        elif node_jg and node_jg not in root_jgs:
+            # SIC in downstream JobGroup (not root JG) with no direct SIC predecessors
+            # Use max projected finish from other JobGroups (should be root JG)
+            other_jg_max = [
+                jg_max_projected.get(jg)
+                for jg in jg_max_projected
+                if jg != node_jg and jg_max_projected.get(jg) is not None
             ]
             
-            if external_projected:
-                # Start from the latest finish of any external (parent JG) SIC
-                projected_finish[node] = max(external_projected) + node_dur
+            if other_jg_max:
+                # Start from parent JobGroup's max finish
+                projected_finish[node] = max(other_jg_max) + node_dur
             elif sla_deadline is not None:
-                # No external dependencies, use SLA as start
+                # No parent JG data, use SLA as start
                 projected_finish[node] = sla_deadline + node_dur
             else:
                 # Last resort: just use duration
                 projected_finish[node] = node_dur
         elif sla_deadline is not None:
-            # No parents, no JG, but has SLA: use SLA as start
+            # Root JG SIC with no predecessors, or SIC with no JG but has SLA
             projected_finish[node] = sla_deadline + node_dur
         else:
             # No parents, no SLA: use duration only
