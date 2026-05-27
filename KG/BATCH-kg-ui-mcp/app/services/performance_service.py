@@ -755,6 +755,71 @@ def _build_delay_and_finish_projection(
     return propagated_delay, baseline_finish, projected_finish
 
 
+def _build_sla_based_projection(
+    nodes: set[str],
+    edges: list[tuple[str, str]],
+    root_nodes: set[str],
+    delay_ms: int,
+    duration_ms: dict[str, int | None],
+    sla_deadline_ms: dict[str, int | None],
+) -> tuple[dict[str, int], dict[str, int | None], dict[str, int | None]]:
+    """Build projected finish times starting from SLA deadlines.
+    
+    For SICs with JobGroup SLAs:
+    - baseline_finish = SLA deadline time (e.g., 01:30:00)
+    - For root SIC: projected_finish = SLA deadline + delay
+    - For non-root SIC: projected_finish = parent's projected + own duration
+    
+    Returns:
+        propagated_delay: delay at each node
+        baseline_finish: SLA deadline for each node (or None)
+        projected_finish: calculated projected finish time
+    """
+    preds: dict[str, list[str]] = {n: [] for n in nodes}
+    for src, dst in edges:
+        if src in nodes and dst in nodes:
+            preds[dst].append(src)
+
+    order = _topological_order(nodes, edges)
+    propagated_delay: dict[str, int] = {n: 0 for n in nodes}
+    baseline_finish: dict[str, int | None] = {}
+    projected_finish: dict[str, int | None] = {}
+
+    for node in order:
+        node_dur = duration_ms.get(node)
+        sla_deadline = sla_deadline_ms.get(node)
+        
+        # Baseline = SLA deadline (or None if no SLA)
+        baseline_finish[node] = sla_deadline
+        
+        # Calculate propagated delay
+        inherited_delay = max((propagated_delay.get(p, 0) for p in preds.get(node, [])), default=0)
+        own_delay = delay_ms if node in root_nodes else 0
+        propagated_delay[node] = max(own_delay, inherited_delay)
+
+        if node_dur is None:
+            projected_finish[node] = None
+            continue
+
+        # Calculate projected finish
+        pred_projected = [projected_finish.get(p) for p in preds.get(node, []) if projected_finish.get(p) is not None]
+        
+        if node in root_nodes and sla_deadline is not None:
+            # Root node with SLA: start from SLA deadline + delay
+            projected_finish[node] = sla_deadline + propagated_delay[node]
+        elif pred_projected:
+            # Non-root with parents: parent's projected + own duration
+            projected_finish[node] = max(pred_projected) + node_dur
+        elif sla_deadline is not None:
+            # No parents but has SLA: use SLA as start
+            projected_finish[node] = sla_deadline + node_dur
+        else:
+            # No parents, no SLA: use duration only
+            projected_finish[node] = node_dur
+
+    return propagated_delay, baseline_finish, projected_finish
+
+
 def _evaluate_observed_sla(
     sic_row: dict[str, Any],
     sla_row: dict[str, Any],
@@ -884,15 +949,9 @@ def _evaluate_date_projection_sla(
     else:
         base_deadline_ms = None  # RELATIVE uses durationMs only
     
-    # For JobGroup SLA: all SICs in the same JG use the base deadline as their baseline
-    # The baseline represents "when should this finish" = the SLA deadline
-    # For reporting, we show buffer and impact relative to this SLA deadline
-    if owner_type == "JOB_GROUP" and base_deadline_ms is not None:
-        # Override topology-calculated baseline with the actual SLA deadline
-        reporting_baseline_ms = base_deadline_ms
-    else:
-        # For SIC-level SLA or when no SLA time, use topology-calculated baseline
-        reporting_baseline_ms = baseline_finish_ms
+    # baseline_finish_ms is already set correctly by _build_sla_based_projection
+    # It's the SLA deadline for JobGroup SLAs
+    reporting_baseline_ms = baseline_finish_ms
     
     # Effective deadline (with downstream adjustment) used only for breach detection
     effective_deadline_ms = base_deadline_ms
@@ -902,9 +961,8 @@ def _evaluate_date_projection_sla(
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
 
-    # Calculate buffer using base deadline for JobGroup SLAs
-    # Buffer = SLA deadline - projected finish time (how much slack is left)
-    buffer_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
+    # Calculate buffer = SLA deadline - projected finish time
+    buffer_deadline = base_deadline_ms
     buffer_ms = (
         buffer_deadline - projected_finish_ms
         if buffer_deadline is not None and projected_finish_ms is not None
@@ -928,8 +986,7 @@ def _evaluate_date_projection_sla(
     projected_breach = bool(duration_breach or absolute_breach)
 
     # Calculate real SLA impact = breach amount relative to base deadline
-    # For JobGroup SLAs: how late each SIC finishes relative to the JG SLA
-    impact_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
+    impact_deadline = base_deadline_ms
     if sla_type_upper == "ABSOLUTE" and impact_deadline is not None and projected_finish_ms is not None:
         real_sla_impact_ms = max(0, projected_finish_ms - impact_deadline)
     elif sla_type_upper == "RELATIVE" and has_duration_threshold and duration_ms is not None:
@@ -969,7 +1026,7 @@ def _evaluate_date_projection_sla(
         "duration_source": duration_source,
         "effective_duration_ms": duration_ms,
         "propagated_delay_ms": propagated_delay_ms,
-        "baseline_finish_ms": reporting_baseline_ms,  # Use SLA deadline as baseline for reporting
+        "baseline_finish_ms": reporting_baseline_ms,
         "projected_finish_ms": projected_finish_ms,
         "base_deadline_ms": base_deadline_ms,
         "effective_deadline_ms": effective_deadline_ms,
@@ -1447,15 +1504,35 @@ async def _run_projected_impact(
                 duration_ms[sic_eid] = None
                 duration_source[sic_eid] = "missing"
 
+        # Build SLA deadline mapping for SLA-based projection
+        sla_deadline_ms: dict[str, int | None] = {}
+        jg_sla_map: dict[str, int | None] = {}  # jg_eid -> SLA deadline
+        for sla_row in sla_rows:
+            sic_eid = sla_row.get("sic_eid")
+            owner_type = (sla_row.get("owner_type") or "").upper()
+            sla_type = (sla_row.get("sla_type") or "").upper()
+            if sla_type == "ABSOLUTE":
+                deadline = _clock_to_ms(sla_row.get("sla_time"))
+                if owner_type == "JOB_GROUP" and sic_eid and sic_eid in impacted_by_sic:
+                    jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
+                    if jg_eid and jg_eid not in jg_sla_map:
+                        jg_sla_map[jg_eid] = deadline
+        
+        # Apply JG SLA deadlines to all SICs in same JobGroup
+        for sic_eid in node_set:
+            jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
+            sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
+
         downstream_after_ms = _compute_downstream_after_ms(node_set, edges, duration_ms)
-        propagated_delay_ms, baseline_finish_ms, projected_finish_ms = _build_delay_and_finish_projection(
+        
+        # Use SLA-based projection for hypothetical scenarios
+        propagated_delay_ms, baseline_finish_ms, projected_finish_ms = _build_sla_based_projection(
             node_set,
             edges,
             set(root_sic_eids),
             delay_ms,
             duration_ms,
-            executed_finish_ms,
-            anchor_ms,
+            sla_deadline_ms,
         )
 
         logger.debug(f"date_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
@@ -1621,15 +1698,35 @@ async def _run_projected_impact(
             duration_ms[sic_eid] = None
             duration_source[sic_eid] = "missing"
 
+    # Build SLA deadline mapping for SLA-based projection
+    sla_deadline_ms: dict[str, int | None] = {}
+    jg_sla_map: dict[str, int | None] = {}  # jg_eid -> SLA deadline
+    for sla_row in sla_rows:
+        sic_eid = sla_row.get("sic_eid")
+        owner_type = (sla_row.get("owner_type") or "").upper()
+        sla_type = (sla_row.get("sla_type") or "").upper()
+        if sla_type == "ABSOLUTE":
+            deadline = _clock_to_ms(sla_row.get("sla_time"))
+            if owner_type == "JOB_GROUP" and sic_eid and sic_eid in impacted_by_sic:
+                jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
+                if jg_eid and jg_eid not in jg_sla_map:
+                    jg_sla_map[jg_eid] = deadline
+    
+    # Apply JG SLA deadlines to all SICs in same JobGroup
+    for sic_eid in node_set:
+        jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
+        sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
+
     downstream_after_ms = _compute_downstream_after_ms(node_set, edges, duration_ms)
-    propagated_delay_ms, baseline_finish_ms, projected_finish_ms = _build_delay_and_finish_projection(
+    
+    # Use SLA-based projection for hypothetical scenarios
+    propagated_delay_ms, baseline_finish_ms, projected_finish_ms = _build_sla_based_projection(
         node_set,
         edges,
         set(root_sic_eids),
         delay_ms,
         duration_ms,
-        {},
-        0,
+        sla_deadline_ms,
     )
 
     logger.debug(f"hypothetical_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
