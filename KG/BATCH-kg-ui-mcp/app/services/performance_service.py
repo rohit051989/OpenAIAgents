@@ -762,13 +762,15 @@ def _build_sla_based_projection(
     delay_ms: int,
     duration_ms: dict[str, int | None],
     sla_deadline_ms: dict[str, int | None],
+    jg_membership: dict[str, str],  # sic_eid -> jg_eid
 ) -> tuple[dict[str, int], dict[str, int | None], dict[str, int | None]]:
     """Build projected finish times starting from SLA deadlines.
     
     For SICs with JobGroup SLAs:
     - baseline_finish = SLA deadline time (e.g., 01:30:00)
     - For root SIC: projected_finish = SLA deadline + delay
-    - For non-root SIC: projected_finish = parent's projected + own duration
+    - For non-root SIC in same JG: projected_finish = parent's projected + own duration
+    - For SIC in downstream JG: projected_finish = parent JG's max projected + own duration
     
     Returns:
         propagated_delay: delay at each node
@@ -780,14 +782,24 @@ def _build_sla_based_projection(
         if src in nodes and dst in nodes:
             preds[dst].append(src)
 
+    # Group SICs by JobGroup
+    jg_sics: dict[str, list[str]] = {}
+    for sic_eid, jg_eid in jg_membership.items():
+        if jg_eid:
+            jg_sics.setdefault(jg_eid, []).append(sic_eid)
+
     order = _topological_order(nodes, edges)
     propagated_delay: dict[str, int] = {n: 0 for n in nodes}
     baseline_finish: dict[str, int | None] = {}
     projected_finish: dict[str, int | None] = {}
+    
+    # Track max projected finish per JobGroup for cross-JG dependencies
+    jg_max_projected: dict[str, int | None] = {}
 
     for node in order:
         node_dur = duration_ms.get(node)
         sla_deadline = sla_deadline_ms.get(node)
+        node_jg = jg_membership.get(node)
         
         # Baseline = SLA deadline (or None if no SLA)
         baseline_finish[node] = sla_deadline
@@ -808,14 +820,42 @@ def _build_sla_based_projection(
             # Root node with SLA: start from SLA deadline + delay
             projected_finish[node] = sla_deadline + propagated_delay[node]
         elif pred_projected:
-            # Non-root with parents: parent's projected + own duration
+            # Non-root with direct SIC-level parents: parent's projected + own duration
             projected_finish[node] = max(pred_projected) + node_dur
+        elif node_jg:
+            # No direct SIC parents - check if parent JobGroup has finished SICs
+            # This handles cross-JobGroup dependencies (e.g., JG1 -> JG5)
+            # Find all SICs in current JG and check if any are root or have predecessors outside JG
+            current_jg_sics = set(jg_sics.get(node_jg, []))
+            
+            # Find the latest projected finish from any SIC not in current JG
+            external_projected = [
+                projected_finish.get(sic)
+                for sic in nodes
+                if sic not in current_jg_sics and projected_finish.get(sic) is not None
+            ]
+            
+            if external_projected:
+                # Start from the latest finish of any external (parent JG) SIC
+                projected_finish[node] = max(external_projected) + node_dur
+            elif sla_deadline is not None:
+                # No external dependencies, use SLA as start
+                projected_finish[node] = sla_deadline + node_dur
+            else:
+                # Last resort: just use duration
+                projected_finish[node] = node_dur
         elif sla_deadline is not None:
-            # No parents but has SLA: use SLA as start
+            # No parents, no JG, but has SLA: use SLA as start
             projected_finish[node] = sla_deadline + node_dur
         else:
             # No parents, no SLA: use duration only
             projected_finish[node] = node_dur
+        
+        # Update JG max projected
+        if node_jg and projected_finish[node] is not None:
+            current_max = jg_max_projected.get(node_jg)
+            if current_max is None or projected_finish[node] > current_max:
+                jg_max_projected[node_jg] = projected_finish[node]
 
     return propagated_delay, baseline_finish, projected_finish
 
@@ -1123,7 +1163,7 @@ def _consolidate_sic_impacts(
             "sla_type": primary_sla.get("sla_type") if primary_sla else None,
             "sla_duration_sec": _to_sec(primary_sla.get("sla_duration_ms")) if primary_sla else None,
             "sla_time": primary_sla.get("sla_time") if primary_sla else None,
-            "buffer_sec": _to_sec(primary_sla.get("buffer_ms")) if primary_sla else None,
+            "buffer_sec": max(0, _to_sec(primary_sla.get("buffer_ms"))) if primary_sla and primary_sla.get("buffer_ms") is not None else None,
             "risk_reason": primary_sla.get("risk_reason") if primary_sla else None,
         })
     return consolidated
@@ -1522,6 +1562,9 @@ async def _run_projected_impact(
         for sic_eid in node_set:
             jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
             sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
+        
+        # Build JobGroup membership map
+        jg_membership = {sic_eid: impacted_by_sic[sic_eid].get("jg_eid") for sic_eid in node_set}
 
         downstream_after_ms = _compute_downstream_after_ms(node_set, edges, duration_ms)
         
@@ -1533,6 +1576,7 @@ async def _run_projected_impact(
             delay_ms,
             duration_ms,
             sla_deadline_ms,
+            jg_membership,
         )
 
         logger.debug(f"date_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
@@ -1716,6 +1760,9 @@ async def _run_projected_impact(
     for sic_eid in node_set:
         jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
         sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
+    
+    # Build JobGroup membership map
+    jg_membership = {sic_eid: impacted_by_sic[sic_eid].get("jg_eid") for sic_eid in node_set}
 
     downstream_after_ms = _compute_downstream_after_ms(node_set, edges, duration_ms)
     
@@ -1727,6 +1774,7 @@ async def _run_projected_impact(
         delay_ms,
         duration_ms,
         sla_deadline_ms,
+        jg_membership,
     )
 
     logger.debug(f"hypothetical_projection: Found {len(sla_rows)} SLA rows for {len(impacted_by_sic)} impacted SICs")
