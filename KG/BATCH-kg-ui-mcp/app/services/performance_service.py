@@ -581,6 +581,23 @@ def _ms_since_midnight(dt: datetime | None) -> int | None:
     )
 
 
+def _ms_to_time_str(ms: int | None) -> str | None:
+    """Convert milliseconds since midnight to HH:MM:SS format.
+    
+    Handles values >= 86,400,000 ms (24 hours) by showing next day notation.
+    Examples:
+        5,400,000 ms → "01:30:00"
+        90,000,000 ms → "25:00:00" (1 AM next day)
+    """
+    if ms is None:
+        return None
+    total_seconds = int(ms / 1000)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def _clock_to_ms(value: str | None) -> int | None:
     clock = _parse_sla_clock(value)
     if clock is None:
@@ -680,6 +697,16 @@ def _build_delay_and_finish_projection(
     executed_ms: dict[str, int | None],
     anchor_ms: int,
 ) -> tuple[dict[str, int], dict[str, int | None], dict[str, int | None]]:
+    """Build delay propagation and finish time projection.
+    
+    For date_projection with execution data:
+    - Root nodes: use actual finish time, add delay for projection
+    - Non-root executed: use actual finish times (frozen)
+    - Non-executed: calculate from parent's projected finish + own duration
+    
+    For hypothetical (no execution):
+    - Start from anchor (0 for midnight), propagate delay through graph
+    """
     preds: dict[str, list[str]] = {n: [] for n in nodes}
     for src, dst in edges:
         if src in nodes and dst in nodes:
@@ -692,18 +719,14 @@ def _build_delay_and_finish_projection(
 
     for node in order:
         node_dur = duration_ms.get(node)
+        
+        # Get parent finish times
         pred_baseline = [baseline_finish.get(p) for p in preds.get(node, []) if baseline_finish.get(p) is not None]
         pred_projected = [projected_finish.get(p) for p in preds.get(node, []) if projected_finish.get(p) is not None]
         baseline_start = max([anchor_ms] + pred_baseline) if pred_baseline else anchor_ms
         projected_start = max([anchor_ms] + pred_projected) if pred_projected else anchor_ms
 
-        if executed_ms.get(node) is not None:
-            # Already executed on the target date; freeze its finish and avoid delay carry-in.
-            propagated_delay[node] = 0
-            baseline_finish[node] = executed_ms[node]
-            projected_finish[node] = executed_ms[node]
-            continue
-
+        # Calculate propagated delay
         inherited_delay = max((propagated_delay.get(p, 0) for p in preds.get(node, [])), default=0)
         own_delay = delay_ms if node in root_nodes else 0
         propagated_delay[node] = max(own_delay, inherited_delay)
@@ -713,8 +736,21 @@ def _build_delay_and_finish_projection(
             projected_finish[node] = None
             continue
 
-        baseline_finish[node] = baseline_start + node_dur
-        projected_finish[node] = projected_start + node_dur + propagated_delay[node]
+        # For nodes with execution data
+        if executed_ms.get(node) is not None:
+            if node in root_nodes:
+                # Root node: use actual finish as baseline, add delay for projection
+                baseline_finish[node] = executed_ms[node]
+                projected_finish[node] = executed_ms[node] + propagated_delay[node]
+            else:
+                # Non-root executed: freeze at actual times
+                baseline_finish[node] = executed_ms[node]
+                projected_finish[node] = executed_ms[node]
+                propagated_delay[node] = 0  # No further delay propagation from frozen nodes
+        else:
+            # No execution data: calculate from topology
+            baseline_finish[node] = baseline_start + node_dur
+            projected_finish[node] = projected_start + node_dur + propagated_delay[node]
 
     return propagated_delay, baseline_finish, projected_finish
 
@@ -848,8 +884,17 @@ def _evaluate_date_projection_sla(
     else:
         base_deadline_ms = None  # RELATIVE uses durationMs only
     
-    # For JobGroup SLA: all SICs in the same JG use the base deadline for reporting
-    # Effective deadline (with downstream adjustment) is only for breach detection logic
+    # For JobGroup SLA: all SICs in the same JG use the base deadline as their baseline
+    # The baseline represents "when should this finish" = the SLA deadline
+    # For reporting, we show buffer and impact relative to this SLA deadline
+    if owner_type == "JOB_GROUP" and base_deadline_ms is not None:
+        # Override topology-calculated baseline with the actual SLA deadline
+        reporting_baseline_ms = base_deadline_ms
+    else:
+        # For SIC-level SLA or when no SLA time, use topology-calculated baseline
+        reporting_baseline_ms = baseline_finish_ms
+    
+    # Effective deadline (with downstream adjustment) used only for breach detection
     effective_deadline_ms = base_deadline_ms
     if base_deadline_ms is not None and owner_type == "JOB_GROUP" and downstream_after_ms is not None:
         effective_deadline_ms = max(0, base_deadline_ms - downstream_after_ms)
@@ -857,12 +902,12 @@ def _evaluate_date_projection_sla(
     threshold_ms = int(sla_row.get("sla_duration_ms") or 0)
     has_duration_threshold = threshold_ms > 0
 
-    # Calculate buffer using base deadline (not adjusted) for JobGroup SLAs
-    # This shows the actual slack time for each SIC relative to the JG SLA
+    # Calculate buffer using base deadline for JobGroup SLAs
+    # Buffer = SLA deadline - projected finish time (how much slack is left)
     buffer_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
     buffer_ms = (
-        buffer_deadline - baseline_finish_ms
-        if buffer_deadline is not None and baseline_finish_ms is not None
+        buffer_deadline - projected_finish_ms
+        if buffer_deadline is not None and projected_finish_ms is not None
         else None
     )
 
@@ -882,8 +927,8 @@ def _evaluate_date_projection_sla(
 
     projected_breach = bool(duration_breach or absolute_breach)
 
-    # Calculate real SLA impact = breach amount relative to base deadline for reporting
-    # For JobGroup SLAs: show how late each SIC finishes relative to the JG SLA (not adjusted)
+    # Calculate real SLA impact = breach amount relative to base deadline
+    # For JobGroup SLAs: how late each SIC finishes relative to the JG SLA
     impact_deadline = base_deadline_ms if owner_type == "JOB_GROUP" else effective_deadline_ms
     if sla_type_upper == "ABSOLUTE" and impact_deadline is not None and projected_finish_ms is not None:
         real_sla_impact_ms = max(0, projected_finish_ms - impact_deadline)
@@ -924,7 +969,7 @@ def _evaluate_date_projection_sla(
         "duration_source": duration_source,
         "effective_duration_ms": duration_ms,
         "propagated_delay_ms": propagated_delay_ms,
-        "baseline_finish_ms": baseline_finish_ms,
+        "baseline_finish_ms": reporting_baseline_ms,  # Use SLA deadline as baseline for reporting
         "projected_finish_ms": projected_finish_ms,
         "base_deadline_ms": base_deadline_ms,
         "effective_deadline_ms": effective_deadline_ms,
@@ -999,13 +1044,9 @@ def _consolidate_sic_impacts(
         def _to_sec(ms_val):
             return round(ms_val / 1000.0, 2) if ms_val is not None else None
         
-        # Convert baseline and projected finish from absolute times to durations
-        duration_val = base_fields.get("effective_duration_ms")
-        delay_val = base_fields.get("propagated_delay_ms", 0)
-        baseline_duration_sec = _to_sec(duration_val)
-        projected_duration_sec = _to_sec(duration_val + delay_val) if duration_val is not None else None
-        
-        # Build minimal response with only requested fields (in seconds)
+        # Build minimal response with only requested fields
+        # Display baseline and projected finish as wall-clock times (HH:MM:SS)
+        # Display durations and impacts in seconds
         consolidated.append({
             "sic_eid": sic_row.get("sic_eid"),
             "sic_id": sic_row.get("sic_id"),
@@ -1016,9 +1057,9 @@ def _consolidate_sic_impacts(
             "job_eid": sic_row.get("job_eid"),
             "job_name": sic_row.get("job_name"),
             "at_risk": at_risk_val,
-            "effective_duration_sec": baseline_duration_sec,
-            "baseline_finish_sec": baseline_duration_sec,
-            "projected_finish_sec": projected_duration_sec,
+            "effective_duration_sec": _to_sec(base_fields.get("effective_duration_ms")),
+            "baseline_finish_time": _ms_to_time_str(base_fields.get("baseline_finish_ms")),
+            "projected_finish_time": _ms_to_time_str(base_fields.get("projected_finish_ms")),
             "real_sla_impact_sec": _to_sec(real_sla_impact_val),
             "sla_id": primary_sla.get("sla_id") if primary_sla else None,
             "sla_name": primary_sla.get("sla_name") if primary_sla else None,
@@ -1264,12 +1305,13 @@ async def _run_projected_impact(
         projection_date = business_date or _today_business_date()
         projection_day = _parse_iso_business_date(projection_date)
         today = date.today()
-        if projection_day == today:
-            anchor_ms = _ms_since_midnight(datetime.now()) or 0
-        elif projection_day > today:
-            anchor_ms = 0
-        else:
+        if projection_day < today:
             raise ValueError("date_projection is supported for today or future business_date only")
+        
+        # Use midnight (0) as anchor for batch jobs with scheduled SLAs
+        # Batch jobs are typically scheduled at specific times (e.g., 1:30 AM, 5:00 AM)
+        # not relative to current time
+        anchor_ms = 0
 
         async with kg_session(driver) as session:
             _, eligible_eids = await _get_eligible_sic_scope(session, projection_date, region)
