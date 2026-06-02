@@ -8,6 +8,7 @@ Covers:
 """
 
 import logging
+import math
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -192,6 +193,19 @@ RETURN
     sic_eid,
     avg(jce.durationMs) AS avg_duration_ms,
     count(jce) AS sample_size
+"""
+
+_Q_AVG_FINISH_TIME_FOR_SICS = """
+UNWIND $sic_eids AS sic_eid
+MATCH (sic:ScheduleInstanceContext)
+WHERE elementId(sic) = sic_eid
+OPTIONAL MATCH (jce:JobContextExecution)-[:EXECUTES_CONTEXT]->(sic)
+WHERE jce.businessDate >= date($start_date)
+  AND jce.endTime IS NOT NULL
+WITH sic_eid,
+     collect(toString(jce.endTime)) AS end_times,
+     count(jce) AS sample_count
+RETURN sic_eid, end_times, sample_count
 """
 
 _Q_PRECEDES_BETWEEN_CONTEXTS = """
@@ -609,6 +623,31 @@ def _clock_to_ms(value: str | None) -> int | None:
         + clock.second * 1000
         + int(clock.microsecond / 1000)
     )
+
+
+def _circular_mean_time(end_times: list[str]) -> str | None:
+    """Compute the circular mean of HH:MM:SS time strings, correctly handling midnight wraparound.
+
+    Uses vector mean of unit-circle angles so times straddling midnight are averaged correctly.
+    Example: ["23:30:00", "00:30:00"] -> "00:00:00" (midnight),
+    not "11:45:00" which simple arithmetic averaging would give.
+    """
+    angles: list[float] = []
+    for ts in end_times or []:
+        ms = _clock_to_ms(ts)
+        if ms is None:
+            continue
+        angle = (ms / 86_400_000.0) * 2.0 * math.pi
+        angles.append(angle)
+    if not angles:
+        return None
+    mean_sin = sum(math.sin(a) for a in angles) / len(angles)
+    mean_cos = sum(math.cos(a) for a in angles) / len(angles)
+    mean_angle = math.atan2(mean_sin, mean_cos)
+    if mean_angle < 0:
+        mean_angle += 2.0 * math.pi
+    mean_ms = int((mean_angle / (2.0 * math.pi)) * 86_400_000)
+    return _ms_to_time_str(mean_ms)
 
 
 def _compute_linear_slope(points: list[tuple[int, float]]) -> float | None:
@@ -1513,6 +1552,21 @@ async def _run_projected_impact(
             sla_rows = await (
                 await session.run(_Q_SLA_ROWS_FOR_SICS, sic_eids=impacted_sic_eids)
             ).data()
+            # Only fetch finish-time history for SICs that have no explicit SLA —
+            # avoids pulling unnecessary historical data for already-covered SICs.
+            _sic_eids_with_sla = {r["sic_eid"] for r in sla_rows if r.get("sic_eid")}
+            _sic_eids_needing_hist = [
+                eid for eid in impacted_sic_eids if eid not in _sic_eids_with_sla
+            ]
+            avg_finish_rows: list[dict[str, Any]] = []
+            if _sic_eids_needing_hist:
+                avg_finish_rows = await (
+                    await session.run(
+                        _Q_AVG_FINISH_TIME_FOR_SICS,
+                        sic_eids=_sic_eids_needing_hist,
+                        start_date=start_date,
+                    )
+                ).data()
 
         impacted_by_sic = {row["sic_eid"]: row for row in impacted_rows if row.get("sic_eid")}
         edges = [
@@ -1573,7 +1627,49 @@ async def _run_projected_impact(
         for sic_eid in node_set:
             jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
             sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
-        
+
+        # For SICs with no explicit SLA at either SIC or JG level, fall back to the
+        # historical average finish time (time-of-day when the SIC typically completes)
+        # as an implicit ABSOLUTE SLA deadline. Circular mean is used so jobs that
+        # straddle midnight (e.g. 23:30 and 00:30) average correctly to 00:00.
+        avg_finish_by_sic: dict[str, str] = {}
+        for row in avg_finish_rows:
+            sic_eid = row.get("sic_eid")
+            if not sic_eid:
+                continue
+            if int(row.get("sample_count", 0)) < _ANOMALY_MIN_SAMPLES:
+                continue
+            avg_time = _circular_mean_time(row.get("end_times") or [])
+            if avg_time is not None:
+                avg_finish_by_sic[sic_eid] = avg_time
+        sics_with_explicit_sla = {r.get("sic_eid") for r in sla_rows if r.get("sic_eid")}
+        hist_sla_added = 0
+        for sic_eid in node_set:
+            if sic_eid in sics_with_explicit_sla:
+                continue
+            hist_finish_time = avg_finish_by_sic.get(sic_eid)
+            if hist_finish_time is None:
+                continue
+            sla_deadline_ms[sic_eid] = _clock_to_ms(hist_finish_time)
+            sic_info = impacted_by_sic[sic_eid]
+            sla_rows.append({
+                "sic_eid": sic_eid,
+                "owner_type": "HISTORICAL_AVG",
+                "owner_id": sic_info.get("sic_id"),
+                "owner_name": sic_info.get("sic_name"),
+                "sla_id": f"HIST_AVG_{sic_eid}",
+                "sla_name": "Historical Average Finish",
+                "sla_type": "ABSOLUTE",
+                "sla_duration_ms": None,
+                "sla_time": hist_finish_time,
+            })
+            hist_sla_added += 1
+        if hist_sla_added:
+            logger.debug(
+                f"date_projection: Added {hist_sla_added} historical average finish time "
+                f"SLA(s) for SICs with no explicit SLA"
+            )
+
         # Build JobGroup membership map
         jg_membership = {sic_eid: impacted_by_sic[sic_eid].get("jg_eid") for sic_eid in node_set}
 
@@ -1710,6 +1806,7 @@ async def _run_projected_impact(
         sla_rows: list[dict[str, Any]] = []
         precedes_rows: list[dict[str, Any]] = []
         avg_rows: list[dict[str, Any]] = []
+        avg_finish_rows: list[dict[str, Any]] = []
         if impacted_sic_eids:
             sla_rows = await (await session.run(_Q_SLA_ROWS_FOR_SICS, sic_eids=impacted_sic_eids)).data()
             precedes_rows = await (
@@ -1722,6 +1819,20 @@ async def _run_projected_impact(
                     start_date=start_date,
                 )
             ).data()
+            # Only fetch finish-time history for SICs that have no explicit SLA —
+            # avoids pulling unnecessary historical data for already-covered SICs.
+            _sic_eids_with_sla = {r["sic_eid"] for r in sla_rows if r.get("sic_eid")}
+            _sic_eids_needing_hist = [
+                eid for eid in impacted_sic_eids if eid not in _sic_eids_with_sla
+            ]
+            if _sic_eids_needing_hist:
+                avg_finish_rows = await (
+                    await session.run(
+                        _Q_AVG_FINISH_TIME_FOR_SICS,
+                        sic_eids=_sic_eids_needing_hist,
+                        start_date=start_date,
+                    )
+                ).data()
 
     impacted_by_sic = {row["sic_eid"]: row for row in impacted_rows if row.get("sic_eid")}
     edges = [
@@ -1771,7 +1882,49 @@ async def _run_projected_impact(
     for sic_eid in node_set:
         jg_eid = impacted_by_sic[sic_eid].get("jg_eid")
         sla_deadline_ms[sic_eid] = jg_sla_map.get(jg_eid)
-    
+
+    # For SICs with no explicit SLA at either SIC or JG level, fall back to the
+    # historical average finish time (time-of-day when the SIC typically completes)
+    # as an implicit ABSOLUTE SLA deadline. Circular mean is used so jobs that
+    # straddle midnight (e.g. 23:30 and 00:30) average correctly to 00:00.
+    avg_finish_by_sic: dict[str, str] = {}
+    for row in avg_finish_rows:
+        sic_eid = row.get("sic_eid")
+        if not sic_eid:
+            continue
+        if int(row.get("sample_count", 0)) < _ANOMALY_MIN_SAMPLES:
+            continue
+        avg_time = _circular_mean_time(row.get("end_times") or [])
+        if avg_time is not None:
+            avg_finish_by_sic[sic_eid] = avg_time
+    sics_with_explicit_sla = {r.get("sic_eid") for r in sla_rows if r.get("sic_eid")}
+    hist_sla_added = 0
+    for sic_eid in node_set:
+        if sic_eid in sics_with_explicit_sla:
+            continue
+        hist_finish_time = avg_finish_by_sic.get(sic_eid)
+        if hist_finish_time is None:
+            continue
+        sla_deadline_ms[sic_eid] = _clock_to_ms(hist_finish_time)
+        sic_info = impacted_by_sic[sic_eid]
+        sla_rows.append({
+            "sic_eid": sic_eid,
+            "owner_type": "HISTORICAL_AVG",
+            "owner_id": sic_info.get("sic_id"),
+            "owner_name": sic_info.get("sic_name"),
+            "sla_id": f"HIST_AVG_{sic_eid}",
+            "sla_name": "Historical Average Finish",
+            "sla_type": "ABSOLUTE",
+            "sla_duration_ms": None,
+            "sla_time": hist_finish_time,
+        })
+        hist_sla_added += 1
+    if hist_sla_added:
+        logger.debug(
+            f"hypothetical_projection: Added {hist_sla_added} historical average finish time "
+            f"SLA(s) for SICs with no explicit SLA"
+        )
+
     # Build JobGroup membership map
     jg_membership = {sic_eid: impacted_by_sic[sic_eid].get("jg_eid") for sic_eid in node_set}
 
