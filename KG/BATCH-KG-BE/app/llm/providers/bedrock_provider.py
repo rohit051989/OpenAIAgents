@@ -20,18 +20,30 @@ class BedrockLLM(BaseLLM):
         region: str = "us-east-1",
         access_key_id: str | None = None,
         secret_access_key: str | None = None,
+        profile_name: str | None = None,
         http_proxy: str | None = None,
         https_proxy: str | None = None,
     ):
-        
-        kwargs: dict[str, Any] = {"region_name": region, "service_name": "bedrock-runtime"}
-        if access_key_id and secret_access_key:
-            kwargs["aws_access_key_id"] = access_key_id
-            kwargs["aws_secret_access_key"] = secret_access_key
-        if http_proxy and https_proxy:
-            kwargs["config"] = Config(proxies={"http": http_proxy, "https": https_proxy})
+        # Build a Session so we can honour an explicit named profile (e.g. an SSO
+        # profile created via `aws configure sso`).  When profile_name is None
+        # boto3 falls back to its full credential chain in order:
+        #   1. Explicit keys passed here
+        #   2. AWS_* environment variables
+        #   3. ~/.aws/credentials (aws configure)
+        #   4. ~/.aws/config SSO profiles (aws configure sso + aws sso login)
+        #   5. IAM instance/task role
+        session = boto3.Session(
+            aws_access_key_id=access_key_id or None,
+            aws_secret_access_key=secret_access_key or None,
+            region_name=region,
+            profile_name=profile_name or None,
+        )
 
-        self.client = boto3.client(**kwargs)
+        client_kwargs: dict[str, Any] = {}
+        if http_proxy and https_proxy:
+            client_kwargs["config"] = Config(proxies={"http": http_proxy, "https": https_proxy})
+
+        self.client = session.client("bedrock-runtime", **client_kwargs)
         self.model_id = model_id
 
     def generate(

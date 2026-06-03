@@ -72,6 +72,7 @@ class LLMFactory:
                 region=s.aws_region,
                 access_key_id=s.aws_access_key_id or None,
                 secret_access_key=s.aws_secret_access_key or None,
+                profile_name=s.aws_profile or None,
                 http_proxy=s.http_proxy or None,
                 https_proxy=s.https_proxy or None,
             )
