@@ -17,7 +17,7 @@ from neo4j import GraphDatabase
 import json
 from datetime import datetime
 import xml.etree.ElementTree as ET
-import logging
+
 
 # Import ClassInfo from call_hierarchy_extension
 from classes.JavaCallHierarchyParser import JavaCallHierarchyParser
@@ -711,6 +711,9 @@ class InformationGraphBuilder:
         # Only populated for repos with has_batch_configuration: true
         self.allowed_spring_config_patterns_by_repo: Dict[str, Set[str]] = {}
         self._load_batch_configuration_imports()
+
+        # Reuse DB repo SQL parsing/resource creation logic for .sql files found in SHOT 1.
+        self.db_repo_scanner = DBRepoScanner(self.config, self.driver, self.database)
     
     # -------------------------------------------------------------------------
     # Path helpers: convert between absolute local paths and 
@@ -1019,7 +1022,9 @@ class InformationGraphBuilder:
             # Always add XmlConfig for non-pom XML files
             file_types.append('XmlConfig')
             return file_types
-        
+        if file_ext == '.sql':
+            file_types.append('SqlScript')
+            return file_types
         for type_name, rules in self.file_type_rules.items():
             matched = False
             
@@ -1152,8 +1157,14 @@ class InformationGraphBuilder:
         # Process each item
         for item in items:
             # Skip ignored directories
-            if item.is_dir() and item.name in self.skip_dirs:
-                continue
+            if item.is_dir():
+                if item.name in self.skip_dirs:
+                    continue
+
+                # Skip test directory trees entirely (e.g., src/test/**)
+                item_dir_norm = str(item).replace('\\', '/').lower()
+                if re.search(r'(^|/)src/test(/|$)', item_dir_norm):
+                    continue
             
             # Skip ignored files
             if item.is_file() and self._should_skip_file(item):
@@ -1285,6 +1296,21 @@ class InformationGraphBuilder:
         else:
             # Regular file
             self._create_regular_file_shot1(file_path, parent_path, file_types, stats, session)
+            if file_path.suffix.lower() == '.sql':
+                self._parse_sql_file_and_create_resources(file_path, session)
+
+    def _parse_sql_file_and_create_resources(self, sql_file: Path, session):
+        """Delegate SQL parsing/resource creation to DBRepoScanner reusable logic."""
+        repo_cfg = self._get_repo_config_for_path(sql_file)
+        repo_name = repo_cfg.get('name', '') if repo_cfg else ''
+
+        # Reuse existing parser/collector logic.
+        self.db_repo_scanner._parse_and_create_resources(sql_file, repo_name, session)
+
+        # Persist only what was collected by this invocation and reset accumulator.
+        if self.db_repo_scanner.collected_resources:
+            self.db_repo_scanner._bulk_create_resources()
+            self.db_repo_scanner.collected_resources.clear()
     
     def _create_regular_file_shot1(self, file_path: Path, parent_path: str, file_types: List[str], stats: Dict, session):
         """Create a regular file node.
@@ -1295,8 +1321,8 @@ class InformationGraphBuilder:
         if 'ShellScript' in file_types and ':Resource' not in labels:
             labels = labels + ':Resource'
         # SQL script files are also Resource nodes (for SQL invocation linking)
-        if 'SqlScript' in file_types and ':Resource' not in labels:
-            labels = labels + ':Resource'
+        if 'SqlScript' in file_types:
+            labels = labels + ':SqlFile'
         
         # Store repo-relative path in graph
         path_str = self._to_relative_path(file_path)

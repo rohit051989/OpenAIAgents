@@ -256,8 +256,7 @@ class ManualResourceAssociator:
                 ON CREATE SET r.id = $id,
                               r.enabled = true,
                               r.schemaName = $schemaName,
-                              r.foundInRepo = false,
-                              r.notFoundInRepo = true,
+                              r.foundInRepo = false
                               r.manuallyResolved = true
                 ON MATCH SET r.schemaName = COALESCE(r.schemaName, $schemaName),
                              r.manuallyResolved = true
@@ -404,7 +403,7 @@ class ManualResourceAssociator:
                 unique_id = f"RES_PROC_{uuid.uuid4().hex[:8].upper()}"
                 
                 # Create or update Resource node with schema and package information
-                # If creating new Resource (not from db_repo), mark as notFoundInRepo
+                # If creating new Resource (not from db_repo), mark as foundInRepo false
                 if package_name:
                     resource_query = """
                     MERGE (r:Resource {name: $name, type: $rtype})
@@ -414,7 +413,6 @@ class ManualResourceAssociator:
                                   r.schemaName = $schemaName,
                                   r.packageName = $packageName,
                                   r.foundInRepo = false,
-                                  r.notFoundInRepo = true,
                                   r.manuallyResolved = true
                     ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
                                  r.schemaName = COALESCE(r.schemaName, $schemaName),
@@ -435,7 +433,6 @@ class ManualResourceAssociator:
                                   r.databaseType = $dbType,
                                   r.schemaName = $schemaName,
                                   r.foundInRepo = false,
-                                  r.notFoundInRepo = true,
                                   r.manuallyResolved = true
                     ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
                                  r.schemaName = COALESCE(r.schemaName, $schemaName),
@@ -986,8 +983,7 @@ class ManualResourceAssociator:
                                       r.enabled       = true,
                                       r.scriptPath    = $scriptPath,
                                       r.description   = $description,
-                                      r.foundInRepo   = false,
-                                      r.notFoundInRepo = true,
+                                      r.foundInRepo   = false
                                       r.manuallyResolved = true
                         ON MATCH SET  r.manuallyResolved = true,
                                       r.scriptPath = COALESCE(r.scriptPath, $scriptPath)

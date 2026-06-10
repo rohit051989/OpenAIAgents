@@ -285,8 +285,7 @@ class ProcedureCallEnricher:
                                   r.databaseType = $dbType,
                                   r.schemaName = $schemaName,
                                   r.packageName = $packageName,
-                                  r.foundInRepo = false,
-                                  r.notFoundInRepo = true
+                                  r.foundInRepo = false
                     ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
                                  r.schemaName = COALESCE(r.schemaName, $schemaName),
                                  r.packageName = COALESCE(r.packageName, $packageName)
@@ -302,8 +301,7 @@ class ProcedureCallEnricher:
                                   r.enabled = true,
                                   r.databaseType = $dbType,
                                   r.schemaName = $schemaName,
-                                  r.foundInRepo = false,
-                                  r.notFoundInRepo = true
+                                  r.foundInRepo = false
                     ON MATCH SET r.databaseType = COALESCE(r.databaseType, $dbType),
                                  r.schemaName = COALESCE(r.schemaName, $schemaName)
                     """

@@ -161,7 +161,7 @@ class DBRepoScanner:
         self._bulk_create_resources()
         
         # After scanning all repos, mark duplicates
-        self._mark_duplicate_resources()
+        #self._mark_duplicate_resources()
         
         # Print statistics
         self._print_statistics()
@@ -342,9 +342,13 @@ class DBRepoScanner:
             extension=file_path.suffix,
             size=file_size
         )
+        if file_path.suffix.lower() == '.sql':
+            labels = 'Node:File:SQLFile'
+        else:
+            labels = 'Node:File'
 
         query = """
-        MERGE (n:Node:File {path: $path})
+        MERGE (n:{$labels} {path: $path})
         ON CREATE SET 
             n.name = $name,
             n.node_type = $node_type,
@@ -364,7 +368,8 @@ class DBRepoScanner:
                 node_type=file_node.node_type,
                 extension=file_node.extension,
                 size=file_node.size,
-                parent_path=parent_path
+                parent_path=parent_path,
+                labels=labels
             )
         except Exception as e:
             logger.warning(f"      Failed to create file node {file_path.name}: {e}")
@@ -758,6 +763,6 @@ class DBRepoScanner:
         logger.info(f"  Folders Created:       {self.stats['folders_created']}")
         logger.info(f"  Files Created:         {self.stats['files_created']}")
         logger.info(f"  Resources Created:     {self.stats['resources_created']}")
-        logger.info(f"  Duplicates Found:      {self.stats['duplicates_found']}")
+        #logger.info(f"  Duplicates Found:      {self.stats['duplicates_found']}")
         logger.info(f"  Errors:                {self.stats['errors']}")
         logger.info("=" * 80 + "\n")

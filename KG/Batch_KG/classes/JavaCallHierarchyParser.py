@@ -1,6 +1,5 @@
 from classes.DataClasses import ClassInfo, MethodCall, MethodDef
 
-import javalang
 try:
     from tree_sitter import Language, Parser
     import tree_sitter_java as tsjava
@@ -18,64 +17,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Module-level config loading — resolved once at import time.
-# All JavaCallHierarchyParser instances share the same mode so that every
-# caller (enrichers, tests, builder) automatically picks up the project
-# setting without having to pass anything to the constructor.
-# ---------------------------------------------------------------------------
-def _load_parser_mode() -> str:
-    """Read java_parser_mode from information_graph_config.yaml.
-
-    Falls back to 'javalang_with_treesitter_fallback' if the file cannot be
-    read or the key is absent.
-    """
-    config_file = Path(__file__).parent.parent / "config" / "information_graph_config.yaml"
-    try:
-        with open(config_file, 'r', encoding='utf-8') as _f:
-            _cfg = yaml.safe_load(_f)
-        mode = _cfg.get('scan_options', {}).get(
-            'java_parser_mode', 'javalang_with_treesitter_fallback')
-        return mode
-    except Exception:
-        return 'javalang_with_treesitter_fallback'
-
-_DEFAULT_PARSER_MODE: str = _load_parser_mode()
-
 
 class JavaCallHierarchyParser:
     """Parses Java source files to extract call hierarchy.
 
-    The parser mode is read automatically from
-    ``config/information_graph_config.yaml`` (``scan_options.java_parser_mode``).
-    Valid values:
-
-    * ``"javalang_with_treesitter_fallback"`` (default) — JavaLang is the
-      primary parser; TreeSitter is tried automatically when JavaLang cannot
-      handle the file (e.g. Java 16+ records / sealed classes).  Preserves
-      maximum edge-case coverage.
-    * ``"treesitter_only"`` — always use TreeSitter.  Uniform behaviour
+    The parser mode always use TreeSitter.  Uniform behaviour
       across all Java versions; all edge cases must be handled in the
       TreeSitter code path.
 
-    The optional *parser_mode* constructor argument can still be supplied to
-    override the config value (useful in tests).
     """
 
-    VALID_PARSER_MODES = frozenset({
-        "javalang_with_treesitter_fallback",
-        "treesitter_only",
-    })
-
     def __init__(self, parser_mode: Optional[str] = None):
-        # Use explicit override, else fall back to the config-loaded default.
-        resolved_mode = parser_mode if parser_mode is not None else _DEFAULT_PARSER_MODE
-        if resolved_mode not in self.VALID_PARSER_MODES:
-            raise ValueError(
-                f"Unknown parser_mode '{resolved_mode}'. "
-                f"Valid values: {sorted(self.VALID_PARSER_MODES)}"
-            )
-        self.parser_mode = resolved_mode
+        
         self.classes: Dict[str, ClassInfo] = {}  # fqn -> ClassInfo
         # Initialize tree-sitter parser if available
         if TREE_SITTER_AVAILABLE:
@@ -87,15 +40,12 @@ class JavaCallHierarchyParser:
                 self.ts_parser = None
         else:
             self.ts_parser = None
-        logger.info(f"  JavaCallHierarchyParser initialised: parser_mode='{self.parser_mode}'")
+        logger.info(f"  JavaCallHierarchyParser initialised: parser_mode='treesitter_only'")
 
     def parse_java_file(self, file_path: str) -> Optional[ClassInfo]:
         """Parse a single Java file and extract class info with call hierarchy.
 
-        The parser engine used depends on ``self.parser_mode``:
-        - ``"javalang_with_treesitter_fallback"``: tries JavaLang first; if JavaLang
-          raises any exception the file is re-parsed with TreeSitter.
-        - ``"treesitter_only"``: skips JavaLang entirely and uses TreeSitter directly.
+        The parser engine uses TreeSitter directly.
         """
         if not Path(file_path).exists():
             logger.info(f"  Warning: Source file not found: {file_path}")
@@ -108,117 +58,25 @@ class JavaCallHierarchyParser:
             logger.warning(f"  Warning: Could not read {file_path}: {e}")
             return None
 
-        # ── TreeSitter-only mode ──────────────────────────────────────────────
-        if self.parser_mode == "treesitter_only":
-            if not self.ts_parser:
-                logger.warning(
-                    f"  parser_mode='treesitter_only' but TreeSitter is not available. "
-                    f"Install tree-sitter-java. File skipped: {file_path}"
-                )
-                return None
-            try:
-                result = self._parse_with_tree_sitter(file_path, source)
-                if result:
-                    logger.info(f"  [treesitter_only] Parsed: {file_path}")
-                else:
-                    logger.info(f"  [treesitter_only] No class found in: {file_path}")
-                return result
-            except Exception as ts_error:
-                logger.warning(
-                    f"  [treesitter_only] TreeSitter failed for {file_path}: "
-                    f"{type(ts_error).__name__}: {str(ts_error)[:150]}"
-                )
-                return None
-
-        # ── JavaLang-primary with TreeSitter fallback (default) ───────────────
-        try:
-            tree = javalang.parse.parse(source)
-        except Exception as e:
-            # Javalang failed - try tree-sitter for modern Java syntax
-            error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
-            logger.info(f"  Warning: javalang failed to parse {file_path}")
-            logger.info(f"           Reason: {error_msg[:150]}")
-            
-            if self.ts_parser:
-                logger.info(f"           Attempting tree-sitter fallback parser...")
-                try:
-                    result = self._parse_with_tree_sitter(file_path, source)
-                    if result:
-                        logger.info(f"            Successfully parsed with tree-sitter")
-                        return result
-                except Exception as ts_error:
-                    logger.info(f"           ✗ tree-sitter also failed: {type(ts_error).__name__}: {str(ts_error)[:100]}")
-            else:
-                logger.info(f"           Note: Install tree-sitter-java for modern Java syntax support")
-                logger.info(f"                 pip install tree-sitter tree-sitter-java")
-            
-            logger.info(f"           File will be created as a regular file node, not a JavaClass")
-            return None
-
-        # Extract package
-        package = tree.package.name if tree.package else ""
-
-        # Extract imports
-        imports = [imp.path for imp in tree.imports] if tree.imports else []
-
-        # Helper function to process a class or interface node
-        def process_type_declaration(node, is_interface=False):
-            class_name = node.name
-            fqn = f"{package}.{class_name}" if package else class_name
-
-            # Extract implements/extends
-            implements = []
-            extends = None
-            if hasattr(node, 'implements') and node.implements:
-                implements = [self._resolve_type(imp.name, imports, package) for imp in node.implements]
-            if hasattr(node, 'extends') and node.extends:
-                # For interfaces, extends can be a list
-                if isinstance(node.extends, list):
-                    implements.extend([self._resolve_type(ext.name, imports, package) for ext in node.extends])
-                else:
-                    extends = self._resolve_type(node.extends.name, imports, package)
-            
-            logger.info(f"  Parsed with JavaLang to identify the respective implementation for : {fqn} (extends: {extends}, implements: {implements})")
-            class_info = ClassInfo(
-                package=package,
-                class_name=class_name,
-                fqn=fqn,
-                source_path=file_path,
-                implements=implements,
-                extends=extends,
-                is_interface=is_interface,
-                imports=imports
+        if not self.ts_parser:
+            logger.warning(
+                f"  parser_mode='treesitter_only' but TreeSitter is not available. "
+                f"Install tree-sitter-java. File skipped: {file_path}"
             )
-
-            # Extract fields
-            # Search for fields directly in this class node's body
-            if hasattr(node, 'body') and node.body:
-                for item in node.body:
-                    if isinstance(item, javalang.tree.FieldDeclaration):
-                        field_type = self._get_type_name(item.type)
-                        for declarator in item.declarators:
-                            class_info.fields[declarator.name] = field_type
-
-            # Extract methods with call hierarchy
-            # Search for methods directly in this class node's body
-            if hasattr(node, 'body') and node.body:
-                for item in node.body:
-                    if isinstance(item, javalang.tree.MethodDeclaration):
-                        method_def = self._parse_method(item, class_info, source)
-                        class_info.methods[method_def.method_key] = method_def
-
-            self.classes[fqn] = class_info
-            return class_info
-
-        # Try to find main class
-        for path, node in tree.filter(javalang.tree.ClassDeclaration):
-            return process_type_declaration(node, is_interface=False)
-
-        # Try to find interface if no class found
-        for path, node in tree.filter(javalang.tree.InterfaceDeclaration):
-            return process_type_declaration(node, is_interface=True)
-
-        return None
+            return None
+        try:
+            result = self._parse_with_tree_sitter(file_path, source)
+            if result:
+                logger.info(f"  [treesitter_only] Parsed: {file_path}")
+            else:
+                logger.info(f"  [treesitter_only] No class found in: {file_path}")
+            return result
+        except Exception as ts_error:
+            logger.warning(
+                f"  [treesitter_only] TreeSitter failed for {file_path}: "
+                f"{type(ts_error).__name__}: {str(ts_error)[:150]}"
+            )
+            return None 
 
     def _parse_with_tree_sitter(self, file_path: str, source: str) -> Optional[ClassInfo]:
         """
@@ -510,8 +368,7 @@ class JavaCallHierarchyParser:
     def _ts_extract_local_var_types(self, method_body, source: str) -> dict:
         """First-pass scan of a method body to build a local-variable name → type map.
 
-        Mirrors the JavaLang ``extract_local_variables`` pass.  Recognises
-        ``local_variable_declaration`` nodes and reads the declared type plus
+        Recognises ``local_variable_declaration`` nodes and reads the declared type plus
         every variable-declarator name inside them.
         """
         local_var_types: dict = {}
@@ -580,7 +437,7 @@ class JavaCallHierarchyParser:
           - ``field_access``              → obj.field; check if obj is ``this``
           - everything else               → fall back to raw text lookup
 
-        Parity with the JavaLang ``_extract_method_calls`` path:
+        Path:
         1. First pass — build local-variable type map.
         2. First pass — track return types for chained-call resolution.
         3. Second pass — emit ``MethodCall`` objects.
@@ -783,318 +640,6 @@ class JavaCallHierarchyParser:
         return calls
 
 
-    def _parse_method(self, method_node, class_info: ClassInfo, source: str) -> MethodDef:
-        """Parse method and extract method calls"""
-        method_name = method_node.name
-        return_type = self._get_type_name(method_node.return_type) if method_node.return_type else "void"
-
-        # Extract parameters
-        parameters = []
-        if method_node.parameters:
-            for param in method_node.parameters:
-                param_type = self._get_type_name(param.type)
-                param_name = param.name
-                parameters.append((param_type, param_name))
-
-        modifiers = method_node.modifiers or []
-
-        # Extract method calls (pass parameters for type resolution)
-        method_calls = []
-        if method_node.body:
-            method_calls = self._extract_method_calls(method_node.body, class_info, parameters)
-
-        return MethodDef(
-            class_fqn=class_info.fqn,
-            method_name=method_name,
-            return_type=return_type,
-            parameters=parameters,
-            modifiers=modifiers,
-            calls=method_calls
-        )
-
-    def _extract_method_calls(self, body_nodes, class_info: ClassInfo,
-                             method_params: List[Tuple[str, str]] = None) -> List[MethodCall]:
-        """Extract method invocations from method body"""
-        calls = []
-
-        if not body_nodes:
-            return calls
-
-        # Build parameter name -> type mapping
-        param_types = {}
-        if method_params:
-            for param_type, param_name in method_params:
-                param_types[param_name] = param_type
-
-        # Build local variable name -> type mapping
-        local_var_types = {}
-
-        def extract_local_variables(node):
-            """Extract local variable declarations from the method body"""
-            if isinstance(node, javalang.tree.LocalVariableDeclaration):
-                var_type = self._get_type_name(node.type)
-                for declarator in node.declarators:
-                    local_var_types[declarator.name] = var_type
-
-            # Recursively search children
-            if hasattr(node, 'children'):
-                for child in node.children:
-                    if child is not None:
-                        if isinstance(child, list):
-                            for item in child:
-                                if item is not None:
-                                    extract_local_variables(item)
-                        else:
-                            extract_local_variables(child)
-
-        # First pass: extract all local variable declarations
-        for node in body_nodes:
-            if node is not None:
-                extract_local_variables(node)
-
-        # Track chained method calls: track return types of methods we've seen
-        # Key: method position in source, Value: return type
-        method_return_types = {}
-        
-        def track_method_invocations(node, depth=0):
-            """First pass: track all method invocations and their return types"""
-            if isinstance(node, javalang.tree.MethodInvocation):
-                method_name = node.member
-                qualifier = node.qualifier if node.qualifier else None
-                
-                # Determine the return type of this method call
-                if qualifier:
-                    # Method called on object/field
-                    target_class = None
-                    if qualifier in class_info.fields:
-                        target_class = class_info.fields[qualifier]
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    elif qualifier in param_types:
-                        target_class = param_types[qualifier]
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    elif qualifier in local_var_types:
-                        target_class = local_var_types[qualifier]
-                        target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                    
-                    # Look up method and get return type
-                    if target_class and target_class in self.classes:
-                        target_class_info = self.classes[target_class]
-                        if target_class_info.has_method_name(method_name):
-                            tracked_arg_types = self._infer_arg_types_javalang(
-                                node.arguments, param_types, local_var_types)
-                            method_def = target_class_info.get_method_by_name_and_params(
-                                method_name, tracked_arg_types)
-                            return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
-                            # Store with unique key (node object id)
-                            method_return_types[id(node)] = return_type
-                            logger.info(f"    Tracked: {qualifier}.{method_name}() returns {return_type}")
-                else:
-                    # Method called on self
-                    if class_info.has_method_name(method_name):
-                        tracked_arg_types = self._infer_arg_types_javalang(
-                            node.arguments, param_types, local_var_types)
-                        method_def = class_info.get_method_by_name_and_params(
-                            method_name, tracked_arg_types)
-                        return_type = self._resolve_type(method_def.return_type, class_info.imports, class_info.package)
-                        method_return_types[id(node)] = return_type
-                        logger.info(f"    Tracked: {method_name}() returns {return_type}")
-            
-            # Recursively track children
-            if hasattr(node, 'children'):
-                for child in node.children:
-                    if child is not None:
-                        if isinstance(child, list):
-                            for item in child:
-                                if item is not None:
-                                    track_method_invocations(item, depth + 1)
-                        else:
-                            track_method_invocations(child, depth + 1)
-        
-        # Track all method invocations first
-        for node in body_nodes:
-            if node is not None:
-                track_method_invocations(node)
-
-        # Track the last method invocation we've seen (for chained calls)
-        last_method_with_qualifier = {}  # qualifier_name -> return_type
-        
-        # Recursively search for MethodInvocation nodes in the body
-        def search_invocations(node):
-            nonlocal last_method_with_qualifier
-            
-            if isinstance(node, javalang.tree.MethodInvocation):
-                method_name = node.member
-                target_class = None
-                
-                # Log every method invocation for debugging
-                qualifier_type = type(node.qualifier).__name__ if node.qualifier else "None"
-                logger.info(f"    Method call: {method_name}, qualifier type: {qualifier_type}")
-
-                # Try to determine target class from qualifier
-                if node.qualifier:
-                    qualifier = node.qualifier
-
-                    # Check if qualifier is itself a MethodInvocation (chained call)
-                    if isinstance(node.qualifier, javalang.tree.MethodInvocation):
-                        logger.info(f"    Detected chained method call (javalang): ...{node.qualifier.member}().{method_name}")
-                        # Chained method call: obj.method1().method2()
-                        # Get the return type of the chained method
-                        chained_method_name = node.qualifier.member
-                        chained_qualifier = node.qualifier.qualifier if hasattr(node.qualifier, 'qualifier') else None
-                        
-                        logger.info(f"      Chained method: {chained_method_name}, qualifier: {chained_qualifier}")
-                        
-                        # Determine which class contains the chained method
-                        chained_target_class = None
-                        if chained_qualifier:
-                            # Method called on an object
-                            logger.info(f"      Looking up qualifier: '{chained_qualifier}' (fields: {list(class_info.fields.keys())})")
-                            if chained_qualifier in class_info.fields:
-                                chained_target_class = class_info.fields[chained_qualifier]
-                                logger.info(f"      Found in fields: {chained_target_class}")
-                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
-                                logger.info(f"      Resolved to: {chained_target_class}")
-                            elif chained_qualifier in param_types:
-                                chained_target_class = param_types[chained_qualifier]
-                                logger.info(f"      Found in params: {chained_target_class}")
-                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
-                            elif chained_qualifier in local_var_types:
-                                chained_target_class = local_var_types[chained_qualifier]
-                                logger.info(f"      Found in local vars: {chained_target_class}")
-                                chained_target_class = self._resolve_type(chained_target_class, class_info.imports, class_info.package)
-                            else:
-                                chained_target_class = self._resolve_type(chained_qualifier, class_info.imports, class_info.package)
-                                logger.info(f"      Resolved as class: {chained_target_class}")
-                        else:
-                            # Method called on self
-                            chained_target_class = class_info.fqn
-                            logger.info(f"      Method called on self: {chained_target_class}")
-                        
-                        # Look up the method and get its return type
-                        if chained_target_class:
-                            logger.info(f"      Looking for method '{chained_method_name}' in '{chained_target_class}'")
-                            if chained_target_class in self.classes:
-                                chained_class_info = self.classes[chained_target_class]
-                                logger.info(f"      Methods available: {[m.method_name for m in chained_class_info.methods.values()]}")
-                                if chained_class_info.has_method_name(chained_method_name):
-                                    chained_method = chained_class_info.get_method_by_name_and_params(
-                                        chained_method_name, None)
-                                    target_class = chained_method.return_type
-                                    logger.info(f"      Found! Return type: {target_class}")
-                                    # Resolve return type to FQN
-                                    target_class = self._resolve_type(target_class, chained_class_info.imports, chained_class_info.package)
-                                    logger.info(f"      ✓ Chained call resolved: {chained_qualifier}.{chained_method_name}().{method_name} -> target: {target_class}")
-                                else:
-                                    logger.warning(f"      ✗ Method '{chained_method_name}' not found in class '{chained_target_class}'")
-                            else:
-                                logger.warning(f"      ✗ Class'{chained_target_class}' not found in cache")
-                    
-                    # Standard qualifier handling (not a chained call)
-                    elif isinstance(qualifier, str):
-                        # Check if it's a field reference
-                        if qualifier in class_info.fields:
-                            target_class = class_info.fields[qualifier]
-                            # Resolve short names to FQN
-                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                        # Check if it's a method parameter
-                        elif qualifier in param_types:
-                            target_class = param_types[qualifier]
-                            # Resolve short names to FQN
-                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                        # Check if it's a local variable
-                        elif qualifier in local_var_types:
-                            target_class = local_var_types[qualifier]
-                            # Resolve short names to FQN
-                            target_class = self._resolve_type(target_class, class_info.imports, class_info.package)
-                        # Check if it's an imported class (static method call)
-                        else:
-                            # Try to resolve as a class name from imports
-                            target_class = self._resolve_type(qualifier, class_info.imports, class_info.package)
-                            # If resolved to same as qualifier, it might not be in imports (target_class will be qualifier)
-                            # This is ok - we keep it as the simple name
-                        
-                        # Store this method's return type for potential chained calls
-                        logger.info(f"    Checking if we can track: method={method_name}, target_class={target_class}, in_cache={target_class in self.classes if target_class else 'N/A'}")
-                        if target_class and target_class in self.classes:
-                            target_class_info = self.classes[target_class]
-                            logger.info(f"    Target class has methods: {[m.method_name for m in target_class_info.methods.values()]}")
-                            if target_class_info.has_method_name(method_name):
-                                call_arg_types = self._infer_arg_types_javalang(
-                                    node.arguments, param_types, local_var_types)
-                                method_def = target_class_info.get_method_by_name_and_params(
-                                    method_name, call_arg_types)
-                                return_type = self._resolve_type(method_def.return_type, target_class_info.imports, target_class_info.package)
-                                last_method_with_qualifier[qualifier] = {
-                                    'method_name': method_name,
-                                    'return_type': return_type,
-                                    'full_call': f"{qualifier}.{method_name}()"
-                                }
-                                logger.info(f"     Stored: {qualifier}.{method_name}() returns {return_type} for potential chaining")
-                            else:
-                                logger.info(f"    Method {method_name} not found in {target_class}")
-                        else:
-                            logger.info(f"    Cannot track: target_class not in cache or None")
-                else:
-                    # No qualifier - check if previous method returned something we can chain on
-                    # Look through tracked methods to find one whose return type might match
-                    logger.info(f"    No qualifier for {method_name}. Tracked methods: {list(last_method_with_qualifier.keys())}")
-                    if last_method_with_qualifier:
-                        # Get the most recently tracked method
-                        for qual_name, info in last_method_with_qualifier.items():
-                            return_type = info['return_type']
-                            logger.info(f"    Checking if {return_type} has method {method_name}")
-                            if return_type and return_type in self.classes:
-                                return_class_info = self.classes[return_type]
-                                logger.info(f"    {return_type} has methods: {[m.method_name for m in return_class_info.methods.values()]}")
-                                if return_class_info.has_method_name(method_name):
-                                    target_class = return_type
-                                    logger.info(f"    ✓ Chained call detected: {info['full_call']}.{method_name}() -> target: {target_class}")
-                                    break
-                                else:
-                                    logger.info(f"    Method {method_name} not in {return_type}")
-                            else:
-                                logger.info(f"    {return_type} not in cache or None")
-                
-                logger.info(f"    Inside extract_method_calls: Adding method call: {method_name}, target_class: {target_class}, class_fqn: {class_info.fqn}")
-                arg_types = self._infer_arg_types_javalang(
-                    node.arguments, param_types, local_var_types)
-                calls.append(MethodCall(
-                    target_class=target_class,
-                    method_name=method_name,
-                    line_number=0,
-                    argument_types=arg_types
-                ))
-
-            # Recursively search children
-            if hasattr(node, 'children'):
-                for child in node.children:
-                    if child is not None:
-                        if isinstance(child, list):
-                            for item in child:
-                                if item is not None:
-                                    search_invocations(item)
-                        else:
-                            search_invocations(child)
-
-        # Search through all body nodes
-        for node in body_nodes:
-            if node is not None:
-                search_invocations(node)
-
-        return calls
-
-    def _get_type_name(self, type_node) -> str:
-        """Extract type name from type node"""
-        if hasattr(type_node, 'name'):
-            return type_node.name
-        elif hasattr(type_node, 'sub_type'):
-            base = type_node.name
-            if type_node.sub_type:
-                sub = self._get_type_name(type_node.sub_type)
-                return f"{base}<{sub}>"
-            return base
-        return str(type_node)
-
     def _resolve_type(self, simple_name: str, imports: List[str], package: str) -> str:
         """Resolve simple type name to FQN using imports"""
         if '.' in simple_name:
@@ -1105,89 +650,6 @@ class JavaCallHierarchyParser:
                 return imp
 
         return f"{package}.{simple_name}" if package else simple_name
-
-    def _is_direct_child(self, class_path, member_path) -> bool:
-        """Check if member is direct child of class (not used anymore, kept for compatibility)"""
-        if len(member_path) != len(class_path) + 1:
-            return False
-        # Check that member_path starts with class_path
-        for i, node in enumerate(class_path):
-            if i >= len(member_path) or member_path[i] != node:
-                return False
-        return True
-
-    # ------------------------------------------------------------------
-    # Argument-type inference helpers
-    # ------------------------------------------------------------------
-
-    def _infer_arg_type_javalang(self, arg_node,
-                                  param_types: dict,
-                                  local_var_types: dict) -> Optional[str]:
-        """Best-effort inference of the Java type for a single call-site argument.
-
-        Covers the most common, statically obvious cases:
-          - Literals   → primitive / String type
-          - MemberReference with no qualifier (local var / param)
-          - ClassCreator (new Foo(...)) → class name
-          - Cast → the cast target type
-          - MethodInvocation → return type if resolvable from the parsed cache
-        Returns None when the type cannot be determined without full type inference.
-        """
-        if arg_node is None:
-            return None
-
-        # Literal: "hello", 42, 3.14f, true, null, 'c' …
-        if isinstance(arg_node, javalang.tree.Literal):
-            val = arg_node.value
-            if val == 'null':
-                return None
-            if val.startswith('"'):
-                return 'String'
-            if val.startswith("'"):
-                return 'char'
-            if val in ('true', 'false'):
-                return 'boolean'
-            if val.endswith('L') or val.endswith('l'):
-                return 'long'
-            if val.endswith('f') or val.endswith('F'):
-                return 'float'
-            if val.endswith('d') or val.endswith('D'):
-                return 'double'
-            if '.' in val:
-                return 'double'
-            return 'int'
-
-        # Simple variable / parameter / field reference
-        if isinstance(arg_node, javalang.tree.MemberReference):
-            if not arg_node.qualifier:
-                name = arg_node.member
-                t = param_types.get(name) or local_var_types.get(name)
-                return t  # may be None if not tracked
-            # qualified field access (e.g. this.field) — skip for now
-            return None
-
-        # new Foo(...) → type is Foo
-        if isinstance(arg_node, javalang.tree.ClassCreator):
-            if arg_node.type and hasattr(arg_node.type, 'name'):
-                return arg_node.type.name
-            return None
-
-        # (SomeType) expr → cast type
-        if isinstance(arg_node, javalang.tree.Cast):
-            if arg_node.type:
-                return self._get_type_name(arg_node.type)
-            return None
-
-        return None
-
-    def _infer_arg_types_javalang(self, arguments,
-                                   param_types: dict,
-                                   local_var_types: dict) -> List[Optional[str]]:
-        """Return a list of best-effort types for all call-site arguments."""
-        if not arguments:
-            return []
-        return [self._infer_arg_type_javalang(a, param_types, local_var_types)
-                for a in arguments]
 
     def _infer_arg_types_ts(self, arg_list_node, source: str,
                              param_types: dict,
