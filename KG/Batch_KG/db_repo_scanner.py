@@ -302,7 +302,7 @@ class DBRepoScanner:
             n.node_type = $node_type,
             n.created_at = datetime()
         WITH n
-        MATCH (parent:Node {path: $parent_path})
+        MATCH (parent:Node {{path: $parent_path}})
         MERGE (parent)-[:CONTAINS]->(n)
         RETURN n
         """
@@ -347,8 +347,8 @@ class DBRepoScanner:
         else:
             labels = 'Node:File'
 
-        query = """
-        MERGE (n:{$labels} {path: $path})
+        query = f"""
+        MERGE (n:{labels} {{path: $path}})
         ON CREATE SET 
             n.name = $name,
             n.node_type = $node_type,
@@ -356,7 +356,7 @@ class DBRepoScanner:
             n.size = $size,
             n.created_at = datetime()
         WITH n
-        MATCH (parent:Node {path: $parent_path})
+        MATCH (parent:Node {{path: $parent_path}})
         MERGE (parent)-[:CONTAINS]->(n)
         RETURN n
         """
@@ -368,8 +368,7 @@ class DBRepoScanner:
                 node_type=file_node.node_type,
                 extension=file_node.extension,
                 size=file_node.size,
-                parent_path=parent_path,
-                labels=labels
+                parent_path=parent_path
             )
         except Exception as e:
             logger.warning(f"      Failed to create file node {file_path.name}: {e}")
