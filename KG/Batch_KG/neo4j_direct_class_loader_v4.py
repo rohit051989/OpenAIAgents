@@ -171,8 +171,11 @@ class Neo4jLoader:
         self._load_job_contexts(excel_file)
         self._load_job_successors(excel_file)
         self._load_steps_directly_from_IG()
-        self._copy_step_db_operations_from_info_graph()
-        self._copy_step_shell_and_procedure_executions_from_info_graph()
+        # New method: uses consolidated Step properties (handles static + dynamic correctly)
+        self._copy_step_operations_from_step_properties()
+        # Legacy methods (skip - superseded by _copy_step_operations_from_step_properties):
+        # self._copy_step_db_operations_from_info_graph()
+        # self._copy_step_shell_and_procedure_executions_from_info_graph()
         self._copy_sql_resource_invokes_from_info_graph()
         self._load_resource_dependency(excel_file)
         self._load_slas(excel_file)
@@ -777,7 +780,303 @@ class Neo4jLoader:
             logger.info(f"    Created {len(listener_rels)} HAS_LISTENER relationships")
         
         logger.info(" Steps and related entities loaded successfully from information graph")
-    
+
+    def _copy_step_operations_from_step_properties(self):
+        """
+        Copy Step operations (DB, procedures, shell scripts, SQL files) from Step properties
+        in the Information Graph into the Knowledge Graph.
+
+        This method uses the consolidated Step-level properties which correctly handle
+        both static resources (shared across Steps) and dynamic resources (Step-specific).
+        The manual_resource_associator consolidation phase ensures that:
+          - Static resources: included from all methods in call hierarchy
+          - Dynamic resources: only the Step-specific resolved values are present
+
+        Step properties used:
+          - stepDbOperations:       ["SELECT:TABLE_NAME:CONFIDENCE", ...]
+          - stepProcedureCalls:     ["SCHEMA:PKG:NAME:DB_TYPE:TYPE:CONFIDENCE", ...]
+          - stepShellExecutions:    ["RESOLVED:script.sh:HIGH", ...]
+          - stepSqlFileInvocations: ["file.sql", ...]
+
+        KG structures created:
+          Step -[:DB_OPERATION {operationType, tableName, confidence}]-> Resource {type:'TABLE'}
+          Step -[:INVOKES {databaseType, schemaName, packageName, confidence}]-> Resource {type:'PROCEDURE'|'FUNCTION'}
+          Step -[:EXECUTES {scriptType, confidence}]-> Resource {type:'SHELL_SCRIPT'}
+          Step -[:INVOKES {executionType:'SQL_SCRIPT', confidence}]-> Resource {type:'SQL_SCRIPT'}
+        """
+        logger.info("Linking Steps to Resources using consolidated Step properties...")
+
+        # Keywords that indicate unresolved/grey-area entries to skip
+        SKIP_KEYWORDS = ['UNKNOWN', 'DYNAMIC', 'PARAMETERIZED', 'DYNAMIC_PROCEDURE']
+
+        def should_skip(entry: str) -> bool:
+            """Return True if entry is unresolved/grey-area and should be skipped."""
+            entry_upper = entry.upper()
+            return any(kw in entry_upper for kw in SKIP_KEYWORDS)
+
+        def strip_resolved_prefix(entry: str) -> str:
+            """Strip 'RESOLVED:' prefix if present."""
+            if entry.startswith('RESOLVED:'):
+                return entry[9:]  # len('RESOLVED:') = 9
+            return entry
+
+        # ── Query all Steps with their properties from IG ─────────────────────
+        query_steps = """
+        MATCH (s:Step)
+        RETURN s.name                         AS stepName,
+               coalesce(s.stepDbOperations,      []) AS dbOps,
+               coalesce(s.stepProcedureCalls,    []) AS procCalls,
+               coalesce(s.stepShellExecutions,   []) AS shellExecs,
+               coalesce(s.stepSqlFileInvocations,[]) AS sqlInvocations
+        """
+
+        with self.driver.session(database=self.info_database) as session:
+            result = session.run(query_steps)
+            steps_data = [dict(r) for r in result]
+
+        if not steps_data:
+            logger.info("  No Steps found in information graph")
+            return
+
+        logger.info(f"  Processing {len(steps_data)} Steps from IG")
+
+        # ── Helper: determine operation type for DB operations ────────────────
+        def get_operation_type(db_op: str) -> str:
+            db_op_upper = db_op.upper()
+            if 'SELECT' in db_op_upper or 'READ' in db_op_upper or 'QUERY' in db_op_upper:
+                return 'READ'
+            elif 'INSERT' in db_op_upper or 'CREATE' in db_op_upper:
+                return 'INSERT'
+            elif 'DELETE' in db_op_upper or 'REMOVE' in db_op_upper:
+                return 'DELETE'
+            elif 'UPDATE' in db_op_upper or 'MERGE' in db_op_upper:
+                return 'INSERT'  # Treat UPDATE as INSERT
+            elif 'AGGREGATE' in db_op_upper or 'COUNT' in db_op_upper or 'SUM' in db_op_upper:
+                return 'AGGREGATE'
+            else:
+                return 'READ'
+
+        # ── Collect operations from all Steps ─────────────────────────────────
+        db_ops_list     = []   # (stepName, operationType, tableName, confidence)
+        proc_calls_list = []   # (stepName, schemaName, packageName, procName, dbType, resourceType, confidence)
+        shell_execs_list = []  # (stepName, scriptName, confidence)
+        sql_invocs_list  = []  # (stepName, sqlFileName)
+
+        for step in steps_data:
+            step_name = step['stepName']
+
+            # ── DB Operations: "SELECT:TABLE_NAME:HIGH" ───────────────────────
+            for op in step['dbOps']:
+                if should_skip(op):
+                    continue
+                op = strip_resolved_prefix(op)
+                parts = op.split(':')
+                if len(parts) >= 2:
+                    op_type_raw = parts[0].strip()
+                    table_name  = parts[1].strip()
+                    confidence  = parts[2].strip() if len(parts) >= 3 else 'MEDIUM'
+                    if table_name:  # Skip empty table names
+                        db_ops_list.append((step_name, get_operation_type(op_type_raw), table_name, confidence))
+
+            # ── Procedure Calls: "SCHEMA:PKG:NAME:DB_TYPE:TYPE:CONFIDENCE" ────
+            for proc in step['procCalls']:
+                if should_skip(proc):
+                    continue
+                proc = strip_resolved_prefix(proc)
+                parts = proc.split(':')
+                # Expected format: SCHEMA:PACKAGE:PROC_NAME:DB_TYPE:RESOURCE_TYPE:CONFIDENCE
+                if len(parts) >= 5:
+                    schema_name   = parts[0].strip() if parts[0].strip() != 'UNKNOWN' else ''
+                    package_name  = parts[1].strip() if parts[1].strip() not in ['NONE', 'UNKNOWN'] else ''
+                    proc_name     = parts[2].strip()
+                    db_type       = parts[3].strip() if len(parts) > 3 else 'UNKNOWN'
+                    resource_type = parts[4].strip() if len(parts) > 4 else 'PROCEDURE'  # PROCEDURE or FUNCTION
+                    confidence    = parts[5].strip() if len(parts) > 5 else 'HIGH'
+                    if proc_name:  # Skip empty procedure names
+                        proc_calls_list.append((step_name, schema_name, package_name, proc_name, db_type, resource_type, confidence))
+
+            # ── Shell Executions: "RESOLVED:script.sh:HIGH" or "EXEC_METHOD:script.sh:CONF" ─
+            for shell in step['shellExecs']:
+                if should_skip(shell):
+                    continue
+                shell = strip_resolved_prefix(shell)
+                parts = shell.split(':')
+                # Could be "script.sh:HIGH" or "EXEC_METHOD:script.sh:CONF"
+                if len(parts) >= 2:
+                    # If first part looks like exec method, script is second part
+                    if parts[0].upper() in ['RUNTIME_EXEC', 'PROCESS_BUILDER', 'SCRIPT_ENGINE', 'COMMAND_LINE']:
+                        script_name = parts[1].strip()
+                        confidence  = parts[2].strip() if len(parts) > 2 else 'HIGH'
+                    else:
+                        script_name = parts[0].strip()
+                        confidence  = parts[1].strip() if len(parts) > 1 else 'HIGH'
+                    if script_name:  # Skip empty script names
+                        shell_execs_list.append((step_name, script_name, confidence))
+                elif len(parts) == 1 and parts[0].strip():
+                    # Just a script name without confidence
+                    shell_execs_list.append((step_name, parts[0].strip(), 'HIGH'))
+
+            # ── SQL File Invocations: ["file.sql", ...] ───────────────────────
+            for sql_file in step['sqlInvocations']:
+                if should_skip(sql_file):
+                    continue
+                sql_file = strip_resolved_prefix(sql_file)
+                if sql_file.strip():
+                    sql_invocs_list.append((step_name, sql_file.strip()))
+
+        # ── Deduplicate ───────────────────────────────────────────────────────
+        db_ops_list      = list(set(db_ops_list))
+        proc_calls_list  = list(set(proc_calls_list))
+        shell_execs_list = list(set(shell_execs_list))
+        sql_invocs_list  = list(set(sql_invocs_list))
+
+        logger.info(
+            f"  Resolved operations: {len(db_ops_list)} DB ops, "
+            f"{len(proc_calls_list)} proc calls, {len(shell_execs_list)} shell execs, "
+            f"{len(sql_invocs_list)} SQL invocations"
+        )
+
+        created_count = 0
+
+        with self.driver.session(database=self.database) as session:
+
+            # ── DB Operations: Step -[:DB_OPERATION]-> Resource {type:'TABLE'} ─
+            for step_name, op_type, table_name, confidence in db_ops_list:
+                resource_id = f"RESOURCE_TABLE_{table_name}".replace(" ", "_").upper()
+
+                # Ensure Resource node exists
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'TABLE'})
+                    ON CREATE SET r.id      = $rid,
+                                  r.enabled = true
+                    """,
+                    name=table_name, rid=resource_id,
+                )
+
+                # Step -[:DB_OPERATION]-> Resource
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: 'TABLE'})
+                    MERGE (s)-[rel:DB_OPERATION {operationType: $opType, tableName: $tname}]->(r)
+                    SET rel.confidence = $confidence
+                    """,
+                    stepName=step_name, resourceName=table_name,
+                    opType=op_type, tname=table_name, confidence=confidence,
+                )
+                created_count += 1
+
+            # ── Procedure/Function Calls: Step -[:INVOKES]-> Resource ─────────
+            for step_name, schema_name, package_name, proc_name, db_type, resource_type, confidence in proc_calls_list:
+                resource_id = (
+                    f"RESOURCE_{resource_type}_{schema_name}_{proc_name}"
+                    .replace(" ", "_").upper()
+                )
+
+                # Ensure Resource node exists
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: $rtype})
+                    ON CREATE SET r.id           = $resourceId,
+                                  r.enabled      = true,
+                                  r.databaseType = $dbType,
+                                  r.schemaName   = $schemaName,
+                                  r.packageName  = $packageName
+                    ON MATCH SET  r.databaseType = COALESCE(r.databaseType, $dbType),
+                                  r.schemaName   = COALESCE(r.schemaName, $schemaName),
+                                  r.packageName  = COALESCE(r.packageName, $packageName)
+                    """,
+                    name=proc_name, rtype=resource_type, resourceId=resource_id,
+                    dbType=db_type, schemaName=schema_name, packageName=package_name,
+                )
+
+                # Step -[:INVOKES]-> Resource
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: $rtype})
+                    MERGE (s)-[rel:INVOKES {resourceName: $resourceName}]->(r)
+                    SET rel.databaseType = $dbType,
+                        rel.schemaName   = $schemaName,
+                        rel.packageName  = $packageName,
+                        rel.confidence   = $confidence
+                    """,
+                    stepName=step_name, resourceName=proc_name, rtype=resource_type,
+                    dbType=db_type, schemaName=schema_name, packageName=package_name,
+                    confidence=confidence,
+                )
+                created_count += 1
+
+            # ── Shell Executions: Step -[:EXECUTES]-> Resource {type:'SHELL_SCRIPT'} ─
+            for step_name, script_name, confidence in shell_execs_list:
+                resource_id = (
+                    "RESOURCE_SHELL_"
+                    + script_name.replace(".", "_").replace("-", "_").replace("/", "_").upper()
+                )
+
+                # Ensure Resource node exists
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'SHELL_SCRIPT'})
+                    ON CREATE SET r.id            = $resourceId,
+                                  r.enabled       = true,
+                                  r.scriptType    = 'SHELL',
+                                  r.scriptPath    = $scriptPath
+                    ON MATCH SET  r.scriptPath    = COALESCE(r.scriptPath, $scriptPath)
+                    """,
+                    name=script_name, resourceId=resource_id, scriptPath=script_name,
+                )
+
+                # Step -[:EXECUTES]-> Resource
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: 'SHELL_SCRIPT'})
+                    MERGE (s)-[rel:EXECUTES {resourceName: $resourceName}]->(r)
+                    SET rel.scriptType = 'SHELL',
+                        rel.confidence = $confidence
+                    """,
+                    stepName=step_name, resourceName=script_name, confidence=confidence,
+                )
+                created_count += 1
+
+            # ── SQL File Invocations: Step -[:INVOKES {executionType:'SQL_SCRIPT'}]-> Resource ─
+            for step_name, sql_file in sql_invocs_list:
+                resource_id = (
+                    "RES_SQL_"
+                    + sql_file.replace(".", "_").replace("-", "_").replace("/", "_").upper()
+                )
+
+                # Ensure Resource node exists
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'SQL_SCRIPT'})
+                    ON CREATE SET r.id         = $resourceId,
+                                  r.enabled    = true,
+                                  r.scriptPath = $scriptPath
+                    ON MATCH SET  r.scriptPath = COALESCE(r.scriptPath, $scriptPath)
+                    """,
+                    name=sql_file, resourceId=resource_id, scriptPath=sql_file,
+                )
+
+                # Step -[:INVOKES]-> Resource
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: 'SQL_SCRIPT'})
+                    MERGE (s)-[rel:INVOKES {resourceName: $resourceName, executionType: 'SQL_SCRIPT'}]->(r)
+                    SET rel.confidence = 'HIGH'
+                    """,
+                    stepName=step_name, resourceName=sql_file,
+                )
+                created_count += 1
+
+        logger.info(
+            f"   Created {created_count} Step->Resource link(s) from Step properties "
+            f"(DB_OPERATION + INVOKES + EXECUTES)"
+        )
+
     def _copy_step_db_operations_from_info_graph(self):
         """
         Copy DB operations from the information graph into the knowledge graph.
