@@ -34,6 +34,7 @@ from classes.KGNodeDefs import (
 from classes.path_utils import to_relative_path, to_absolute_path
 from classes.DAOAnalyzer import DAOAnalyzer
 from classes.ShellScriptAnalyzer import ShellScriptAnalyzer
+from classes.git_utils import GitInfoCache
 from neo4j_direct_step_loader import parse_directory
 from call_hierarchy_extension_v2 import enrich_with_call_hierarchy_v2
 from neo4j_direct_step_loader import generate_cypher
@@ -714,6 +715,9 @@ class InformationGraphBuilder:
 
         # Reuse DB repo SQL parsing/resource creation logic for .sql files found in SHOT 1.
         self.db_repo_scanner = DBRepoScanner(self.config, self.driver, self.database)
+
+        # Git last-commit metadata cache — populated lazily per Java source file.
+        self.git_info_cache = GitInfoCache()
     
     # -------------------------------------------------------------------------
     # Path helpers: convert between absolute local paths and 
@@ -758,21 +762,28 @@ class InformationGraphBuilder:
     def _normalize_job_paths(self, job_def) -> None:
         """Convert absolute source paths in StepDef/DecisionDef/ListenerDef to
         repo-relative paths (same format as JavaClass.path) before storing to Neo4j.
-        Also populates git metadata fields (repo name + branch) from config for
-        every entity derived from the job's Spring XML file."""
-        # Derive git metadata from the Job's Spring XML BEFORE normalising path
+        All 6 git metadata fields are populated from git logs of the Spring XML file."""
+        # Query git BEFORE normalising the path (needs absolute path for git log)
         if job_def.source_file:
-            repo_cfg = self._get_repo_config_for_path(Path(job_def.source_file))
-            job_def.git_repo_name = repo_cfg.get('name', '') if repo_cfg else ''
-            job_def.git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
+            _abs_xml = Path(job_def.source_file)
+            _git = self.git_info_cache.get(_abs_xml)
+            job_def.git_repo_name          = _git['gitRepoName']
+            job_def.git_branch_name        = _git['gitBranchName']
+            job_def.git_last_commit_id      = _git['gitLastCommitId']
+            job_def.git_last_commit_date    = _git['gitLastCommitDate']
+            job_def.git_last_commit_author  = _git['gitLastCommitAuthor']
+            job_def.git_last_commit_message = _git['gitLastCommitMessage']
             job_def.git_file_exists = True
-            job_def.source_file = self._to_relative_path(Path(job_def.source_file))
+            job_def.source_file = self._to_relative_path(_abs_xml)
 
-        # Propagate job-level repo info to all child entities — they are declared
-        # in the same Spring XML file as the Job
+        # Propagate job-level git info to all child entities — they share the same XML file
         for step in job_def.steps.values():
-            step.git_repo_name = job_def.git_repo_name
-            step.git_branch_name = job_def.git_branch_name
+            step.git_repo_name          = job_def.git_repo_name
+            step.git_branch_name        = job_def.git_branch_name
+            step.git_last_commit_id      = job_def.git_last_commit_id
+            step.git_last_commit_date    = job_def.git_last_commit_date
+            step.git_last_commit_author  = job_def.git_last_commit_author
+            step.git_last_commit_message = job_def.git_last_commit_message
             step.git_file_exists = True
             if step.class_source_path:
                 step.class_source_path = self._to_relative_path(Path(step.class_source_path))
@@ -783,14 +794,22 @@ class InformationGraphBuilder:
             if step.writer_source_path:
                 step.writer_source_path = self._to_relative_path(Path(step.writer_source_path))
         for dec in job_def.decisions.values():
-            dec.git_repo_name = job_def.git_repo_name
-            dec.git_branch_name = job_def.git_branch_name
+            dec.git_repo_name          = job_def.git_repo_name
+            dec.git_branch_name        = job_def.git_branch_name
+            dec.git_last_commit_id      = job_def.git_last_commit_id
+            dec.git_last_commit_date    = job_def.git_last_commit_date
+            dec.git_last_commit_author  = job_def.git_last_commit_author
+            dec.git_last_commit_message = job_def.git_last_commit_message
             dec.git_file_exists = True
             if dec.class_source_path:
                 dec.class_source_path = self._to_relative_path(Path(dec.class_source_path))
         for listener in job_def.listeners.values():
-            listener.git_repo_name = job_def.git_repo_name
-            listener.git_branch_name = job_def.git_branch_name
+            listener.git_repo_name          = job_def.git_repo_name
+            listener.git_branch_name        = job_def.git_branch_name
+            listener.git_last_commit_id      = job_def.git_last_commit_id
+            listener.git_last_commit_date    = job_def.git_last_commit_date
+            listener.git_last_commit_author  = job_def.git_last_commit_author
+            listener.git_last_commit_message = job_def.git_last_commit_message
             listener.git_file_exists = True
             if listener.source_path:
                 listener.source_path = self._to_relative_path(Path(listener.source_path))
@@ -1315,6 +1334,9 @@ class InformationGraphBuilder:
     def _create_regular_file_shot1(self, file_path: Path, parent_path: str, file_types: List[str], stats: Dict, session):
         """Create a regular file node.
         OPTIMIZED: Reuses provided session instead of opening new one."""
+        if 'ShellScript' in file_types and 'Resource' not in file_types:
+            file_types.append('Resource')
+
         safe_types = [ft.replace(' ', '').replace('-', '') for ft in file_types if ft]
         labels = 'Node:File:' + ':'.join(safe_types) if safe_types else 'Node:File'
         # Shell scripts are also queryable as Resource nodes (e.g. by dynamic_ig_loader)
@@ -1322,7 +1344,7 @@ class InformationGraphBuilder:
             labels = labels + ':Resource'
         # SQL script files are also Resource nodes (for SQL invocation linking)
         if 'SqlScript' in file_types:
-            labels = labels + ':SqlFile'
+            labels = 'Node:File:Resource' + ':SqlFile'
         
         # Store repo-relative path in graph
         path_str = self._to_relative_path(file_path)
@@ -1334,16 +1356,19 @@ class InformationGraphBuilder:
         
         file_types_str = ','.join(file_types)
 
-        # Git metadata — populated from repo config (Step 1).
-        # git_created_by / at / updated_by / at / commit_id left None until Step 2 (git log).
-        repo_cfg = self._get_repo_config_for_path(file_path)
-        git_repo_name   = repo_cfg.get('name', '')        if repo_cfg else ''
-        git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
+        # All 6 git properties from git logs (repo name/branch from git remote/HEAD).
+        git_info = self.git_info_cache.get(file_path)
+        git_repo_name    = git_info['gitRepoName']
+        git_branch_name  = git_info['gitBranchName']
 
         common = dict(path=path_str, name=file_path.name, node_type='File',
                       extension=file_path.suffix, size=file_size, file_types=file_types_str,
                       git_repo_name=git_repo_name, git_branch_name=git_branch_name,
-                      git_file_exists=True)
+                      git_file_exists=True,
+                      git_last_commit_id=git_info['gitLastCommitId'],
+                      git_last_commit_date=git_info['gitLastCommitDate'],
+                      git_last_commit_author=git_info['gitLastCommitAuthor'],
+                      git_last_commit_message=git_info['gitLastCommitMessage'])
 
         # Build the appropriate dataclass node based on file type
         if 'SpringConfig' in file_types:
@@ -1356,13 +1381,36 @@ class InformationGraphBuilder:
             node = IGPropertyFileNodeDef(**common)
         elif 'Resource' in file_types:
             node = ResourceNodeDef(path=path_str, name=file_path.name,
-                                   node_type='Resource', extension=file_path.suffix,
+                                   node_type='File', extension=file_path.suffix,
                                    size=file_size, file_types=file_types_str,
-                                   foundInRepo=True, repoFilePath=path_str)
+                                   foundInRepo=True, repoFilePath=path_str,
+                                   type=file_types_str,
+                                   git_repo_name=git_repo_name,
+                                   git_branch_name=git_branch_name,
+                                   git_file_exists=True)
         else:
             node = IGFileNodeDef(**common)
 
         # SpringConfig has extra isMainConfig and allowedInImport properties; all others share the same query
+        # Shared git params used by all three query variants below
+        _git_params = dict(
+            git_repo_name=git_info['gitRepoName'],
+            git_branch_name=git_info['gitBranchName'],
+            git_file_exists=True,
+            git_last_commit_id=git_info['gitLastCommitId'],
+            git_last_commit_date=git_info['gitLastCommitDate'],
+            git_last_commit_author=git_info['gitLastCommitAuthor'],
+            git_last_commit_message=git_info['gitLastCommitMessage'],
+        )
+        _git_set = """
+                n.gitRepoName = $git_repo_name,
+                n.gitBranchName = $git_branch_name,
+                n.gitFileExists = $git_file_exists,
+                n.gitLastCommitId = $git_last_commit_id,
+                n.gitLastCommitDate = $git_last_commit_date,
+                n.gitLastCommitAuthor = $git_last_commit_author,
+                n.gitLastCommitMessage = $git_last_commit_message,"""
+
         if isinstance(node, IGSpringConfigNodeDef):
             query = f"""
             MERGE (n:{labels} {{path: $path}})
@@ -1372,10 +1420,7 @@ class InformationGraphBuilder:
                 n.extension = $extension,
                 n.size = $size,
                 n.file_types = $file_types,
-                n.isMainConfig = $isMainConfig,
-                n.gitRepoName = $git_repo_name,
-                n.gitBranchName = $git_branch_name,
-                n.gitFileExists = $git_file_exists,
+                n.isMainConfig = $isMainConfig,{_git_set}
                 n.created_at = datetime()
             SET n.allowedInImport = $allowedInImport
             WITH n
@@ -1387,10 +1432,28 @@ class InformationGraphBuilder:
                 path=node.path, name=node.name, node_type=node.node_type,
                 extension=node.extension, size=node.size, file_types=node.file_types,
                 isMainConfig=node.isMainConfig, allowedInImport=node.allowedInImport,
-                git_repo_name=node.git_repo_name or '',
-                git_branch_name=node.git_branch_name or '',
-                git_file_exists=node.git_file_exists,
-                parent_path=parent_path
+                parent_path=parent_path, **_git_params
+            )
+        elif isinstance(node, ResourceNodeDef):
+            query = f"""
+            MERGE (n:{labels} {{path: $path}})
+            ON CREATE SET
+                n.name = $name,
+                n.node_type = $node_type,
+                n.extension = $extension,
+                n.size = $size,
+                n.file_types = $file_types,{_git_set}
+                n.created_at = datetime()
+            SET n.type = $type
+            WITH n
+            MATCH (parent:Node {{path: $parent_path}})
+            MERGE (parent)-[:CONTAINS]->(n)
+            RETURN n
+            """
+            session.run(query,
+                path=node.path, name=node.name, node_type=node.node_type,
+                extension=node.extension, size=node.size, file_types=node.file_types,
+                type=node.type, parent_path=parent_path, **_git_params
             )
         else:
             query = f"""
@@ -1400,10 +1463,7 @@ class InformationGraphBuilder:
                 n.node_type = $node_type,
                 n.extension = $extension,
                 n.size = $size,
-                n.file_types = $file_types,
-                n.gitRepoName = $git_repo_name,
-                n.gitBranchName = $git_branch_name,
-                n.gitFileExists = $git_file_exists,
+                n.file_types = $file_types,{_git_set}
                 n.created_at = datetime()
             WITH n
             MATCH (parent:Node {{path: $parent_path}})
@@ -1413,10 +1473,7 @@ class InformationGraphBuilder:
             session.run(query,
                 path=node.path, name=node.name, node_type=node.node_type,
                 extension=node.extension, size=node.size, file_types=node.file_types,
-                git_repo_name=node.git_repo_name or '',
-                git_branch_name=node.git_branch_name or '',
-                git_file_exists=node.git_file_exists,
-                parent_path=parent_path
+                parent_path=parent_path, **_git_params
             )
         
         stats['files'] += 1
@@ -1438,12 +1495,9 @@ class InformationGraphBuilder:
         # Determine if this is a test class (check if path is in test directories)
         is_test_class = self._is_test_path(Path(class_info.source_path))
 
-        # Git metadata — derived from repo config (Step 1).
-        repo_cfg = self._get_repo_config_for_path(Path(class_info.source_path))
-        class_info.git_repo_name   = repo_cfg.get('name', '')        if repo_cfg else ''
-        class_info.git_branch_name = repo_cfg.get('branch_name', '') if repo_cfg else ''
-        class_info.git_file_exists = True
-        
+        # All 6 git properties come from git — file-level commit info + repo-level name/branch.
+        git_info = self.git_info_cache.get(Path(class_info.source_path))
+
         # MERGE on fqn (unique identifier) to avoid duplicates
         # This respects the unique constraint on JavaClass.fqn
         query = """
@@ -1466,6 +1520,10 @@ class InformationGraphBuilder:
             n.gitRepoName = $git_repo_name,
             n.gitBranchName = $git_branch_name,
             n.gitFileExists = $git_file_exists,
+            n.gitLastCommitId = $git_last_commit_id,
+            n.gitLastCommitDate = $git_last_commit_date,
+            n.gitLastCommitAuthor = $git_last_commit_author,
+            n.gitLastCommitMessage = $git_last_commit_message,
             n.created_at = datetime()
         WITH n
         MATCH (parent:Node {path: $parent_path})
@@ -1489,9 +1547,13 @@ class InformationGraphBuilder:
                 isDAOClass=is_dao_class,
                 isShellExecutorClass=is_shell_executor,
                 isTestClass=is_test_class,
-                git_repo_name=class_info.git_repo_name or '',
-                git_branch_name=class_info.git_branch_name or '',
-                git_file_exists=class_info.git_file_exists,
+                git_repo_name=git_info['gitRepoName'],
+                git_branch_name=git_info['gitBranchName'],
+                git_file_exists=True,
+                git_last_commit_id=git_info['gitLastCommitId'],
+                git_last_commit_date=git_info['gitLastCommitDate'],
+                git_last_commit_author=git_info['gitLastCommitAuthor'],
+                git_last_commit_message=git_info['gitLastCommitMessage'],
                 parent_path=parent_path
             )
             
@@ -2126,10 +2188,8 @@ class InformationGraphBuilder:
             #logger.info(f"Preparing Bean '{bean_id}' with class '{bean_class}' with xmlPath '{xml_file}' with source_path '{source_path}' for graph storage")
             relative_xml_path = self._to_relative_path(Path(xml_file))
             relative_source_path = self._to_relative_path(Path(source_path)) if source_path else ""
-            # Git metadata for Bean — derived from the Spring XML file's repo
-            bean_repo_cfg = self._get_repo_config_for_path(Path(xml_file))
-            bean_git_repo_name   = bean_repo_cfg.get('name', '')        if bean_repo_cfg else ''
-            bean_git_branch_name = bean_repo_cfg.get('branch_name', '') if bean_repo_cfg else ''
+            # All 6 git properties from the Spring XML file that defines this bean
+            bean_git_info = self.git_info_cache.get(Path(xml_file))
             bean_data.append({
                 'compositeKey': composite_key,
                 'beanId': bean_id,
@@ -2138,8 +2198,12 @@ class InformationGraphBuilder:
                 'path': relative_source_path,
                 'hasSource': bool(source_path),
                 'xmlPath': relative_xml_path,
-                'gitRepoName': bean_git_repo_name,
-                'gitBranchName': bean_git_branch_name,
+                'gitRepoName':          bean_git_info['gitRepoName'],
+                'gitBranchName':        bean_git_info['gitBranchName'],
+                'gitLastCommitId':      bean_git_info['gitLastCommitId'],
+                'gitLastCommitDate':    bean_git_info['gitLastCommitDate'],
+                'gitLastCommitAuthor':  bean_git_info['gitLastCommitAuthor'],
+                'gitLastCommitMessage': bean_git_info['gitLastCommitMessage'],
             })
         
         with self.driver.session(database=self.database) as session:
@@ -2155,6 +2219,10 @@ class InformationGraphBuilder:
                 b.hasSource = bean.hasSource,
                 b.gitRepoName = bean.gitRepoName,
                 b.gitBranchName = bean.gitBranchName,
+                b.gitLastCommitId = bean.gitLastCommitId,
+                b.gitLastCommitDate = bean.gitLastCommitDate,
+                b.gitLastCommitAuthor = bean.gitLastCommitAuthor,
+                b.gitLastCommitMessage = bean.gitLastCommitMessage,
                 b.gitFileExists = true,
                 b.created_at = datetime()
             ON MATCH SET
@@ -2682,8 +2750,9 @@ def main():
             # PHASE 0: Scan DB repositories (before code scanning)
             phase_start = time.time()
             logger.info(" 3. PHASE 0: Scanning database repositories...")
-            db_scanner = DBRepoScanner(builder.config, builder.driver, builder.database)
-            db_scanner.scan_db_repositories()
+            #db_scanner = DBRepoScanner(builder.config, builder.driver, builder.database)
+            #db_scanner.scan_db_repositories()
+            builder.db_repo_scanner.scan_db_repositories()
             db_scan_time = time.time() - phase_start
             logger.info(f"    DB Repository scanning completed in {db_scan_time:.1f} seconds")
         

@@ -359,7 +359,7 @@
         "CALLS": "Links JavaMethod to another JavaMethod it invokes; carries requiresHumanReview and resolvedFromInterface flags for interface resolution",
         "USES_CLASS": "Links JavaClass to another JavaClass it references or depends on",
         "IMPLEMENTED_BY": "Links Step to the JavaClass that provides its implementation",
-        "IMPLEMENTS": "Links a concrete JavaClass to the interface JavaClass it implements"
+        "IMPLEMENTS": "Links a Bean with the JavaClass"
     },
     "relationship_patterns": [
         {

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from classes.KGNodeDefs import IGRepositoryNodeDef, IGFolderNodeDef, IGFileNodeDef, ResourceNodeDef
 from classes.path_utils import to_relative_path
+from classes.git_utils import GitInfoCache
 from neo4j import GraphDatabase
 import uuid
 import sqlparse
@@ -112,6 +113,9 @@ class DBRepoScanner:
         
         # Collected resources for bulk creation (performance optimization)
         self.collected_resources: List[Dict] = []
+
+        # Git metadata cache — populated lazily per file, shared across all repos
+        self.git_info_cache = GitInfoCache()
     
     def _to_relative_path(self, abs_path: Path) -> str:
         """Convert absolute path to repo-relative graph path."""
@@ -179,16 +183,19 @@ class DBRepoScanner:
         repo_path_obj = Path(repo_path)
         repo_abs_str = str(repo_path_obj.absolute())
         repo_rel_str = self._to_relative_path(repo_path_obj)
-        
-        # Get git metadata from config for this repo
+
+        # Repo config needed only for repoUrl and repoType (not git metadata)
         repo_cfg = next(
             (r for r in self.config.get('repositories', []) if r['name'] == repo_name),
             {}
         )
-        
+
+        # Branch name and repo name come from actual git logs, not config
+        git_info = self.git_info_cache.get(repo_path_obj)
+
         # Ensure Repository node exists (will be used as parent for children)
         logger.info(f"    Building tree structure for db_repo")
-        
+
         query = """
         MERGE (n:Node:Repository {path: $path})
         ON CREATE SET 
@@ -202,14 +209,14 @@ class DBRepoScanner:
         SET n.repoUrl = $repoUrl, n.branchName = $branchName
         RETURN n
         """
-        
+
         try:
             session.run(query,
                 path=repo_rel_str,
                 name=repo_path_obj.name,
-                repoName=repo_cfg.get('name', repo_name),
+                repoName=git_info['gitRepoName'] or repo_name,
                 repoUrl=repo_cfg.get('repo_url', ''),
-                branchName=repo_cfg.get('branch_name', ''),
+                branchName=git_info['gitBranchName'],
                 repoType=repo_cfg.get('type', 'db_repo')
             )
             self.created_nodes.add(repo_rel_str)
@@ -302,7 +309,7 @@ class DBRepoScanner:
             n.node_type = $node_type,
             n.created_at = datetime()
         WITH n
-        MATCH (parent:Node {{path: $parent_path}})
+        MATCH (parent:Node {path: $parent_path})
         MERGE (parent)-[:CONTAINS]->(n)
         RETURN n
         """
@@ -334,7 +341,10 @@ class DBRepoScanner:
             file_size = file_path.stat().st_size
         except:
             file_size = 0
-        
+
+        # Fetch all git metadata from actual git logs (never from config)
+        git_info = self.git_info_cache.get(file_path)
+
         file_node = IGFileNodeDef(
             path=path_str,
             name=file_path.name,
@@ -342,10 +352,14 @@ class DBRepoScanner:
             extension=file_path.suffix,
             size=file_size
         )
-        if file_path.suffix.lower() == '.sql':
-            labels = 'Node:File:SQLFile'
+
+        is_sql = file_path.suffix.lower() == '.sql'
+        if is_sql:
+            labels = 'Node:File:Resource:SqlFile'
+            file_type_set = "n.file_type = 'SqlScript',"
         else:
             labels = 'Node:File'
+            file_type_set = ''
 
         query = f"""
         MERGE (n:{labels} {{path: $path}})
@@ -354,13 +368,29 @@ class DBRepoScanner:
             n.node_type = $node_type,
             n.extension = $extension,
             n.size = $size,
-            n.created_at = datetime()
+            {file_type_set}
+            n.gitLastCommitId      = $gitLastCommitId,
+            n.gitLastCommitDate    = $gitLastCommitDate,
+            n.gitLastCommitAuthor  = $gitLastCommitAuthor,
+            n.gitLastCommitMessage = $gitLastCommitMessage,
+            n.gitRepoName          = $gitRepoName,
+            n.gitBranchName        = $gitBranchName,
+            n.gitFileExists        = true,
+            n.created_at           = datetime()
+        ON MATCH SET
+            n.gitLastCommitId      = COALESCE(n.gitLastCommitId,      $gitLastCommitId),
+            n.gitLastCommitDate    = COALESCE(n.gitLastCommitDate,    $gitLastCommitDate),
+            n.gitLastCommitAuthor  = COALESCE(n.gitLastCommitAuthor,  $gitLastCommitAuthor),
+            n.gitLastCommitMessage = COALESCE(n.gitLastCommitMessage, $gitLastCommitMessage),
+            n.gitRepoName          = COALESCE(n.gitRepoName,          $gitRepoName),
+            n.gitBranchName        = COALESCE(n.gitBranchName,        $gitBranchName),
+            n.gitFileExists        = true
         WITH n
         MATCH (parent:Node {{path: $parent_path}})
         MERGE (parent)-[:CONTAINS]->(n)
         RETURN n
         """
-        
+
         try:
             session.run(query,
                 path=file_node.path,
@@ -368,6 +398,12 @@ class DBRepoScanner:
                 node_type=file_node.node_type,
                 extension=file_node.extension,
                 size=file_node.size,
+                gitLastCommitId=git_info['gitLastCommitId'],
+                gitLastCommitDate=git_info['gitLastCommitDate'],
+                gitLastCommitAuthor=git_info['gitLastCommitAuthor'],
+                gitLastCommitMessage=git_info['gitLastCommitMessage'],
+                gitRepoName=git_info['gitRepoName'],
+                gitBranchName=git_info['gitBranchName'],
                 parent_path=parent_path
             )
         except Exception as e:
@@ -432,12 +468,8 @@ class DBRepoScanner:
         file_name = sql_file.name
         file_path_str = self._to_relative_path(sql_file)
 
-        # Look up branch name for git metadata
-        repo_cfg = next(
-            (r for r in self.config.get('repositories', []) if r.get('name') == repo_name),
-            {}
-        )
-        branch_name = repo_cfg.get('branch_name', '')
+        # Fetch git metadata from actual git logs (never from config)
+        git_info = self.git_info_cache.get(sql_file)
         
         # Read file content
         try:
@@ -508,7 +540,10 @@ class DBRepoScanner:
                     'packageName': res_node.packageName,
                     'repoFilePath': res_node.repoFilePath,
                     'repoName': res_node.repoName,
-                    'gitBranchName': branch_name,
+                    'gitLastCommitId':   git_info['gitLastCommitId'],
+                    'gitLastCommitDate': git_info['gitLastCommitDate'],
+                    'gitRepoName':       git_info['gitRepoName'],
+                    'gitBranchName':     git_info['gitBranchName'],
                 }
                 self.collected_resources.append(resource_data)
                 resources_found += 1
@@ -634,8 +669,10 @@ class DBRepoScanner:
                                       r.foundInRepo = true,
                                       r.repoName = res.repoName,
                                       r.repoFilePath = res.repoFilePath,
-                                      r.gitRepoName = res.repoName,
-                                      r.gitBranchName = res.gitBranchName,
+                                      r.gitLastCommitId   = res.gitLastCommitId,
+                                      r.gitLastCommitDate = res.gitLastCommitDate,
+                                      r.gitRepoName       = res.gitRepoName,
+                                      r.gitBranchName     = res.gitBranchName,
                                       r.gitFileExists = true,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,
@@ -651,7 +688,7 @@ class DBRepoScanner:
                         result = session.run(query_with_pkg, resources=resources_with_package)
                         count = result.single()['cnt']
                         self.stats['resources_created'] += count
-                    
+
                     # Bulk create resources WITHOUT package
                     if resources_without_package:
                         query_without_pkg = """
@@ -663,8 +700,10 @@ class DBRepoScanner:
                                       r.repoName = res.repoName,
                                       r.repoFilePath = res.repoFilePath,
                                       r.packageName = null,
-                                      r.gitRepoName = res.repoName,
-                                      r.gitBranchName = res.gitBranchName,
+                                      r.gitLastCommitId   = res.gitLastCommitId,
+                                      r.gitLastCommitDate = res.gitLastCommitDate,
+                                      r.gitRepoName       = res.gitRepoName,
+                                      r.gitBranchName     = res.gitBranchName,
                                       r.gitFileExists = true,
                                       r.created_at = datetime()
                         ON MATCH SET r.foundInRepo = true,

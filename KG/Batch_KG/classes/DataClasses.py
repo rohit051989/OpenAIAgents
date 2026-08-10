@@ -52,6 +52,9 @@ class GitMetadataNode:
     git_updated_by: Optional[str] = field(default=None)
     git_updated_at: Optional[str] = field(default=None)
     git_last_commit_id: Optional[str] = field(default=None)
+    git_last_commit_date: Optional[str] = field(default=None)
+    git_last_commit_author: Optional[str] = field(default=None)
+    git_last_commit_message: Optional[str] = field(default=None)
     git_file_exists: bool = field(default=True)
 
 

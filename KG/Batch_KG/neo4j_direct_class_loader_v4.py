@@ -1039,19 +1039,63 @@ class Neo4jLoader:
                null             AS methodFqn
         """
 
-        shell_rows = []
-        proc_rows  = []
-        with self.driver.session(database=self.info_database) as session:
-            shell_rows = [dict(r) for r in session.run(shell_query)]
-            proc_rows  = [dict(r) for r in session.run(proc_query)]
+        # ── SQL file invocations via JavaMethod -[:INVOKES {executionType:'SQL_SCRIPT'}]-> Resource ─
+        sql_inv_query = """
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(m:JavaMethod)-[rel:INVOKES]->(r:Resource)
+        WHERE r.type = 'SQL_SCRIPT' AND rel.executionType = 'SQL_SCRIPT'
+        RETURN s.name       AS stepName,
+               r.name       AS resourceName,
+               r.type       AS resourceType,
+               r.scriptPath AS scriptPath,
+               m.fqn        AS methodFqn
 
-        if not shell_rows and not proc_rows:
-            logger.info("  No shell/procedure executions found in information graph")
+        UNION
+
+        MATCH (s:Step)
+        MATCH (jc:JavaClass)
+        WHERE (s)-[:IMPLEMENTED_BY]->(jc)
+           OR (s)-[:USES_BEAN]->(:Bean)-[:IMPLEMENTS]->(jc)
+        MATCH (jc)-[:HAS_METHOD]->(entry:JavaMethod)
+        MATCH (entry)-[:CALLS*]->(m:JavaMethod)-[rel:INVOKES]->(r:Resource)
+        WHERE r.type = 'SQL_SCRIPT' AND rel.executionType = 'SQL_SCRIPT'
+        RETURN s.name       AS stepName,
+               r.name       AS resourceName,
+               r.type       AS resourceType,
+               r.scriptPath AS scriptPath,
+               m.fqn        AS methodFqn
+
+        UNION
+
+        // Dynamic steps: direct Step -[:INVOKES {executionType:'SQL_SCRIPT'}]-> Resource
+        MATCH (s:Step)-[rel:INVOKES]->(r:Resource)
+        WHERE r.type = 'SQL_SCRIPT' AND rel.executionType = 'SQL_SCRIPT'
+        RETURN s.name       AS stepName,
+               r.name       AS resourceName,
+               r.type       AS resourceType,
+               r.scriptPath AS scriptPath,
+               null         AS methodFqn
+        """
+
+        shell_rows   = []
+        proc_rows    = []
+        sql_inv_rows = []
+        with self.driver.session(database=self.info_database) as session:
+            shell_rows   = [dict(r) for r in session.run(shell_query)]
+            proc_rows    = [dict(r) for r in session.run(proc_query)]
+            sql_inv_rows = [dict(r) for r in session.run(sql_inv_query)]
+
+        if not shell_rows and not proc_rows and not sql_inv_rows:
+            logger.info("  No shell/procedure/SQL executions found in information graph")
             return
 
         logger.info(
-            f"  Found {len(shell_rows)} shell execution link(s) and "
-            f"{len(proc_rows)} procedure execution link(s) in IG"
+            f"  Found {len(shell_rows)} shell execution link(s), "
+            f"{len(proc_rows)} procedure execution link(s), and "
+            f"{len(sql_inv_rows)} SQL invocation link(s) in IG"
         )
 
         # Deduplicate by (stepName, resourceName) — UNION can produce duplicates
@@ -1064,8 +1108,9 @@ class Neo4jLoader:
                     unique.append(row)
             return unique
 
-        shell_rows = _deduplicate(shell_rows)
-        proc_rows  = _deduplicate(proc_rows)
+        shell_rows   = _deduplicate(shell_rows)
+        proc_rows    = _deduplicate(proc_rows)
+        sql_inv_rows = _deduplicate(sql_inv_rows)
 
         created_count = 0
 
@@ -1166,9 +1211,42 @@ class Neo4jLoader:
                 )
                 created_count += 1
 
+            # ── SQL file invocations: Step -[:INVOKES {executionType:'SQL_SCRIPT'}]-> Resource ─
+            for row in sql_inv_rows:
+                step_name     = row["stepName"]
+                resource_name = row["resourceName"]
+                script_path   = row.get("scriptPath") or resource_name
+
+                resource_id = (
+                    "RES_SQL_"
+                    + resource_name.replace(".", "_").replace("-", "_").upper()
+                )
+
+                session.run(
+                    """
+                    MERGE (r:Resource {name: $name, type: 'SQL_SCRIPT'})
+                    ON CREATE SET r.id         = $resourceId,
+                                  r.enabled    = true,
+                                  r.scriptPath = $scriptPath
+                    ON MATCH SET  r.scriptPath = COALESCE(r.scriptPath, $scriptPath)
+                    """,
+                    name=resource_name, resourceId=resource_id, scriptPath=script_path,
+                )
+
+                session.run(
+                    """
+                    MATCH (s:Step     {name: $stepName})
+                    MATCH (r:Resource {name: $resourceName, type: 'SQL_SCRIPT'})
+                    MERGE (s)-[rel:INVOKES {resourceName: $resourceName, executionType: 'SQL_SCRIPT'}]->(r)
+                    SET rel.confidence = 'HIGH'
+                    """,
+                    stepName=step_name, resourceName=resource_name,
+                )
+                created_count += 1
+
         logger.info(
             f"   Created {created_count} direct Step->Resource link(s) "
-            f"(shell EXECUTES + procedure INVOKES) in knowledge graph"
+            f"(shell EXECUTES + procedure/SQL INVOKES) in knowledge graph"
         )
 
     def _copy_sql_resource_invokes_from_info_graph(self):

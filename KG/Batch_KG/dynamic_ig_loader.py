@@ -439,7 +439,7 @@ class DynamicIGLoader:
         self, session, filename: str, common_key: Optional[str]
     ):
         """
-        Search the IG for a Resource or SqlScript node whose name matches
+        Search the IG for a Resource or SqlFile node whose name matches
         *filename* AND whose stored path contains *common_key*.
         Returns the single() record if found, else None.
         """

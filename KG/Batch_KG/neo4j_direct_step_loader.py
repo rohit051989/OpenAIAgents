@@ -474,8 +474,12 @@ def generate_cypher(job: JobDef) -> str:
 
     # Job - Create Job node with source file path
     source_file = job.source_file.replace("\\", "\\\\").replace("'", "\\'")  # Escape for Cypher  # Escape for Cypher
-    git_repo_name   = (job.git_repo_name   or '').replace("'", "\\'") 
-    git_branch_name = (job.git_branch_name or '').replace("'", "\\'")
+    git_repo_name    = (job.git_repo_name            or '').replace("'", "\\'")
+    git_branch_name  = (job.git_branch_name          or '').replace("'", "\\'")
+    git_commit_id    = (job.git_last_commit_id       or '').replace("'", "\\'")
+    git_commit_date  = (job.git_last_commit_date     or '').replace("'", "\\'")
+    git_commit_auth  = (job.git_last_commit_author   or '').replace("'", "\\'")
+    git_commit_msg   = (job.git_last_commit_message  or '').replace("'", "\\'")
     #lines.append(f"MERGE (j:Job {{name: '{job.name}'}}) SET j.sourceFile = '{source_file}';")
     lines.append(f"""MERGE (j:Job {{id: '{job.name}', 
                  name: '{job.name}', 
@@ -483,6 +487,10 @@ def generate_cypher(job: JobDef) -> str:
                  ON CREATE SET j.createdAt = datetime(), j.enabled = true,
                                j.gitRepoName = '{git_repo_name}',
                                j.gitBranchName = '{git_branch_name}',
+                               j.gitLastCommitId = '{git_commit_id}',
+                               j.gitLastCommitDate = '{git_commit_date}',
+                               j.gitLastCommitAuthor = '{git_commit_auth}',
+                               j.gitLastCommitMessage = '{git_commit_msg}',
                                j.gitFileExists = true,
                                j.type = 'spring_xml_config_job'
                  ON MATCH SET j.lastSeenAt = datetime(),
@@ -497,8 +505,12 @@ def generate_cypher(job: JobDef) -> str:
             reader_src = step.reader_source_path.replace("\\", "\\\\").replace("'", "\\'")
             processor_src = step.processor_source_path.replace("\\", "\\\\").replace("'", "\\'")
             writer_src = step.writer_source_path.replace("\\", "\\\\").replace("'", "\\'")
-            step_git_repo   = (step.git_repo_name   or '').replace("'", "\\'")
-            step_git_branch = (step.git_branch_name or '').replace("'", "\\'")
+            step_git_repo   = (step.git_repo_name           or '').replace("'", "\\'")
+            step_git_branch = (step.git_branch_name         or '').replace("'", "\\'")
+            step_git_cid    = (step.git_last_commit_id      or '').replace("'", "\\'")
+            step_git_cdate  = (step.git_last_commit_date    or '').replace("'", "\\'")
+            step_git_cauth  = (step.git_last_commit_author  or '').replace("'", "\\'")
+            step_git_cmsg   = (step.git_last_commit_message or '').replace("'", "\\'")
 
             lines.append(
                 "MERGE (s:Step {name: '%s', stepKind: '%s', "
@@ -506,25 +518,35 @@ def generate_cypher(job: JobDef) -> str:
                 "processorBean: '%s', processorClass: '%s', processorSourcePath: '%s', "
                 "writerBean: '%s', writerClass: '%s', writerSourcePath: '%s'})"
                 " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s',"
+                " s.gitLastCommitId = '%s', s.gitLastCommitDate = '%s',"
+                " s.gitLastCommitAuthor = '%s', s.gitLastCommitMessage = '%s',"
                 " s.gitFileExists = true;" %
                 (step.name, step.step_kind,
                  step.reader_bean, step.reader_class, reader_src,
                  step.processor_bean, step.processor_class, processor_src,
                  step.writer_bean, step.writer_class, writer_src,
-                 step_git_repo, step_git_branch)
+                 step_git_repo, step_git_branch,
+                 step_git_cid, step_git_cdate, step_git_cauth, step_git_cmsg)
             )
         else:
             # For tasklet-based steps
             # Escape path for Cypher
             class_src = step.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
-            step_git_repo   = (step.git_repo_name   or '').replace("'", "\\'")
-            step_git_branch = (step.git_branch_name or '').replace("'", "\\'")
+            step_git_repo   = (step.git_repo_name           or '').replace("'", "\\'")
+            step_git_branch = (step.git_branch_name         or '').replace("'", "\\'")
+            step_git_cid    = (step.git_last_commit_id      or '').replace("'", "\\'")
+            step_git_cdate  = (step.git_last_commit_date    or '').replace("'", "\\'")
+            step_git_cauth  = (step.git_last_commit_author  or '').replace("'", "\\'")
+            step_git_cmsg   = (step.git_last_commit_message or '').replace("'", "\\'")
             lines.append(
                 "MERGE (s:Step {name: '%s', stepKind: '%s', implBean: '%s', className: '%s', path: '%s'})"
                 " ON CREATE SET s.gitRepoName = '%s', s.gitBranchName = '%s',"
+                " s.gitLastCommitId = '%s', s.gitLastCommitDate = '%s',"
+                " s.gitLastCommitAuthor = '%s', s.gitLastCommitMessage = '%s',"
                 " s.gitFileExists = true;" %
                 (step.name, step.step_kind, step.impl_bean, step.class_name, class_src,
-                 step_git_repo, step_git_branch)
+                 step_git_repo, step_git_branch,
+                 step_git_cid, step_git_cdate, step_git_cauth, step_git_cmsg)
             )
 
     # Blocks
@@ -538,26 +560,42 @@ def generate_cypher(job: JobDef) -> str:
     for dec in job.decisions.values():
         # Escape path for Cypher
         dec_src = dec.class_source_path.replace("\\", "\\\\").replace("'", "\\'")
-        dec_git_repo   = (dec.git_repo_name   or '').replace("'", "\\'")
-        dec_git_branch = (dec.git_branch_name or '').replace("'", "\\'")
+        dec_git_repo   = (dec.git_repo_name           or '').replace("'", "\\'")
+        dec_git_branch = (dec.git_branch_name         or '').replace("'", "\\'")
+        dec_git_cid    = (dec.git_last_commit_id      or '').replace("'", "\\'")
+        dec_git_cdate  = (dec.git_last_commit_date    or '').replace("'", "\\'")
+        dec_git_cauth  = (dec.git_last_commit_author  or '').replace("'", "\\'")
+        dec_git_cmsg   = (dec.git_last_commit_message or '').replace("'", "\\'")
         lines.append(
             "MERGE (d:Decision {name: '%s', deciderBean: '%s', className: '%s', path: '%s'})"
-            " ON CREATE SET d.gitRepoName = '%s', d.gitBranchName = '%s', d.gitFileExists = true;" %
+            " ON CREATE SET d.gitRepoName = '%s', d.gitBranchName = '%s',"
+            " d.gitLastCommitId = '%s', d.gitLastCommitDate = '%s',"
+            " d.gitLastCommitAuthor = '%s', d.gitLastCommitMessage = '%s',"
+            " d.gitFileExists = true;" %
             (dec.name, dec.decider_bean, dec.class_name, dec_src,
-             dec_git_repo, dec_git_branch)
+             dec_git_repo, dec_git_branch,
+             dec_git_cid, dec_git_cdate, dec_git_cauth, dec_git_cmsg)
         )
 
     # Listeners
     for listener in job.listeners.values():
         # Escape path for Cypher
         listener_src = listener.source_path.replace("\\", "\\\\").replace("'", "\\'")
-        list_git_repo   = (listener.git_repo_name   or '').replace("'", "\\'")
-        list_git_branch = (listener.git_branch_name or '').replace("'", "\\'")
+        list_git_repo   = (listener.git_repo_name           or '').replace("'", "\\'")
+        list_git_branch = (listener.git_branch_name         or '').replace("'", "\\'")
+        list_git_cid    = (listener.git_last_commit_id      or '').replace("'", "\\'")
+        list_git_cdate  = (listener.git_last_commit_date    or '').replace("'", "\\'")
+        list_git_cauth  = (listener.git_last_commit_author  or '').replace("'", "\\'")
+        list_git_cmsg   = (listener.git_last_commit_message or '').replace("'", "\\'")
         lines.append(
             "MERGE (l:Listener {name: '%s', scope: '%s', implBean: '%s', path: '%s'})"
-            " ON CREATE SET l.gitRepoName = '%s', l.gitBranchName = '%s', l.gitFileExists = true;" %
+            " ON CREATE SET l.gitRepoName = '%s', l.gitBranchName = '%s',"
+            " l.gitLastCommitId = '%s', l.gitLastCommitDate = '%s',"
+            " l.gitLastCommitAuthor = '%s', l.gitLastCommitMessage = '%s',"
+            " l.gitFileExists = true;" %
             (listener.name, listener.scope, listener.impl_bean, listener_src,
-             list_git_repo, list_git_branch)
+             list_git_repo, list_git_branch,
+             list_git_cid, list_git_cdate, list_git_cauth, list_git_cmsg)
         )
 
     # Job CONTAINS
