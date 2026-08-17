@@ -916,13 +916,24 @@ class Neo4jLoader:
                     # Just a script name without confidence
                     shell_execs_list.append((step_name, parts[0].strip(), 'HIGH'))
 
-            # ── SQL File Invocations: ["file.sql", ...] ───────────────────────
+            # ── SQL File Invocations: ["RESOLVED:file.sql:HIGH", "file.sql", ...] ─
             for sql_file in step['sqlInvocations']:
                 if should_skip(sql_file):
                     continue
                 sql_file = strip_resolved_prefix(sql_file)
-                if sql_file.strip():
-                    sql_invocs_list.append((step_name, sql_file.strip()))
+                # Format could be "file.sql:HIGH" or just "file.sql"
+                parts = sql_file.split(':')
+                if len(parts) >= 2:
+                    # Last part might be confidence (HIGH/MEDIUM/LOW)
+                    if parts[-1].upper() in ['HIGH', 'MEDIUM', 'LOW']:
+                        # Join all parts except the last one (handles paths with colons)
+                        file_name = ':'.join(parts[:-1]).strip()
+                    else:
+                        file_name = sql_file.strip()
+                else:
+                    file_name = sql_file.strip()
+                if file_name:
+                    sql_invocs_list.append((step_name, file_name))
 
         # ── Deduplicate ───────────────────────────────────────────────────────
         db_ops_list      = list(set(db_ops_list))
