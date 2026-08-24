@@ -1,0 +1,209 @@
+# DB State Graph Integration Configuration
+# ==========================================
+# This configuration controls how data is pulled from the external dbstategraph
+# and integrated into the Knowledge Graph.
+#
+# The dbstategraph contains detailed information about:
+# - SQL file contents (statements, operations)
+# - Stored procedure logic (table access, calls)
+# - Database object relationships
+#
+# Integration is done in three phases:
+# 1. SCAN: Find Resources (SQL files, procedures) in the KG
+# 2. QUERY: Fetch detailed data from dbstategraph
+# 3. STORE: Enrich the KG with the fetched data
+
+# Enable/disable the integration
+enabled: true
+
+# Database configuration
+# The dbstategraph can be on the same Neo4j server (different database)
+# or on a separate server (requires separate connection config)
+dbstate_database: "dbstategraph"
+
+# If dbstategraph is on a different server, uncomment and configure:
+# dbstate_connection:
+#   uri: "bolt://dbstate-server:7687"
+#   user: "neo4j"
+#   password: "password"
+
+# Query Templates
+# ===============
+# These Cypher queries are run against the dbstategraph to fetch resource details.
+# Customize these based on your dbstategraph schema.
+#
+# Available parameters (passed automatically):
+#   $name    - Resource name
+#   $schema  - Schema name (if configured in matching)
+#   $package - Package name (if configured in matching)
+#   $path    - File path (for SQL files, if configured in matching)
+
+queries:
+  # Query for PROCEDURE/FUNCTION resources
+  # Customize this based on your dbstategraph procedure model
+  procedure: |
+    MATCH (p:Procedure)
+    WHERE p.name = $name
+    OPTIONAL MATCH (p)-[:ACCESSES]->(t:Table)
+    OPTIONAL MATCH (p)-[:CALLS]->(cp:Procedure)
+    OPTIONAL MATCH (p)-[:USES]->(v:Variable)
+    OPTIONAL MATCH (p)-[:EXECUTES]->(s:Statement)
+    RETURN p.name AS name,
+           p.schema AS schema,
+           p.package AS package,
+           p.type AS type,
+           p.language AS language,
+           p.lineCount AS lineCount,
+           p.complexity AS complexity,
+           collect(DISTINCT t.name) AS tables_accessed,
+           collect(DISTINCT {name: t.name, operation: type(p)-[:ACCESSES]->(t)}) AS table_operations,
+           collect(DISTINCT cp.name) AS procedures_called,
+           collect(DISTINCT v.name) AS variables_used,
+           collect(DISTINCT {
+               type: s.type,
+               operation: s.operation,
+               lineNumber: s.lineNumber
+           }) AS statements
+  
+  # Query for SQL_SCRIPT resources
+  # Customize this based on your dbstategraph SQL file model
+  sql_file: |
+    MATCH (sf:SqlFile)
+    WHERE sf.name = $name OR sf.fileName = $name
+    OPTIONAL MATCH (sf)-[:CONTAINS]->(stmt:Statement)
+    OPTIONAL MATCH (stmt)-[:REFERENCES]->(t:Table)
+    OPTIONAL MATCH (stmt)-[:CALLS]->(p:Procedure)
+    RETURN sf.name AS name,
+           sf.path AS path,
+           sf.fileType AS fileType,
+           sf.encoding AS encoding,
+           sf.lineCount AS lineCount,
+           collect(DISTINCT {
+               type: stmt.type,
+               operation: stmt.operation,
+               lineNumber: stmt.lineNumber,
+               tables: collect(DISTINCT t.name),
+               procedures: collect(DISTINCT p.name)
+           }) AS statements,
+           collect(DISTINCT t.name) AS all_tables,
+           collect(DISTINCT p.name) AS all_procedures
+  
+  # Additional query templates can be added here
+  # For example, a query for TABLE resources:
+  # table: |
+  #   MATCH (t:Table {name: $name})
+  #   OPTIONAL MATCH (t)<-[:REFERENCES]-(stmt:Statement)
+  #   RETURN t.name AS name, ...
+
+# Matching Configuration
+# =====================
+# Controls how resources from KG are matched to entities in dbstategraph
+
+matching:
+  # Fields to use when matching procedures
+  # Options: name, schema, package
+  # Note: More fields = more precise matching but fewer matches
+  procedure_match_fields:
+    - name
+    # - schema   # Uncomment to require schema match
+    # - package  # Uncomment to require package match
+  
+  # Fields to use when matching SQL files
+  # Options: name, path
+  sql_file_match_fields:
+    - name
+    # - path    # Uncomment for exact path matching
+  
+  # Case sensitivity for name matching
+  # If false, queries should use toLower() for comparison
+  case_sensitive: false
+  
+  # Fuzzy matching options (future enhancement)
+  # fuzzy_matching:
+  #   enabled: false
+  #   threshold: 0.8  # Similarity threshold (0-1)
+
+# Error Handling
+# ==============
+error_handling:
+  # Continue processing if a resource is not found in dbstategraph
+  continue_on_not_found: true
+  
+  # Continue processing if a query fails (e.g., connection issue)
+  continue_on_query_error: true
+  
+  # Log level for "not found" resources
+  # true = WARNING, false = ERROR
+  log_not_found_as_warning: true
+  
+  # Maximum consecutive errors before aborting
+  max_consecutive_errors: 10
+  
+  # Retry configuration for transient failures
+  retry:
+    enabled: true
+    max_attempts: 3
+    delay_seconds: 1
+
+# Performance Configuration
+# =========================
+performance:
+  # Batch size for queries (number of resources per batch)
+  batch_size: 50
+  
+  # Connection pool size
+  pool_size: 10
+  
+  # Query timeout in seconds
+  query_timeout: 30
+  
+  # Progress logging interval
+  log_interval: 10  # Log every N resources
+
+# Storage Configuration (Part 3)
+# ==============================
+# This section configures how data is stored back into the KG
+# Currently placeholder - will be expanded based on data model design
+
+storage:
+  # Enable/disable storage phase
+  enabled: true
+  
+  # Storage mode: "enrich" or "create"
+  # - enrich: Update existing Resource nodes with new properties
+  # - create: Create new nodes and relationships
+  mode: "enrich"
+  
+  # Properties to add to Resource nodes from dbstategraph data
+  enrich_properties:
+    - tables_accessed
+    - procedures_called
+    - statement_count
+    - complexity
+  
+  # New relationships to create (future implementation)
+  # create_relationships:
+  #   - type: ACCESSES
+  #     from: Resource
+  #     to: Table
+  #   - type: CALLS
+  #     from: Resource
+  #     to: Procedure
+  
+  # Transaction batch size for storage operations
+  transaction_batch_size: 100
+
+# Logging Configuration
+# =====================
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+  
+  # Log detailed query results
+  log_query_results: false
+  
+  # Log resource details during scan
+  log_scan_details: true
+  
+  # Output file for integration report
+  report_file: "log/dbstate_integration_report.json"

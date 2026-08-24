@@ -246,3 +246,12 @@ dynamic_jobs:
   dynamic_tasklet_bean_id:     "dynamicTasklet"
   dynamic_tasklet_path:        "dynamic/DynamicTasklet.java"
   dynamic_spring_config_path:  "dynamic/dynamic-spring-config.xml"
+
+# DB State Graph Integration
+# ==========================
+# Integrates data from an external dbstategraph into the KG.
+# Full configuration is in: config/dbstate_graph_config.yaml
+dbstate_graph:
+  enabled: true
+  config_file: "config/dbstate_graph_config.yaml"
+

@@ -2749,6 +2749,23 @@ def main():
             for node_type, count in stats.items():
                 logger.info(f"  {node_type}: {count}")
 
+            # Step 5: DB State Graph Integration (optional)
+            logger.info("\n🔗 Step 5: DB State Graph Integration...")
+            dbstate_enabled = cfg.get('dbstate_graph', {}).get('enabled', False)
+            if dbstate_enabled:
+                try:
+                    from dbstate_graph_integrator import DBStateGraphIntegrator
+                    dbstate_integrator = DBStateGraphIntegrator(kg_config_path=config_path)
+                    dbstate_integrator.run()
+                    dbstate_integrator.close()
+                    logger.info("    DB State Graph integration completed")
+                except FileNotFoundError as fnf_err:
+                    logger.warning(f"    DB State Graph integration skipped: {fnf_err}")
+                except Exception as dbstate_err:
+                    logger.warning(f"    DB State Graph integration failed (non-fatal): {dbstate_err}")
+            else:
+                logger.info("    Skipped (not enabled in configuration)")
+
             logger.info("\n" + "=" * 70)
             logger.info(" LOADING COMPLETE!")
             logger.info("=" * 70)
