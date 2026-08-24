@@ -679,7 +679,7 @@ class DBStateGraphIntegrator:
                             """
                             MATCH (proc:Resource   {name: $procName,   type: 'PROCEDURE'})
                             MATCH (called:Resource {name: $calledName, type: $calledType})
-                            MERGE (proc)-[rel:DB_OPERATION {operationType: 'CALLS', tableName: $calledName}]->(called)
+                            MERGE (proc)-[rel:DB_OPERATION {operationType: 'CALLS', procedureName: $calledName}]->(called)
                             SET rel.confidence = 'HIGH'
                             """,
                             procName=proc_name, calledName=called_name, calledType=called_type,
@@ -726,6 +726,30 @@ class DBStateGraphIntegrator:
                             logger.debug(f"    '{proc_name}' -[:DB_OPERATION({op_type})]-> TABLE '{table_name}'")
                         except Exception as e:
                             logger.error(f"    Failed to write {op_type} '{proc_name}'->'{table_name}': {e}")
+
+                # 4c: stamp distinct-count summary properties directly on the procedure node
+                try:
+                    session.run(
+                        """
+                        MATCH (proc:Resource {name: $procName, type: 'PROCEDURE'})
+                        OPTIONAL MATCH (proc)-[r:DB_OPERATION]->(t)
+                        WITH proc,
+                             count(CASE WHEN r.operationType = 'CALLS'  THEN 1 END) AS cCalls,
+                             count(CASE WHEN r.operationType = 'READ'   THEN 1 END) AS cRead,
+                             count(CASE WHEN r.operationType = 'WRITE'  THEN 1 END) AS cWrite,
+                             count(CASE WHEN r.operationType = 'UPDATE' THEN 1 END) AS cUpdate,
+                             count(CASE WHEN r.operationType = 'DELETE' THEN 1 END) AS cDelete
+                        SET proc.dbopDistinctProcedureCalls  = cCalls,
+                            proc.dbopDistinctRead   = cRead,
+                            proc.dbopDistinctWrite  = cWrite,
+                            proc.dbopDistinctUpdate = cUpdate,
+                            proc.dbopDistinctDelete = cDelete
+                        """,
+                        procName=proc_name,
+                    )
+                    logger.debug(f"    Set summary counts on '{proc_name}'")
+                except Exception as e:
+                    logger.error(f"    Failed to set summary counts for '{proc_name}': {e}")
 
         logger.info("")
         logger.info("  Storage Summary:")
