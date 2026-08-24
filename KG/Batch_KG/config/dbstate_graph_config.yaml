@@ -63,15 +63,27 @@ queries:
     OPTIONAL MATCH (sf)-[:CALLS]->(p:Procedure)
     RETURN sf.name AS name,
            sf.path AS path,
-           sf.fileType AS fileType,
+           sf.type AS fileType,
            collect(DISTINCT {name: p.name, owner: p.owner, type: p.type}) AS procedures_called
   
-  # Additional query templates can be added here
-  # For example, a query for TABLE resources:
-  # table: |
-  #   MATCH (t:Table {name: $name})
-  #   OPTIONAL MATCH (t)<-[:REFERENCES]-(stmt:Statement)
-  #   RETURN t.name AS name, ...
+  # Recursive inner calls from a procedure (up to 15 hops)
+  procedure_inner_calls: |
+    MATCH (r:Procedure)
+    WHERE toLower(r.name) = toLower($name)
+    OPTIONAL MATCH (r)-[:CALLS*1..15]->(called:Resource)
+    RETURN DISTINCT called.name     AS calledName,
+                    labels(called)[0] AS nodeLabel,
+                    called.owner    AS owner
+
+  # Table READ/WRITE/UPDATE/DELETE operations executed by a procedure
+  procedure_table_ops: |
+    MATCH (r:Resource)
+    WHERE toLower(r.name) = toLower($name)
+    OPTIONAL MATCH (r)-[:HAS_BLOCK]->(:Block)
+                     -[:EXECUTES]->(:SqlStatement)-[rel]->(t:Table)
+    WHERE type(rel) IN ['READS', 'WRITES', 'UPDATES', 'DELETES']
+    RETURN type(rel) AS operation,
+           collect(DISTINCT {name: t.name, schema: t.owner}) AS tables
 
 # Matching Configuration
 # =====================

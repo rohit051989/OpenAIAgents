@@ -38,6 +38,14 @@ logger = setup_logging(__file__)
 # Default path for dbstate graph config file
 DEFAULT_DBSTATE_CONFIG_PATH = "config/dbstate_graph_config.yaml"
 
+# Maps dbstategraph relationship types to KG operationType values
+_OP_MAP = {'READS': 'READ', 'WRITES': 'WRITE', 'UPDATES': 'UPDATE', 'DELETES': 'DELETE'}
+
+
+def _label_to_type(label: str) -> str:
+    """Map a dbstategraph node label to a KG Resource type."""
+    return {'Procedure': 'PROCEDURE', 'Function': 'FUNCTION'}.get(label, 'PROCEDURE') if label else 'PROCEDURE'
+
 
 # =============================================================================
 # DATA CLASSES
@@ -328,9 +336,13 @@ class DBStateGraphIntegrator:
             error_handling = self.dbstate_config.get('error_handling', {})
             if not error_handling.get('continue_on_query_error', True):
                 raise
-        
+
+        # For found procedures, also fetch inner calls and table operations
+        if query_type == 'procedure' and result.found:
+            self._enrich_procedure_with_details(result, resource, params)
+
         return result
-    
+
     def _build_query_params(self, resource: ResourceInfo, query_type: str) -> Dict[str, Any]:
         """Build query parameters based on resource and matching configuration."""
         params = {}
@@ -383,10 +395,46 @@ class DBStateGraphIntegrator:
                         aggregated[key] = [aggregated[key]] + value
         
         return aggregated
-    
+
+    def _enrich_procedure_with_details(
+        self, result: DBStateQueryResult, resource: ResourceInfo, params: Dict
+    ) -> None:
+        """Fetch inner CALLS and table operations from dbstategraph; adds to result.data."""
+        inner_calls_query = self.dbstate_config['queries'].get('procedure_inner_calls')
+        table_ops_query   = self.dbstate_config['queries'].get('procedure_table_ops')
+
+        with self.driver.session(database=self.dbstate_database) as session:
+            if inner_calls_query:
+                try:
+                    inner_records = list(session.run(inner_calls_query, params))
+                    result.data['inner_calls'] = [
+                        {
+                            'name':  r['calledName'],
+                            'type':  _label_to_type(r['nodeLabel']),
+                            'owner': r['owner'] or '',
+                        }
+                        for r in inner_records
+                        if r['calledName']  # filter nulls from OPTIONAL MATCH
+                    ]
+                except Exception as e:
+                    logger.warning(f"  ⚠️  Failed to fetch inner calls for '{resource.name}': {e}")
+                    result.data['inner_calls'] = []
+
+            if table_ops_query:
+                try:
+                    op_records = list(session.run(table_ops_query, params))
+                    result.data['table_operations'] = [
+                        {'operation': r['operation'], 'tables': list(r['tables'] or [])}
+                        for r in op_records
+                        if r['operation']  # filter nulls from OPTIONAL MATCH
+                    ]
+                except Exception as e:
+                    logger.warning(f"  ⚠️  Failed to fetch table ops for '{resource.name}': {e}")
+                    result.data['table_operations'] = []
+
     def query_all_resources(
-        self, 
-        procedures: List[ResourceInfo], 
+        self,
+        procedures: List[ResourceInfo],
         sql_files: List[ResourceInfo]
     ) -> Dict[str, List[DBStateQueryResult]]:
         """
@@ -493,6 +541,8 @@ class DBStateGraphIntegrator:
             'procedures_extracted_from_sql_files': 0,
             'step_invokes_procedure_created': 0,
             'sql_invokes_procedure_created': 0,
+            'procedure_calls_created': 0,
+            'table_db_ops_created': 0,
             'skipped_not_found': 0,
             'skipped_error': 0,
         }
@@ -593,11 +643,97 @@ class DBStateGraphIntegrator:
                     stats['sql_invokes_procedure_created'] += 1
                     logger.debug(f"    Resource '{sql_name}' -[:INVOKES]-> '{proc_name}'")
 
+        # Work 4: Procedure -[:DB_OPERATION]-> Procedure/Function/Table
+        logger.info("  Processing procedure DB operations (inner calls + table operations)...")
+        with self.driver.session(database=self.kg_database) as session:
+            for result in query_results.get('procedures', []):
+                if not result.query_success or not result.found:
+                    continue
+
+                proc_name = result.resource_name
+
+                # 4a: Procedure -[:DB_OPERATION {operationType:'CALLS'}]-> Procedure/Function
+                for call_info in result.data.get('inner_calls', []):
+                    called_name = call_info.get('name', '')
+                    if not called_name:
+                        continue
+                    called_type = call_info.get('type', 'PROCEDURE')
+                    schema_name = call_info.get('owner', '') or ''
+                    resource_id = (
+                        f"RESOURCE_{called_type}_{schema_name}_{called_name}"
+                        .replace(' ', '_').upper()
+                    )
+                    try:
+                        session.run(
+                            """
+                            MERGE (r:Resource {name: $name, type: $rtype})
+                            ON CREATE SET r.id         = $resourceId,
+                                          r.enabled    = true,
+                                          r.schemaName = $schemaName
+                            ON MATCH SET  r.schemaName = COALESCE(r.schemaName, $schemaName)
+                            """,
+                            name=called_name, rtype=called_type,
+                            resourceId=resource_id, schemaName=schema_name,
+                        )
+                        session.run(
+                            """
+                            MATCH (proc:Resource   {name: $procName,   type: 'PROCEDURE'})
+                            MATCH (called:Resource {name: $calledName, type: $calledType})
+                            MERGE (proc)-[rel:DB_OPERATION {operationType: 'CALLS', tableName: $calledName}]->(called)
+                            SET rel.confidence = 'HIGH'
+                            """,
+                            procName=proc_name, calledName=called_name, calledType=called_type,
+                        )
+                        stats['procedure_calls_created'] += 1
+                        logger.debug(f"    '{proc_name}' -[:DB_OPERATION(CALLS)]-> '{called_name}'")
+                    except Exception as e:
+                        logger.error(f"    Failed to write CALLS '{proc_name}'->'{called_name}': {e}")
+
+                # 4b: Procedure -[:DB_OPERATION {operationType:READ|WRITE|...}]-> Table
+                for op_data in result.data.get('table_operations', []):
+                    raw_op  = op_data.get('operation', '')
+                    op_type = _OP_MAP.get(raw_op, raw_op)  # READS->READ etc.
+                    for table_info in op_data.get('tables', []):
+                        table_name  = table_info.get('name', '')   if isinstance(table_info, dict) else str(table_info)
+                        schema_name = table_info.get('schema', '') if isinstance(table_info, dict) else ''
+                        if not table_name:
+                            continue
+                        table_id = (
+                            f"RESOURCE_TABLE_{schema_name}_{table_name}"
+                            .replace(' ', '_').upper()
+                        )
+                        try:
+                            session.run(
+                                """
+                                MERGE (r:Resource {name: $name, type: 'TABLE'})
+                                ON CREATE SET r.id         = $resourceId,
+                                              r.enabled    = true,
+                                              r.schemaName = $schemaName
+                                ON MATCH SET  r.schemaName = COALESCE(r.schemaName, $schemaName)
+                                """,
+                                name=table_name, resourceId=table_id, schemaName=schema_name,
+                            )
+                            session.run(
+                                """
+                                MATCH (proc:Resource {name: $procName,  type: 'PROCEDURE'})
+                                MATCH (tbl:Resource  {name: $tableName, type: 'TABLE'})
+                                MERGE (proc)-[rel:DB_OPERATION {operationType: $opType, tableName: $tableName}]->(tbl)
+                                SET rel.confidence = 'HIGH'
+                                """,
+                                procName=proc_name, tableName=table_name, opType=op_type,
+                            )
+                            stats['table_db_ops_created'] += 1
+                            logger.debug(f"    '{proc_name}' -[:DB_OPERATION({op_type})]-> TABLE '{table_name}'")
+                        except Exception as e:
+                            logger.error(f"    Failed to write {op_type} '{proc_name}'->'{table_name}': {e}")
+
         logger.info("")
         logger.info("  Storage Summary:")
         logger.info(f"    Procedures extracted from SQL files:  {stats['procedures_extracted_from_sql_files']}")
         logger.info(f"    Step -[:INVOKES]-> Procedure created: {stats['step_invokes_procedure_created']}")
         logger.info(f"    SQL  -[:INVOKES]-> Procedure created: {stats['sql_invokes_procedure_created']}")
+        logger.info(f"    Procedure -[:DB_OPERATION(CALLS)]:    {stats['procedure_calls_created']}")
+        logger.info(f"    Procedure -[:DB_OPERATION(Table)]:    {stats['table_db_ops_created']}")
         logger.info(f"    Skipped (not found):                  {stats['skipped_not_found']}")
         logger.info(f"    Skipped (errors):                     {stats['skipped_error']}")
         logger.info("")
