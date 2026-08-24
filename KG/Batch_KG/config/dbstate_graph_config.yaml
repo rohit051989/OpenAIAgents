@@ -43,50 +43,28 @@ queries:
   # Customize this based on your dbstategraph procedure model
   procedure: |
     MATCH (p:Procedure)
-    WHERE p.name = $name
+    WHERE toLower(p.name) = toLower($name)
     OPTIONAL MATCH (p)-[:ACCESSES]->(t:Table)
     OPTIONAL MATCH (p)-[:CALLS]->(cp:Procedure)
     OPTIONAL MATCH (p)-[:USES]->(v:Variable)
     OPTIONAL MATCH (p)-[:EXECUTES]->(s:Statement)
     RETURN p.name AS name,
-           p.schema AS schema,
-           p.package AS package,
+           p.owner AS package,
            p.type AS type,
-           p.language AS language,
-           p.lineCount AS lineCount,
-           p.complexity AS complexity,
            collect(DISTINCT t.name) AS tables_accessed,
-           collect(DISTINCT {name: t.name, operation: type(p)-[:ACCESSES]->(t)}) AS table_operations,
            collect(DISTINCT cp.name) AS procedures_called,
-           collect(DISTINCT v.name) AS variables_used,
-           collect(DISTINCT {
-               type: s.type,
-               operation: s.operation,
-               lineNumber: s.lineNumber
-           }) AS statements
-  
+           collect(DISTINCT v.name) AS variables_used
+           
   # Query for SQL_SCRIPT resources
   # Customize this based on your dbstategraph SQL file model
   sql_file: |
     MATCH (sf:SqlFile)
-    WHERE sf.name = $name OR sf.fileName = $name
-    OPTIONAL MATCH (sf)-[:CONTAINS]->(stmt:Statement)
-    OPTIONAL MATCH (stmt)-[:REFERENCES]->(t:Table)
-    OPTIONAL MATCH (stmt)-[:CALLS]->(p:Procedure)
+    WHERE toLower(sf.name) = toLower($name)
+    OPTIONAL MATCH (sf)-[:CALLS]->(p:Procedure)
     RETURN sf.name AS name,
            sf.path AS path,
            sf.fileType AS fileType,
-           sf.encoding AS encoding,
-           sf.lineCount AS lineCount,
-           collect(DISTINCT {
-               type: stmt.type,
-               operation: stmt.operation,
-               lineNumber: stmt.lineNumber,
-               tables: collect(DISTINCT t.name),
-               procedures: collect(DISTINCT p.name)
-           }) AS statements,
-           collect(DISTINCT t.name) AS all_tables,
-           collect(DISTINCT p.name) AS all_procedures
+           collect(DISTINCT {name: p.name, owner: p.owner, type: p.type}) AS procedures_called
   
   # Additional query templates can be added here
   # For example, a query for TABLE resources:

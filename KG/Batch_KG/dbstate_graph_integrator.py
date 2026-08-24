@@ -47,13 +47,14 @@ DEFAULT_DBSTATE_CONFIG_PATH = "config/dbstate_graph_config.yaml"
 class ResourceInfo:
     """Information about a Resource found in the KG."""
     name: str
-    resource_type: str          # PROCEDURE, FUNCTION, SQL_SCRIPT
+    resource_type: str = ""         # PROCEDURE, FUNCTION, SQL_SCRIPT
     schema_name: str = ""
     package_name: str = ""
     path: str = ""
     extension: str = ""
     repo_name: str = ""
     repo_file_path: str = ""
+    step_names: List[str] = field(default_factory=list)  # Steps that INVOKES this resource (SQL_SCRIPT only)
 
 
 @dataclass
@@ -212,26 +213,15 @@ class DBStateGraphIntegrator:
             RETURN r.name AS name,
                    r.type AS type,
                    coalesce(r.schemaName, '') AS schemaName,
-                   coalesce(r.packageName, '') AS packageName,
-                   coalesce(r.path, '') AS path,
-                   coalesce(r.extension, '') AS extension,
-                   coalesce(r.repoName, '') AS repoName,
-                   coalesce(r.repoFilePath, '') AS repoFilePath
+                   coalesce(r.packageName, '') AS packageName
         """
         
-        # Query for SQL_SCRIPT resources (by type or extension)
+        # Query for SQL_SCRIPT resources and the Steps that invoke them
         sql_query = """
             MATCH (r:Resource)
-            WHERE r.type = 'SQL_SCRIPT' 
-               OR r.extension IN ['.sql', '.ddl']
-            RETURN r.name AS name,
-                   coalesce(r.type, 'SQL_FILE') AS type,
-                   coalesce(r.schemaName, '') AS schemaName,
-                   coalesce(r.packageName, '') AS packageName,
-                   coalesce(r.path, '') AS path,
-                   coalesce(r.extension, '') AS extension,
-                   coalesce(r.repoName, '') AS repoName,
-                   coalesce(r.repoFilePath, '') AS repoFilePath
+            WHERE r.type = 'SQL_SCRIPT'
+            OPTIONAL MATCH (s:Step)-[:INVOKES]->(r)
+            RETURN r.name AS name, collect(DISTINCT s.name) AS step_names
         """
         
         # Execute queries against KG
@@ -247,11 +237,7 @@ class DBStateGraphIntegrator:
                         name=record['name'],
                         resource_type=record['type'],
                         schema_name=record['schemaName'],
-                        package_name=record['packageName'],
-                        path=record['path'],
-                        extension=record['extension'],
-                        repo_name=record['repoName'],
-                        repo_file_path=record['repoFilePath']
+                        package_name=record['packageName']
                     ))
                 
                 # Scan for SQL files
@@ -260,13 +246,8 @@ class DBStateGraphIntegrator:
                 for record in result:
                     sql_files.append(ResourceInfo(
                         name=record['name'],
-                        resource_type=record['type'],
-                        schema_name=record['schemaName'],
-                        package_name=record['packageName'],
-                        path=record['path'],
-                        extension=record['extension'],
-                        repo_name=record['repoName'],
-                        repo_file_path=record['repoFilePath']
+                        resource_type='SQL_SCRIPT',
+                        step_names=list(record['step_names'] or [])
                     ))
                 
         except Exception as e:
@@ -328,7 +309,7 @@ class DBStateGraphIntegrator:
                     # Aggregate data from all records
                     result.data = self._aggregate_query_results(records, query_type)
                     
-                    logger.debug(f"  ✓ Found data for {resource.name} in dbstategraph")
+                    logger.info(f"  ✓ Found data for {resource.name} in dbstategraph")
                 else:
                     result.found = False
                     result.query_success = True
@@ -485,121 +466,142 @@ class DBStateGraphIntegrator:
         return results
     
     # =========================================================================
-    # PART 3: STORE IN KG (PLACEHOLDER)
+    # PART 3: ORCHESTRATE AND STORE IN KG
     # =========================================================================
-    
-    def store_in_kg(self, query_results: Dict[str, List[DBStateQueryResult]]) -> Dict[str, Any]:
+
+    def store_in_kg(
+        self,
+        query_results: Dict[str, List[DBStateQueryResult]],
+        procedures: List[ResourceInfo],
+        sql_files: List[ResourceInfo],
+    ) -> Dict[str, Any]:
         """
-        Part 3: Orchestrate and store the dbstategraph data in our KG.
-        
-        TODO: This is a placeholder. Implementation depends on the final KG data model.
-        
-        Current placeholder behavior:
-        - Logs the results that would be stored
-        - Returns summary statistics
-        
-        Future implementation should:
-        - Create new nodes/relationships based on the data model
-        - Update existing Resource nodes with enriched data
-        - Create links to new entity types from dbstategraph
-        
-        Args:
-            query_results: Dictionary containing procedure and SQL file query results
-            
-        Returns:
-            Dictionary with storage statistics
+        Part 3: Orchestrate dbstategraph data into the KG.
+
+        Three works executed per SQL_SCRIPT resource that was found in dbstategraph:
+          Work 1 - Extract procedures via SqlFile -[:CALLS]-> Procedure from dbstate.
+          Work 2 - In KG: Step -[:INVOKES]-> Resource(PROCEDURE) for every Step that
+                   already invokes the parent SQL_SCRIPT (same rel shape as class loader).
+          Work 3 - In KG: Resource(SQL_SCRIPT) -[:INVOKES]-> Resource(PROCEDURE)
+                   (same rel shape as the Step->Procedure INVOKES pattern).
         """
         logger.info("=" * 80)
-        logger.info("PART 3: Storing DBStateGraph Data in KG (PLACEHOLDER)")
+        logger.info("PART 3: Orchestrating DBStateGraph Data into KG")
         logger.info("=" * 80)
-        
-        # Statistics for what would be stored
+
         stats = {
-            'procedures_to_enrich': 0,
-            'sql_files_to_enrich': 0,
-            'total_tables_referenced': set(),
-            'total_statements_found': 0,
+            'procedures_extracted_from_sql_files': 0,
+            'step_invokes_procedure_created': 0,
+            'sql_invokes_procedure_created': 0,
             'skipped_not_found': 0,
-            'skipped_error': 0
+            'skipped_error': 0,
         }
-        
-        # Process procedure results
-        logger.info("  Processing procedure results for storage...")
-        for result in query_results.get('procedures', []):
-            if not result.query_success or not result.found:
-                if not result.found:
-                    stats['skipped_not_found'] += 1
-                else:
-                    stats['skipped_error'] += 1
-                continue
-            
-            stats['procedures_to_enrich'] += 1
-            
-            # Extract data that would be stored
-            if result.data:
-                tables = result.data.get('tables_accessed', [])
-                if isinstance(tables, list):
-                    stats['total_tables_referenced'].update(tables)
-                
-                statements = result.data.get('statements', [])
-                if isinstance(statements, list):
-                    stats['total_statements_found'] += len(statements)
-            
-            # TODO: Implement actual storage
-            # Example Cypher that might be used:
-            # MATCH (r:Resource {name: $name, type: 'PROCEDURE'})
-            # SET r.tablesAccessed = $tables,
-            #     r.dbstateEnriched = true,
-            #     r.dbstateEnrichedAt = datetime()
-            # WITH r
-            # UNWIND $tables AS tableName
-            # MERGE (t:Table {name: tableName})
-            # MERGE (r)-[:ACCESSES]->(t)
-        
-        # Process SQL file results
-        logger.info("  Processing SQL file results for storage...")
-        for result in query_results.get('sql_files', []):
-            if not result.query_success or not result.found:
-                if not result.found:
-                    stats['skipped_not_found'] += 1
-                else:
-                    stats['skipped_error'] += 1
-                continue
-            
-            stats['sql_files_to_enrich'] += 1
-            
-            # Extract data that would be stored
-            if result.data:
-                statements = result.data.get('statements', [])
-                if isinstance(statements, list):
-                    stats['total_statements_found'] += len(statements)
-                    # Extract table references from statements
-                    for stmt in statements:
-                        if isinstance(stmt, dict):
-                            tables = stmt.get('tables', [])
-                            if isinstance(tables, list):
-                                stats['total_tables_referenced'].update(tables)
-            
-            # TODO: Implement actual storage
-            # Similar pattern to procedures above
-        
-        # Convert set to count for JSON serialization
-        stats['total_tables_referenced'] = len(stats['total_tables_referenced'])
-        
-        # Log placeholder summary
+
+        # name -> ResourceInfo lookup so we can fetch step_names per sql file
+        sql_file_map: Dict[str, ResourceInfo] = {r.name: r for r in sql_files}
+
+        logger.info("  Processing SQL file results...")
+
+        with self.driver.session(database=self.kg_database) as session:
+            for result in query_results.get('sql_files', []):
+                if not result.query_success or not result.found:
+                    stats['skipped_not_found' if not result.found else 'skipped_error'] += 1
+                    continue
+
+                sql_name = result.resource_name
+                sql_resource = sql_file_map.get(sql_name)
+                if not sql_resource:
+                    logger.warning(f"  ⚠️  No ResourceInfo for '{sql_name}' — skipping")
+                    continue
+
+                # Work 1: pull procedures from the CALLS list returned by the query
+                raw_procs = result.data.get('procedures_called', []) or []
+                # filter out nulls that Neo4j returns when OPTIONAL MATCH finds nothing
+                called_procs = [p for p in raw_procs if p and p.get('name')]
+
+                if not called_procs:
+                    logger.debug(f"  '{sql_name}' has no CALLS->Procedure in dbstategraph")
+                    continue
+
+                logger.info(
+                    f"  '{sql_name}' calls {len(called_procs)} procedure(s): "
+                    f"{[p['name'] for p in called_procs]}"
+                )
+                stats['procedures_extracted_from_sql_files'] += len(called_procs)
+
+                step_names = sql_resource.step_names  # Steps that INVOKES this SQL file in KG
+
+                for proc_info in called_procs:
+                    proc_name   = proc_info.get('name', '')
+                    schema_name = proc_info.get('owner', '') or ''
+                    proc_type   = proc_info.get('type', 'PROCEDURE') or 'PROCEDURE'
+                    db_type     = ''   # not surfaced via sql_file CALLS in dbstategraph
+                    package_name = ''
+
+                    resource_id = (
+                        f"RESOURCE_{proc_type}_{schema_name}_{proc_name}"
+                        .replace(' ', '_').upper()
+                    )
+
+                    # Ensure Resource(PROCEDURE) node exists in KG
+                    session.run(
+                        """
+                        MERGE (r:Resource {name: $name, type: $rtype})
+                        ON CREATE SET r.id         = $resourceId,
+                                      r.enabled    = true,
+                                      r.schemaName = $schemaName
+                        ON MATCH SET  r.schemaName = COALESCE(r.schemaName, $schemaName)
+                        """,
+                        name=proc_name, rtype=proc_type, resourceId=resource_id,
+                        schemaName=schema_name,
+                    )
+
+                    # Work 2: Step -[:INVOKES {resourceName, databaseType, schemaName,
+                    #                          packageName, confidence}]-> Resource(PROCEDURE)
+                    for step_name in step_names:
+                        session.run(
+                            """
+                            MATCH (s:Step     {name: $stepName})
+                            MATCH (r:Resource {name: $resourceName, type: $rtype})
+                            MERGE (s)-[rel:INVOKES {resourceName: $resourceName}]->(r)
+                            SET rel.databaseType = $dbType,
+                                rel.schemaName   = $schemaName,
+                                rel.packageName  = $packageName,
+                                rel.confidence   = 'HIGH'
+                            """,
+                            stepName=step_name, resourceName=proc_name, rtype=proc_type,
+                            dbType=db_type, schemaName=schema_name, packageName=package_name,
+                        )
+                        stats['step_invokes_procedure_created'] += 1
+                        logger.debug(f"    Step '{step_name}' -[:INVOKES]-> '{proc_name}'")
+
+                    # Work 3: Resource(SQL_SCRIPT) -[:INVOKES {resourceName, databaseType,
+                    #                               schemaName, packageName, confidence}]-> Resource(PROCEDURE)
+                    session.run(
+                        """
+                        MATCH (sql:Resource  {name: $sqlName,  type: 'SQL_SCRIPT'})
+                        MATCH (proc:Resource {name: $procName, type: $procType})
+                        MERGE (sql)-[rel:INVOKES {resourceName: $procName}]->(proc)
+                        SET rel.databaseType = $dbType,
+                            rel.schemaName   = $schemaName,
+                            rel.packageName  = $packageName,
+                            rel.confidence   = 'HIGH'
+                        """,
+                        sqlName=sql_name, procName=proc_name, procType=proc_type,
+                        dbType=db_type, schemaName=schema_name, packageName=package_name,
+                    )
+                    stats['sql_invokes_procedure_created'] += 1
+                    logger.debug(f"    Resource '{sql_name}' -[:INVOKES]-> '{proc_name}'")
+
         logger.info("")
-        logger.info("  PLACEHOLDER Storage Summary:")
-        logger.info(f"    Procedures to enrich:    {stats['procedures_to_enrich']}")
-        logger.info(f"    SQL files to enrich:     {stats['sql_files_to_enrich']}")
-        logger.info(f"    Total tables referenced: {stats['total_tables_referenced']}")
-        logger.info(f"    Total statements found:  {stats['total_statements_found']}")
-        logger.info(f"    Skipped (not found):     {stats['skipped_not_found']}")
-        logger.info(f"    Skipped (errors):        {stats['skipped_error']}")
+        logger.info("  Storage Summary:")
+        logger.info(f"    Procedures extracted from SQL files:  {stats['procedures_extracted_from_sql_files']}")
+        logger.info(f"    Step -[:INVOKES]-> Procedure created: {stats['step_invokes_procedure_created']}")
+        logger.info(f"    SQL  -[:INVOKES]-> Procedure created: {stats['sql_invokes_procedure_created']}")
+        logger.info(f"    Skipped (not found):                  {stats['skipped_not_found']}")
+        logger.info(f"    Skipped (errors):                     {stats['skipped_error']}")
         logger.info("")
-        logger.info("  ⚠️  NOTE: Actual storage not implemented yet.")
-        logger.info("       Data model design needed before implementation.")
-        logger.info("")
-        
+
         return stats
     
     # =========================================================================
@@ -654,9 +656,9 @@ class DBStateGraphIntegrator:
                 'sql_files_found': sum(1 for r in query_results['sql_files'] if r.found)
             }
             
-            # Part 3: Store in KG (placeholder)
+            # Part 3: Orchestrate into KG
             part3_start = time.time()
-            storage_stats = self.store_in_kg(query_results)
+            storage_stats = self.store_in_kg(query_results, procedures, sql_files)
             results['timing']['part3_store_seconds'] = time.time() - part3_start
             results['storage_stats'] = storage_stats
             
