@@ -2686,6 +2686,28 @@ class Neo4jLoader:
             session.run("MATCH (n) DETACH DELETE n")
         logger.info(" Database cleared")
     
+    def apply_resource_secondary_labels(self):
+        """Add a type-specific secondary label to every Resource node so nodes surface as e.g. :Resource:Table."""
+        logger.info("  Applying secondary labels to Resource nodes...")
+        with self.driver.session(database=self.database) as session:
+            session.run("""
+                MATCH (r:Resource)
+                FOREACH (_ IN CASE WHEN r.type = 'TABLE'         THEN [1] ELSE [] END | SET r:Table)
+                FOREACH (_ IN CASE WHEN r.type = 'PROCEDURE'     THEN [1] ELSE [] END | SET r:Procedure)
+                FOREACH (_ IN CASE WHEN r.type = 'FUNCTION'      THEN [1] ELSE [] END | SET r:Function)
+                FOREACH (_ IN CASE WHEN r.type = 'SQL_SCRIPT'    THEN [1] ELSE [] END | SET r:SqlFile)
+                FOREACH (_ IN CASE WHEN r.type = 'SHELL_SCRIPT'  THEN [1] ELSE [] END | SET r:ShellScript)
+                FOREACH (_ IN CASE WHEN r.type = 'VIEW'          THEN [1] ELSE [] END | SET r:View)
+                FOREACH (_ IN CASE WHEN r.type = 'PACKAGE'       THEN [1] ELSE [] END | SET r:Package)
+                FOREACH (_ IN CASE WHEN r.type = 'TRIGGER'       THEN [1] ELSE [] END | SET r:Trigger)
+                FOREACH (_ IN CASE WHEN r.type = 'SEQUENCE'      THEN [1] ELSE [] END | SET r:Sequence)
+                FOREACH (_ IN CASE WHEN r.type = 'INDEX'         THEN [1] ELSE [] END | SET r:Index)
+                FOREACH (_ IN CASE WHEN r.type = 'SYNONYM'       THEN [1] ELSE [] END | SET r:Synonym)
+                FOREACH (_ IN CASE WHEN r.type = 'FILE'          THEN [1] ELSE [] END | SET r:File)
+                FOREACH (_ IN CASE WHEN r.type = 'DATABASE_LINK' THEN [1] ELSE [] END | SET r:DatabaseLink)
+            """)
+        logger.info("  ✓ Secondary labels applied")
+
     def get_statistics(self):
         """Get database statistics"""
         with self.driver.session(database=self.database) as session:
@@ -2765,6 +2787,10 @@ def main():
                     logger.warning(f"    DB State Graph integration failed (non-fatal): {dbstate_err}")
             else:
                 logger.info("    Skipped (not enabled in configuration)")
+
+            # Step 6: Apply secondary labels to all Resource nodes
+            logger.info("\n🏷️  Step 6: Applying secondary labels to Resource nodes...")
+            loader.apply_resource_secondary_labels()
 
             logger.info("\n" + "=" * 70)
             logger.info(" LOADING COMPLETE!")
